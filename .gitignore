@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Environment files (contain secrets!)
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# macOS
+.DS_Store
+
+# Credentials (NEVER commit these)
+*.pem
+*.key
+*.crt
+credentials/
+secrets/
+serviceAccountKey.json
+firebase-admin*.json
+
+# Database exports (may contain user data)
+exports/
+backups/
+*.sql.gz
+*.dump
+
+# Terraform state (if used)
+*.tfstate
+*.tfstate.*
+.terraform/
+
+# PM2
+.pm2/
+
+# Claude Code local settings
+.claude/settings.local.json
