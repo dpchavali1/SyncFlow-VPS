@@ -24,7 +24,7 @@ export function generateToken(
   return jwt.sign(
     { ...payload, type },
     config.jwt.secret,
-    { expiresIn }
+    { expiresIn } as jwt.SignOptions
   );
 }
 

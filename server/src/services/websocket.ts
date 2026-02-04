@@ -17,10 +17,7 @@ interface SubscriptionMessage {
 }
 
 interface BroadcastMessage {
-  type: 'message_added' | 'message_updated' | 'message_deleted' |
-        'contact_added' | 'contact_updated' | 'contact_deleted' |
-        'call_added' | 'device_added' | 'device_removed' |
-        'outgoing_message' | 'call_request';
+  type: string;
   data: any;
 }
 
