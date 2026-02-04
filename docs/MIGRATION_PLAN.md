@@ -305,6 +305,28 @@ FOR EACH ROW EXECUTE FUNCTION notify_message_change();
 
 ---
 
+## Known Issues to Fix in Migration
+
+### Multiple Anonymous User IDs (Bandwidth Waste)
+
+**Current Problem:**
+- Pairing flow creates separate anonymous Firebase users for Android, macOS, and sync services
+- Contacts/call history get written to orphaned user IDs (e.g., `4hHtl1LnhahuI5961szhYFQhYs43`)
+- Firebase listeners activate on abandoned user paths, wasting bandwidth
+
+**Bug Location:**
+- `DesktopSyncService.kt:401-421` - `getCurrentUserId()` creates fallback anonymous users
+- `FirebaseService.swift:461-472` - macOS pairing creates separate anonymous user
+- `DesktopIntegrationScreen.kt` - Android pairing creates another anonymous user
+
+**Fix in VPS:**
+- Single JWT token issued during pairing contains the correct user ID
+- No anonymous auth fallback - all operations require valid JWT
+- Contacts/call history sync uses the token's user ID, not a separate auth state
+- Eliminates orphaned user data paths entirely
+
+---
+
 ## Rollback Plan
 
 1. Keep Firebase running for 30 days post-migration
