@@ -1,0 +1,14 @@
+<resources>
+    <string name="app_name">SyncFlow</string>
+    <string name="conversations_title">SyncFlow Messages</string>
+    <string name="send_sms_title">New Message</string>
+
+    <!-- AdMob App ID -->
+    <string name="admob_app_id" translatable="false">ca-app-pub-4962910048695842~4209408906</string>
+
+    <!-- Support URLs -->
+    <string name="privacy_policy_url" translatable="false">https://syncflow.app/privacy</string>
+    <string name="terms_of_service_url" translatable="false">https://syncflow.app/terms</string>
+    <string name="support_email" translatable="false">syncflow.contact@gmail.com</string>
+    <string name="support_email_subject" translatable="false">[SyncFlow Android] Support Request</string>
+</resources>

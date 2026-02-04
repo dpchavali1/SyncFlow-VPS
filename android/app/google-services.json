@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "947940485830",
+    "firebase_url": "https://syncflow-6980e-default-rtdb.firebaseio.com",
+    "project_id": "syncflow-6980e",
+    "storage_bucket": "syncflow-6980e.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:947940485830:android:25521185967af21e2845c7",
+        "android_client_info": {
+          "package_name": "com.phoneintegration.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBPPLJNGuVhnlNfNY9eFm5z80xIGbzSmbE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

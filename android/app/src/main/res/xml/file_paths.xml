@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Allow MMS sending from app's private cache directory -->
+    <cache-path
+        name="mms"
+        path="." />
+</paths>
