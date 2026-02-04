@@ -1,0 +1,52 @@
+{
+  "name": "@syncflow/vps-client",
+  "version": "1.0.0",
+  "description": "SyncFlow VPS client library for web applications",
+  "main": "dist/index.js",
+  "module": "dist/index.esm.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.esm.js",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc && tsc -p tsconfig.esm.json",
+    "dev": "tsc -w",
+    "lint": "eslint src --ext .ts,.tsx",
+    "typecheck": "tsc --noEmit"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dpchavali1/SyncFlow-VPS.git",
+    "directory": "clients/web"
+  },
+  "keywords": [
+    "syncflow",
+    "sms",
+    "phone",
+    "sync",
+    "websocket",
+    "realtime"
+  ],
+  "author": "SyncFlow",
+  "license": "MIT",
+  "peerDependencies": {
+    "react": "^17.0.0 || ^18.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "typescript": "^5.3.0"
+  }
+}
