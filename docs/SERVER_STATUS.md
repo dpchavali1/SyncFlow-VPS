@@ -12,6 +12,44 @@
 | **Hostname** | syncflow-prod-1 |
 | **Monthly Cost** | $12.59 |
 
+## API Endpoints
+
+**Base URL:** `http://5.78.188.206` (will be `https://api.sfweb.app` once DNS propagates)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/health` | GET | Health check |
+| `/api/auth/anonymous` | POST | Create anonymous user |
+| `/api/auth/pair/initiate` | POST | Start device pairing |
+| `/api/auth/pair/status/:token` | GET | Check pairing status |
+| `/api/auth/pair/complete` | POST | Android approves pairing |
+| `/api/auth/pair/redeem` | POST | Desktop gets credentials |
+| `/api/auth/refresh` | POST | Refresh access token |
+| `/api/auth/me` | GET | Get current user info |
+| `/api/messages` | GET | Get messages (paginated) |
+| `/api/messages/sync` | POST | Sync messages from device |
+| `/api/messages/send` | POST | Queue message to send |
+| `/api/messages/outgoing` | GET | Get pending outgoing messages |
+| `/api/contacts` | GET | Get contacts |
+| `/api/contacts/sync` | POST | Sync contacts from device |
+| `/api/calls` | GET | Get call history |
+| `/api/calls/sync` | POST | Sync call history |
+| `/api/calls/request` | POST | Request call from desktop |
+| `/api/devices` | GET | Get user devices |
+| `/api/devices/sims` | GET/POST | Get/register SIM cards |
+
+## WebSocket
+
+**URL:** `ws://5.78.188.206:3001?token=JWT_TOKEN`
+
+**Events:**
+- `subscribe` / `unsubscribe` - Subscribe to channels
+- `message_added` / `message_updated` / `message_deleted`
+- `contact_added` / `contact_updated` / `contact_deleted`
+- `call_added`
+- `device_added` / `device_removed`
+- `outgoing_message`
+
 ## Access
 
 ```bash
@@ -22,90 +60,61 @@ ssh syncflow@5.78.188.206
 
 | Service | User | Password/Details |
 |---------|------|------------------|
-| SSH | syncflow | Key-based auth (no password) |
+| SSH | syncflow | Key-based auth |
 | PostgreSQL | syncflow | `bQkmT6UkSHAm5XomNekh25ma/otf51D4` |
 | PostgreSQL DB | syncflow_prod | Port 5432 (localhost only) |
 | Redis | - | `x46emQJ3HsK9zmeVH5Z55Dyks86feeJV` |
 
 ## Services Status
 
-| Service | Status | Port | Notes |
-|---------|--------|------|-------|
-| PostgreSQL 16 | Running | 5432 | 40 tables created |
-| Redis 7 | Running | 6379 | Password protected |
-| Nginx | Running | 80 | Reverse proxy configured |
-| Node.js 20 | Installed | - | v20.20.0 via nvm |
-| PM2 | Installed | - | Auto-start on boot |
-| Firewall (UFW) | Active | 22, 80, 443 | SSH + HTTP + HTTPS |
-| Fail2ban | Active | - | Brute force protection |
+| Service | Status | Port |
+|---------|--------|------|
+| PostgreSQL 16 | Running | 5432 |
+| Redis 7 | Running | 6379 |
+| Nginx | Running | 80, 443 |
+| Node.js API | Running (PM2) | 3000 |
+| WebSocket | Running (PM2) | 3001 |
+| Firewall (UFW) | Active | 22, 80, 443 |
+
+## PM2 Commands
+
+```bash
+pm2 status              # Check status
+pm2 logs syncflow-api   # View logs
+pm2 restart syncflow-api # Restart
+pm2 reload syncflow-api  # Zero-downtime reload
+```
 
 ## Domain Setup
 
-| Domain | Status | Notes |
-|--------|--------|-------|
-| `api.sfweb.app` | DNS Pending | A record added in Vercel, waiting for propagation |
+| Domain | Status |
+|--------|--------|
+| `api.sfweb.app` | DNS pending propagation |
 
-### Check DNS Propagation
+### Once DNS Works
 ```bash
-nslookup api.sfweb.app 8.8.8.8
-```
-
-### Once DNS Works - Add SSL
-```bash
-ssh syncflow@5.78.188.206
 sudo certbot --nginx -d api.sfweb.app
 ```
 
 ## Test Commands
 
 ```bash
-# Health check via IP
+# Health check
 curl http://5.78.188.206/health
 
-# Health check via domain (once DNS works)
-curl http://api.sfweb.app/health
+# Create anonymous user
+curl -X POST http://5.78.188.206/api/auth/anonymous
 
-# PostgreSQL connection
-PGPASSWORD='bQkmT6UkSHAm5XomNekh25ma/otf51D4' psql -U syncflow -h localhost -d syncflow_prod
-
-# Redis connection
-redis-cli -a 'x46emQJ3HsK9zmeVH5Z55Dyks86feeJV' ping
+# Get user info (with token)
+curl -H "Authorization: Bearer TOKEN" http://5.78.188.206/api/auth/me
 ```
 
-## Nginx Configuration
+## Deployment
 
-Located at: `/etc/nginx/sites-available/syncflow`
-
-- `/` → Proxy to Node.js API (port 3000)
-- `/ws` → Proxy to WebSocket server (port 3001)
-- `/health` → Returns "OK"
-
-## Database
-
-Schema loaded with 40 tables. See `server/schema.sql` for structure.
-
-Key tables:
-- `users` - User accounts
-- `user_messages` - SMS/MMS messages
-- `user_contacts` - Contact directory
-- `user_call_history` - Call logs
-- `user_devices` - Paired devices
-- `user_e2ee_keys` - E2EE key backups
-- `pairing_requests` - Device pairing tokens
-
-## Next Steps
-
-1. [ ] Wait for DNS propagation (`api.sfweb.app`)
-2. [ ] Add SSL certificate with Certbot
-3. [ ] Build Node.js API server
-4. [ ] Deploy and test
-5. [ ] Update client apps
-
-## Backup
-
-Daily PostgreSQL backups configured via cron (3 AM UTC):
 ```bash
-/home/syncflow/backup.sh
+cd ~/syncflow-api
+git pull
+cd server
+npm run build
+pm2 reload syncflow-api
 ```
-
-Backups stored in: `/home/syncflow/backups/`
