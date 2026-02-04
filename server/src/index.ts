@@ -1,0 +1,129 @@
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import { config } from './config';
+import { pool, checkDatabaseHealth } from './services/database';
+import { redis, checkRedisHealth } from './services/redis';
+import { createWebSocketServer } from './services/websocket';
+
+// Import routes
+import authRoutes from './routes/auth';
+import messagesRoutes from './routes/messages';
+import contactsRoutes from './routes/contacts';
+import callsRoutes from './routes/calls';
+import devicesRoutes from './routes/devices';
+
+const app = express();
+
+// Security middleware
+app.use(helmet({
+  contentSecurityPolicy: false, // Disable for API
+}));
+
+// CORS
+app.use(cors({
+  origin: config.corsOrigins,
+  credentials: true,
+}));
+
+// Body parsing
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+// Request logging (simple)
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    if (config.nodeEnv === 'development' || duration > 1000) {
+      console.log(`${req.method} ${req.path} ${res.statusCode} ${duration}ms`);
+    }
+  });
+  next();
+});
+
+// Health check endpoint
+app.get('/health', async (req, res) => {
+  const dbHealthy = await checkDatabaseHealth();
+  const redisHealthy = await checkRedisHealth();
+
+  const status = dbHealthy && redisHealthy ? 200 : 503;
+
+  res.status(status).json({
+    status: status === 200 ? 'healthy' : 'unhealthy',
+    timestamp: new Date().toISOString(),
+    services: {
+      database: dbHealthy ? 'up' : 'down',
+      redis: redisHealthy ? 'up' : 'down',
+    },
+  });
+});
+
+// API routes
+app.use('/api/auth', authRoutes);
+app.use('/api/messages', messagesRoutes);
+app.use('/api/contacts', contactsRoutes);
+app.use('/api/calls', callsRoutes);
+app.use('/api/devices', devicesRoutes);
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
+// Error handler
+app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// Start servers
+async function start() {
+  try {
+    // Test database connection
+    console.log('Connecting to PostgreSQL...');
+    await checkDatabaseHealth();
+    console.log('PostgreSQL connected');
+
+    // Test Redis connection
+    console.log('Connecting to Redis...');
+    await checkRedisHealth();
+    console.log('Redis connected');
+
+    // Start HTTP server
+    app.listen(config.port, () => {
+      console.log(`HTTP server listening on port ${config.port}`);
+    });
+
+    // Start WebSocket server
+    createWebSocketServer(config.wsPort);
+    console.log(`WebSocket server listening on port ${config.wsPort}`);
+
+    console.log(`\nSyncFlow API Server started in ${config.nodeEnv} mode`);
+    console.log(`- HTTP:      http://localhost:${config.port}`);
+    console.log(`- WebSocket: ws://localhost:${config.wsPort}`);
+    console.log(`- Health:    http://localhost:${config.port}/health`);
+
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('SIGTERM received, shutting down...');
+  await pool.end();
+  redis.disconnect();
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('SIGINT received, shutting down...');
+  await pool.end();
+  redis.disconnect();
+  process.exit(0);
+});
+
+// Start the server
+start();
