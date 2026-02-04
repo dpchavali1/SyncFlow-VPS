@@ -1,0 +1,62 @@
+## **🔒 Security & Permission Documentation**
+
+### **Why We Need These Permissions**
+
+**SyncFlow** is a legitimate SMS/MMS messaging app that syncs your phone messages with desktop applications. Here's why each permission is required:
+
+#### **SMS/MMS Permissions (READ_SMS, SEND_SMS, etc.)**
+- ✅ **Purpose**: Read and send text messages to sync with your desktop
+- ✅ **Usage**: Only for message synchronization, never shared externally
+- ✅ **Privacy**: Messages are end-to-end encrypted before syncing
+
+#### **Phone Permissions (READ_PHONE_STATE, CALL_PHONE, etc.)**
+- ✅ **Purpose**: Handle calls and phone number identification
+- ✅ **Usage**: For call routing to desktop and contact matching
+- ✅ **Privacy**: Phone numbers are hashed and never stored in plain text
+
+#### **Contact Permissions (READ_CONTACTS)**
+- ✅ **Purpose**: Match phone numbers to contact names
+- ✅ **Usage**: Display contact names instead of just phone numbers
+- ✅ **Privacy**: Contacts are cached locally, never uploaded
+
+#### **Audio/Microphone (RECORD_AUDIO)**
+- ✅ **Purpose**: Voice calling between phone and desktop
+- ✅ **Usage**: WebRTC audio streaming for calls
+- ✅ **Privacy**: Audio is encrypted during transmission
+
+#### **Camera (CAMERA)**
+- ✅ **Purpose**: Video calling and MMS photo attachments
+- ✅ **Usage**: Only when explicitly started by user
+- ✅ **Privacy**: Media is encrypted and temporarily cached
+
+#### **Storage (READ_EXTERNAL_STORAGE)**
+- ✅ **Purpose**: Access photos/videos for MMS attachments
+- ✅ **Usage**: File picker for attaching media to messages
+- ✅ **Privacy**: Files are encrypted before sending
+
+#### **Internet (INTERNET)**
+- ✅ **Purpose**: Sync messages with Firebase cloud storage
+- ✅ **Usage**: Secure HTTPS connections only
+- ✅ **Privacy**: All data is encrypted in transit and at rest
+
+### **🔐 Security Measures**
+
+- **End-to-End Encryption**: All message data encrypted before cloud storage
+- **No Data Collection**: We don't sell or share your personal data
+- **Open Source**: Code is auditable and transparent
+- **Regular Security Audits**: Third-party security reviews completed
+- **Minimal Permissions**: Each permission serves a specific, documented purpose
+
+### **📱 App Behavior**
+
+- **No Background Data Collection**: Only syncs when you use the app
+- **User-Controlled**: All features require explicit user permission
+- **Transparent**: Clear indicators when data is being synced
+- **Secure by Default**: Conservative privacy settings enabled
+
+---
+
+**If antivirus software still flags this app, please:**
+1. Submit the app for review with your antivirus provider
+2. Reference this documentation explaining legitimate permissions
+3. Contact our support team for additional verification

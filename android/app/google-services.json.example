@@ -1,0 +1,20 @@
+{
+  "project_info": {
+    "project_id": "your-project-id",
+    "project_number": "YOUR_PROJECT_NUMBER"
+  },
+  "client": [
+    {
+      "client_info": {
+        "android_client_info": {
+          "package_name": "com.phoneintegration.app"
+        }
+      },
+      "api_key": [
+        {
+          "current_key": "YOUR_ANDROID_API_KEY_HERE"
+        }
+      ]
+    }
+  ]
+}

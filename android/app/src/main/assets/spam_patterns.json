@@ -1,0 +1,370 @@
+[
+  {
+    "id": "lottery_winner",
+    "pattern": "(you\\s*(have\\s*)?won|winner|lottery|prize|jackpot|lucky\\s*draw)",
+    "isRegex": true,
+    "threatType": "LOTTERY_SCAM",
+    "confidence": 0.85,
+    "description": "Lottery/Prize scam detected"
+  },
+  {
+    "id": "claim_prize",
+    "pattern": "claim\\s*(your)?\\s*(prize|reward|gift|money|cash)",
+    "isRegex": true,
+    "threatType": "LOTTERY_SCAM",
+    "confidence": 0.85,
+    "description": "Prize claim scam detected"
+  },
+  {
+    "id": "kyc_scam",
+    "pattern": "(kyc|pan|aadhar|aadhaar)\\s*(update|verify|expire|link|mandatory)",
+    "isRegex": true,
+    "threatType": "BANKING_FRAUD",
+    "confidence": 0.9,
+    "description": "KYC/Banking fraud detected"
+  },
+  {
+    "id": "account_blocked",
+    "pattern": "(account|card|bank).{0,20}(block|suspend|freeze|deactivate|close)",
+    "isRegex": true,
+    "threatType": "BANKING_FRAUD",
+    "confidence": 0.85,
+    "description": "Account suspension scam detected"
+  },
+  {
+    "id": "verify_immediately",
+    "pattern": "verify\\s*(immediately|now|urgent|within)",
+    "isRegex": true,
+    "threatType": "PHISHING",
+    "confidence": 0.8,
+    "description": "Urgent verification phishing detected"
+  },
+  {
+    "id": "otp_share",
+    "pattern": "(share|send|give|tell)\\s*(your)?\\s*(otp|pin|password|code)",
+    "isRegex": true,
+    "threatType": "OTP_THEFT",
+    "confidence": 0.95,
+    "description": "OTP theft attempt detected"
+  },
+  {
+    "id": "instant_loan",
+    "pattern": "(instant|quick|fast|easy)\\s*(loan|credit|cash|money).{0,30}(approv|sanction|disburse)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.75,
+    "description": "Loan scam detected"
+  },
+  {
+    "id": "pre_approved_loan",
+    "pattern": "pre.?approved\\s*(loan|credit|offer)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.7,
+    "description": "Pre-approved loan scam detected"
+  },
+  {
+    "id": "work_from_home",
+    "pattern": "(work\\s*from\\s*home|earn\\s*from\\s*home).{0,30}(\\d+k|\\$|₹|rs)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.8,
+    "description": "Work from home scam detected"
+  },
+  {
+    "id": "earn_daily",
+    "pattern": "earn\\s*(daily|weekly|monthly)\\s*(\\d+|\\$|₹|rs)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.8,
+    "description": "Earnings scam detected"
+  },
+  {
+    "id": "crypto_scam",
+    "pattern": "(bitcoin|crypto|trading).{0,30}(profit|earn|double|guaranteed)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.85,
+    "description": "Crypto/Investment scam detected"
+  },
+  {
+    "id": "guaranteed_returns",
+    "pattern": "(guaranteed|assured|fixed)\\s*(return|profit|income|earning)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.8,
+    "description": "Guaranteed returns scam detected"
+  },
+  {
+    "id": "click_link_urgent",
+    "pattern": "(click|tap|visit|open)\\s*(the)?\\s*(link|url|below).{0,30}(urgent|immediate|expire)",
+    "isRegex": true,
+    "threatType": "PHISHING",
+    "confidence": 0.85,
+    "description": "Urgent link phishing detected"
+  },
+  {
+    "id": "dear_customer_generic",
+    "pattern": "dear\\s*(customer|user|member|valued\\s*customer)",
+    "isRegex": true,
+    "threatType": "PHISHING",
+    "confidence": 0.5,
+    "description": "Generic greeting (possible phishing)"
+  },
+  {
+    "id": "dating_scam",
+    "pattern": "(lonely|single|girl|lady|woman|meet\\s*me).{0,30}(whatsapp|telegram|chat|call\\s*me)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.85,
+    "description": "Dating/Romance scam detected"
+  },
+  {
+    "id": "dating_greeting",
+    "pattern": "^(hey|hi|hello)\\s*(babe|handsome|sexy|cutie|gorgeous|sweetie|dear)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.85,
+    "description": "Dating spam greeting detected"
+  },
+  {
+    "id": "dating_domain",
+    "pattern": "(intimate|hookup|singles|flirt|naughty|affair|dating|match|romance)[a-z]*\\.(com|net|org|xyz|site|online|link)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.9,
+    "description": "Suspicious dating/adult domain"
+  },
+  {
+    "id": "dating_profile",
+    "pattern": "(check|see|view)\\s*(my|the)?\\s*(profile|photos|pics|picture)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.75,
+    "description": "Dating profile spam"
+  },
+  {
+    "id": "casual_greeting_link",
+    "pattern": "^(hey|hi|hii|heyy|yo)\\s*.{0,50}(http|www\\.|\\.[a-z]{2,4}/)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.8,
+    "description": "Casual greeting with suspicious link"
+  },
+  {
+    "id": "fake_delivery",
+    "pattern": "(package|parcel|delivery).{0,30}(fail|unable|reschedule|update\\s*address).{0,30}(click|link|http)",
+    "isRegex": true,
+    "threatType": "PHISHING",
+    "confidence": 0.85,
+    "description": "Fake delivery notification phishing"
+  },
+  {
+    "id": "political_campaign",
+    "pattern": "(vote\\s*for|support|elect|campaign|rally).{0,30}(2024|2025|2026|election)",
+    "isRegex": true,
+    "threatType": "PROMOTIONAL_SPAM",
+    "confidence": 0.7,
+    "description": "Political campaign spam"
+  },
+  {
+    "id": "political_party",
+    "pattern": "(bjp|congress|aap|tmc|dmk|shiv\\s*sena|ncp|jdu|rjd|sp\\s*party|bsp).{0,30}(vote|support|join|rally|campaign)",
+    "isRegex": true,
+    "threatType": "PROMOTIONAL_SPAM",
+    "confidence": 0.75,
+    "description": "Political party spam"
+  },
+  {
+    "id": "political_leader",
+    "pattern": "(pm\\s*modi|rahul\\s*gandhi|kejriwal|yogi|mamata|nitish).{0,30}(vote|support|rally)",
+    "isRegex": true,
+    "threatType": "PROMOTIONAL_SPAM",
+    "confidence": 0.7,
+    "description": "Political leader spam"
+  },
+  {
+    "id": "election_spam",
+    "pattern": "(election|polling|booth|candidate|manifesto|ballot).{0,30}(vote|support|join)",
+    "isRegex": true,
+    "threatType": "PROMOTIONAL_SPAM",
+    "confidence": 0.65,
+    "description": "Election spam"
+  },
+  {
+    "id": "election_keyword",
+    "pattern": "(election|elections|electoral|elect\\s)",
+    "isRegex": true,
+    "threatType": "PROMOTIONAL_SPAM",
+    "confidence": 0.6,
+    "description": "Election-related message"
+  },
+  {
+    "id": "voting_keyword",
+    "pattern": "(voting|vote\\s*for|vote\\s*now|cast.*vote|your\\s*vote)",
+    "isRegex": true,
+    "threatType": "PROMOTIONAL_SPAM",
+    "confidence": 0.65,
+    "description": "Voting-related spam"
+  },
+  {
+    "id": "usa_political_party",
+    "pattern": "(republican|democrat|gop|dnc|rnc|conservative|liberal|maga).{0,30}(vote|donate|support|join|campaign)",
+    "isRegex": true,
+    "threatType": "PROMOTIONAL_SPAM",
+    "confidence": 0.75,
+    "description": "US political party spam"
+  },
+  {
+    "id": "usa_political_leader",
+    "pattern": "(trump|biden|desantis|harris|pence|obama|clinton|bernie|sanders|pelosi|mcconnell).{0,30}(vote|support|donate|campaign|rally)",
+    "isRegex": true,
+    "threatType": "PROMOTIONAL_SPAM",
+    "confidence": 0.75,
+    "description": "US political leader spam"
+  },
+  {
+    "id": "usa_election",
+    "pattern": "(midterm|primary|general\\s*election|swing\\s*state|electoral|battleground).{0,30}(vote|donate|support)",
+    "isRegex": true,
+    "threatType": "PROMOTIONAL_SPAM",
+    "confidence": 0.7,
+    "description": "US election spam"
+  },
+  {
+    "id": "political_donation",
+    "pattern": "(donate|contribution|fundrais|pac|super\\s*pac).{0,30}(campaign|election|candidate|party)",
+    "isRegex": true,
+    "threatType": "PROMOTIONAL_SPAM",
+    "confidence": 0.7,
+    "description": "Political donation request spam"
+  },
+  {
+    "id": "political_action",
+    "pattern": "(take\\s*action|call\\s*your|contact\\s*your|write\\s*your).{0,20}(senator|congressman|representative|legislator)",
+    "isRegex": true,
+    "threatType": "PROMOTIONAL_SPAM",
+    "confidence": 0.65,
+    "description": "Political action spam"
+  },
+  {
+    "id": "political_urgency",
+    "pattern": "(critical|urgent|deadline|last\\s*chance|midnight).{0,30}(donate|contribution|vote|election)",
+    "isRegex": true,
+    "threatType": "PROMOTIONAL_SPAM",
+    "confidence": 0.7,
+    "description": "Urgent political spam"
+  },
+  {
+    "id": "suspicious_tld",
+    "pattern": "https?://[\\w.-]+\\.(tk|ml|ga|cf|gq|xyz|top|click|link|buzz|work|site|online|fun|icu|vip|win|club|store|shop|life|rest|fit|space|monster)",
+    "isRegex": true,
+    "threatType": "PHISHING",
+    "confidence": 0.75,
+    "description": "Suspicious domain TLD detected"
+  },
+  {
+    "id": "suspicious_domain_no_protocol",
+    "pattern": "[\\w-]+\\.(site|xyz|top|click|link|online|fun|icu|vip|club|tk|ml|ga|cf|gq)($|/|\\s)",
+    "isRegex": true,
+    "threatType": "PHISHING",
+    "confidence": 0.7,
+    "description": "Suspicious domain detected"
+  },
+  {
+    "id": "free_gift",
+    "pattern": "(free\\s*gift|gift\\s*card|voucher|coupon).{0,30}(click|claim|redeem)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.8,
+    "description": "Free gift scam detected"
+  },
+  {
+    "id": "insurance_scam",
+    "pattern": "(insurance|policy).{0,30}(expired|renew|claim|bonus).{0,30}(click|call|link)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.75,
+    "description": "Insurance scam detected"
+  },
+  {
+    "id": "tax_refund",
+    "pattern": "(tax|income\\s*tax|refund|itr).{0,30}(claim|pending|approved|credit)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.8,
+    "description": "Tax refund scam detected"
+  },
+  {
+    "id": "whatsapp_invite",
+    "pattern": "(join|add).{0,20}(whatsapp|telegram|group).{0,30}(link|click|http)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.7,
+    "description": "Suspicious group invite"
+  },
+  {
+    "id": "emi_bounce",
+    "pattern": "(emi|loan|payment).{0,20}(bounce|failed|overdue|default)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.65,
+    "description": "Fake EMI bounce notification"
+  },
+  {
+    "id": "sim_block",
+    "pattern": "(sim|mobile|number).{0,20}(block|deactivate|suspend).{0,30}(hour|today)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.85,
+    "description": "SIM block scam detected"
+  },
+  {
+    "id": "electricity_bill",
+    "pattern": "(electricity|power|bill).{0,20}(disconnect|cut|overdue).{0,30}(today|immediate)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.8,
+    "description": "Fake utility bill scam"
+  },
+  {
+    "id": "cashback_offer",
+    "pattern": "(cashback|reward|bonus).{0,20}(\\d+%|₹|rs).{0,30}(expire|today|now)",
+    "isRegex": true,
+    "threatType": "PROMOTIONAL_SPAM",
+    "confidence": 0.6,
+    "description": "Promotional cashback spam"
+  },
+  {
+    "id": "limited_offer",
+    "pattern": "(limited\\s*time|last\\s*day|ending\\s*soon|hurry).{0,30}(offer|sale|discount)",
+    "isRegex": true,
+    "threatType": "PROMOTIONAL_SPAM",
+    "confidence": 0.5,
+    "description": "Urgency-based promotional spam"
+  },
+  {
+    "id": "adult_content",
+    "pattern": "(hot\\s*girl|sexy|adult|dating|hookup|xxx)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.9,
+    "description": "Adult content spam"
+  },
+  {
+    "id": "customer_care_fake",
+    "pattern": "(customer\\s*care|helpline|support).{0,20}(\\+91|call|contact)\\s*\\d{10}",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.7,
+    "description": "Fake customer care number"
+  },
+  {
+    "id": "government_scheme",
+    "pattern": "(government|sarkari|pm|modi).{0,30}(scheme|yojana|loan|subsidy).{0,30}(apply|register|click)",
+    "isRegex": true,
+    "threatType": "SCAM",
+    "confidence": 0.8,
+    "description": "Fake government scheme"
+  }
+]
