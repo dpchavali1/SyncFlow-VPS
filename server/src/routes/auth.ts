@@ -10,9 +10,11 @@ import {
   registerDevice,
   verifyToken,
   generateToken,
+  getOrCreateUserByFirebaseUid,
 } from '../services/auth';
 import { authenticate } from '../middleware/auth';
 import { authRateLimit } from '../middleware/rateLimit';
+import { config } from '../config';
 
 const router = Router();
 
@@ -34,6 +36,47 @@ const redeemPairingSchema = z.object({
 
 const refreshTokenSchema = z.object({
   refreshToken: z.string().min(1),
+});
+
+const firebaseAuthSchema = z.object({
+  firebaseUid: z.string().min(1).max(128),
+  deviceName: z.string().min(1).max(255),
+  deviceType: z.enum(['android', 'macos', 'web']),
+});
+
+// POST /auth/firebase - Authenticate with Firebase UID (for Android app)
+router.post('/firebase', authRateLimit, async (req: Request, res: Response) => {
+  try {
+    const body = firebaseAuthSchema.parse(req.body);
+
+    // Get or create user with Firebase UID
+    const userId = await getOrCreateUserByFirebaseUid(body.firebaseUid);
+    const deviceId = `${body.deviceType}_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+
+    // Register the device
+    await registerDevice(userId, deviceId, {
+      name: body.deviceName,
+      type: body.deviceType,
+    });
+
+    // Generate tokens
+    const tokens = generateTokenPair(userId, deviceId);
+
+    console.log(`[Auth] Firebase user authenticated: ${userId} (device: ${body.deviceName})`);
+
+    res.json({
+      userId,
+      deviceId,
+      ...tokens,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Invalid request', details: error.errors });
+      return;
+    }
+    console.error('Firebase auth error:', error);
+    res.status(500).json({ error: 'Failed to authenticate with Firebase UID' });
+  }
 });
 
 // POST /auth/anonymous - Create anonymous user and get tokens
@@ -210,6 +253,65 @@ router.get('/me', authenticate, async (req: Request, res: Response) => {
     deviceId: req.deviceId,
     admin: req.user?.admin || false,
   });
+});
+
+// Admin login schema
+const adminLoginSchema = z.object({
+  username: z.string().min(1),
+  password: z.string().min(1),
+});
+
+// POST /auth/admin/login - Admin login to get admin tokens
+router.post('/admin/login', authRateLimit, async (req: Request, res: Response) => {
+  try {
+    const body = adminLoginSchema.parse(req.body);
+
+    // Validate credentials
+    if (body.username !== config.admin.username || body.password !== config.admin.password) {
+      res.status(401).json({ error: 'Invalid credentials' });
+      return;
+    }
+
+    // Generate admin tokens
+    const tokens = generateTokenPair('admin', 'admin-console', { admin: true });
+
+    res.json({
+      userId: 'admin',
+      deviceId: 'admin-console',
+      admin: true,
+      ...tokens,
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Invalid request', details: error.errors });
+      return;
+    }
+    console.error('Admin login error:', error);
+    res.status(500).json({ error: 'Failed to authenticate' });
+  }
+});
+
+// GET /auth/admin/login with API key (header-based auth for scripts)
+router.get('/admin/token', async (req: Request, res: Response) => {
+  try {
+    const apiKey = req.headers['x-api-key'] as string;
+
+    // Check API key if configured
+    if (config.admin.apiKey && apiKey === config.admin.apiKey) {
+      const tokens = generateTokenPair('admin', 'admin-api', { admin: true });
+      res.json({
+        userId: 'admin',
+        admin: true,
+        ...tokens,
+      });
+      return;
+    }
+
+    res.status(401).json({ error: 'Invalid API key' });
+  } catch (error) {
+    console.error('Admin token error:', error);
+    res.status(500).json({ error: 'Failed to generate token' });
+  }
 });
 
 export default router;

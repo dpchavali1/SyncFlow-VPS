@@ -36,6 +36,10 @@ const requestCallSchema = z.object({
   simSubscriptionId: z.number().optional(),
 });
 
+const registerPhoneSchema = z.object({
+  phoneNumber: z.string().min(1).max(50),
+});
+
 // GET /calls - Get call history with pagination
 router.get('/', async (req: Request, res: Response) => {
   try {
@@ -234,6 +238,262 @@ router.get('/count', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Get call count error:', error);
     res.status(500).json({ error: 'Failed to get count' });
+  }
+});
+
+// POST /calls/register - Register phone number for video calling
+router.post('/register', async (req: Request, res: Response) => {
+  try {
+    const body = registerPhoneSchema.parse(req.body);
+    const userId = req.userId!;
+
+    // Normalize phone number (remove spaces, dashes, keep + and digits)
+    const normalizedPhone = body.phoneNumber.replace(/[\s\-()]/g, '');
+
+    // First, remove any existing registration for this phone number (from any user)
+    // This allows a phone to be re-registered to a different account
+    await query(
+      `DELETE FROM user_phone_registry WHERE phone_number = $1`,
+      [normalizedPhone]
+    );
+
+    // Also remove any existing registration for this user (if they had a different phone)
+    await query(
+      `DELETE FROM user_phone_registry WHERE user_id = $1`,
+      [userId]
+    );
+
+    // Now insert the new registration
+    await query(
+      `INSERT INTO user_phone_registry (user_id, phone_number, registered_at)
+       VALUES ($1, $2, $3)`,
+      [userId, normalizedPhone, Date.now()]
+    );
+
+    console.log(`Phone number registered: ${normalizedPhone} for user: ${userId}`);
+
+    res.json({
+      success: true,
+      phoneNumber: normalizedPhone,
+      message: 'Phone number registered for video calling',
+    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Invalid request', details: error.errors });
+      return;
+    }
+    console.error('Register phone error:', error);
+    res.status(500).json({ error: 'Failed to register phone number' });
+  }
+});
+
+// GET /calls/lookup/:phoneNumber - Look up user by phone number (for video calling)
+router.get('/lookup/:phoneNumber', async (req: Request, res: Response) => {
+  try {
+    const { phoneNumber } = req.params;
+
+    // Normalize phone number for lookup
+    const normalizedPhone = phoneNumber.replace(/[\s\-()]/g, '');
+
+    const result = await query(
+      `SELECT user_id FROM user_phone_registry WHERE phone_number = $1`,
+      [normalizedPhone]
+    );
+
+    if (result.length === 0) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    res.json({
+      userId: result[0].user_id,
+      phoneNumber: normalizedPhone,
+    });
+  } catch (error) {
+    console.error('Lookup phone error:', error);
+    res.status(500).json({ error: 'Failed to lookup phone number' });
+  }
+});
+
+// ==================== Active Calls ====================
+
+// POST /calls/active - Sync active call state
+router.post('/active', async (req: Request, res: Response) => {
+  try {
+    const { id, phoneNumber, contactName, state, callType, timestamp } = req.body;
+    const userId = req.userId!;
+
+    if (!id || !state) {
+      res.status(400).json({ error: 'id and state are required' });
+      return;
+    }
+
+    await query(
+      `INSERT INTO user_active_calls
+       (id, user_id, phone_number, contact_name, call_state, call_type, started_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+       ON CONFLICT (id) DO UPDATE SET
+         call_state = EXCLUDED.call_state,
+         updated_at = NOW()`,
+      [id, userId, phoneNumber, contactName, state, callType, timestamp || Date.now()]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Sync active call error:', error);
+    res.status(500).json({ error: 'Failed to sync active call' });
+  }
+});
+
+// GET /calls/active - Get active calls
+router.get('/active', async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId!;
+
+    const calls = await query(
+      `SELECT id, phone_number, contact_name, call_state, call_type, started_at, updated_at
+       FROM user_active_calls
+       WHERE user_id = $1 AND call_state != 'ended'`,
+      [userId]
+    );
+
+    res.json({
+      calls: calls.map(c => ({
+        id: c.id,
+        phoneNumber: c.phone_number,
+        contactName: c.contact_name,
+        state: c.call_state,
+        callType: c.call_type,
+        startedAt: c.started_at ? parseInt(c.started_at) : null,
+      })),
+    });
+  } catch (error) {
+    console.error('Get active calls error:', error);
+    res.status(500).json({ error: 'Failed to get active calls' });
+  }
+});
+
+// PUT /calls/active/:id/state - Update active call state
+router.put('/active/:id/state', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { state } = req.body;
+    const userId = req.userId!;
+
+    if (!state) {
+      res.status(400).json({ error: 'state is required' });
+      return;
+    }
+
+    await query(
+      `UPDATE user_active_calls SET call_state = $1, updated_at = NOW()
+       WHERE id = $2 AND user_id = $3`,
+      [state, id, userId]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Update active call state error:', error);
+    res.status(500).json({ error: 'Failed to update call state' });
+  }
+});
+
+// DELETE /calls/active/:id - Clear active call
+router.delete('/active/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const userId = req.userId!;
+
+    await query(
+      `DELETE FROM user_active_calls WHERE id = $1 AND user_id = $2`,
+      [id, userId]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Clear active call error:', error);
+    res.status(500).json({ error: 'Failed to clear active call' });
+  }
+});
+
+// ==================== Call Commands ====================
+
+// GET /calls/commands - Get pending call commands
+router.get('/commands', async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId!;
+
+    const commands = await query(
+      `SELECT id, call_id, command, phone_number, timestamp
+       FROM user_call_commands
+       WHERE user_id = $1 AND processed = FALSE
+       ORDER BY timestamp DESC
+       LIMIT 10`,
+      [userId]
+    );
+
+    res.json({
+      commands: commands.map(c => ({
+        id: c.id,
+        callId: c.call_id,
+        command: c.command,
+        phoneNumber: c.phone_number,
+        timestamp: parseInt(c.timestamp),
+      })),
+    });
+  } catch (error) {
+    console.error('Get call commands error:', error);
+    res.status(500).json({ error: 'Failed to get call commands' });
+  }
+});
+
+// POST /calls/commands - Create call command
+router.post('/commands', async (req: Request, res: Response) => {
+  try {
+    const { callId, command, phoneNumber } = req.body;
+    const userId = req.userId!;
+
+    if (!command) {
+      res.status(400).json({ error: 'command is required' });
+      return;
+    }
+
+    if (!['answer', 'reject', 'end', 'hold', 'unhold', 'make_call'].includes(command)) {
+      res.status(400).json({ error: 'Invalid command' });
+      return;
+    }
+
+    const commandId = `cmd_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+
+    await query(
+      `INSERT INTO user_call_commands (id, user_id, call_id, command, phone_number, timestamp)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [commandId, userId, callId, command, phoneNumber, Date.now()]
+    );
+
+    res.json({ id: commandId, success: true });
+  } catch (error) {
+    console.error('Create call command error:', error);
+    res.status(500).json({ error: 'Failed to create call command' });
+  }
+});
+
+// PUT /calls/commands/:id/processed - Mark command as processed
+router.put('/commands/:id/processed', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const userId = req.userId!;
+
+    await query(
+      `UPDATE user_call_commands SET processed = TRUE
+       WHERE id = $1 AND user_id = $2`,
+      [id, userId]
+    );
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Mark call command processed error:', error);
+    res.status(500).json({ error: 'Failed to mark command processed' });
   }
 });
 

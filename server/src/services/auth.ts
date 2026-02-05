@@ -226,6 +226,29 @@ export async function redeemPairingToken(
   };
 }
 
+// Get or create user by Firebase UID
+export async function getOrCreateUserByFirebaseUid(firebaseUid: string): Promise<string> {
+  // Check if user exists with this Firebase UID
+  const existing = await queryOne<{ uid: string }>(
+    `SELECT uid FROM users WHERE firebase_uid = $1`,
+    [firebaseUid]
+  );
+
+  if (existing) {
+    return existing.uid;
+  }
+
+  // Create new user with Firebase UID as the primary user ID
+  // This maintains compatibility with existing Firebase-based data
+  await query(
+    `INSERT INTO users (uid, firebase_uid, created_at) VALUES ($1, $1, NOW())
+     ON CONFLICT (uid) DO UPDATE SET firebase_uid = EXCLUDED.firebase_uid`,
+    [firebaseUid]
+  );
+
+  return firebaseUid;
+}
+
 // Hash password (for recovery codes)
 export async function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, 12);
