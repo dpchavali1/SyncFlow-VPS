@@ -40,5 +40,20 @@ export const config = {
   },
 
   // CORS
-  corsOrigins: (process.env.CORS_ORIGINS || 'http://localhost:3000').split(','),
+  corsOrigins: (process.env.CORS_ORIGINS || 'http://localhost:3001').split(','),
+
+  // Admin credentials (for VPS admin API)
+  admin: {
+    username: process.env.ADMIN_USERNAME || 'admin',
+    password: process.env.ADMIN_PASSWORD || 'Dxc@Abc+123=007',
+    apiKey: process.env.ADMIN_API_KEY || '',
+  },
+
+  // Cloudflare R2 (S3-compatible storage)
+  r2: {
+    endpoint: process.env.R2_ENDPOINT || '',
+    accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
+    bucketName: process.env.R2_BUCKET_NAME || 'syncflow-files',
+  },
 };

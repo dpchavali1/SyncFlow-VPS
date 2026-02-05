@@ -277,6 +277,16 @@ CREATE TABLE user_webrtc_signaling (
 
 CREATE INDEX idx_webrtc_call ON user_webrtc_signaling(user_id, call_id);
 
+-- Phone number registry for video calling
+CREATE TABLE user_phone_registry (
+    user_id VARCHAR(128) PRIMARY KEY REFERENCES users(uid) ON DELETE CASCADE,
+    phone_number VARCHAR(50) NOT NULL,
+    registered_at BIGINT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX idx_phone_registry_phone ON user_phone_registry(phone_number);
+
 -- =====================================================
 -- E2EE TABLES
 -- =====================================================

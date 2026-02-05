@@ -21,7 +21,7 @@ const getMessagesSchema = z.object({
 const createMessageSchema = z.object({
   id: z.string().min(1),
   threadId: z.number().optional(),
-  address: z.string().min(1).max(50),
+  address: z.string().min(1).max(500), // Increased for group MMS, long addresses
   contactName: z.string().max(255).optional(),
   body: z.string().max(10000).optional(),
   date: z.number(),
@@ -37,7 +37,7 @@ const syncMessagesSchema = z.object({
 });
 
 const sendMessageSchema = z.object({
-  address: z.string().min(1).max(50),
+  address: z.string().min(1).max(500), // Increased for group MMS, long addresses
   body: z.string().min(1).max(1600),
   simSubscriptionId: z.number().optional(),
 });
