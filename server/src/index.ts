@@ -12,6 +12,25 @@ import messagesRoutes from './routes/messages';
 import contactsRoutes from './routes/contacts';
 import callsRoutes from './routes/calls';
 import devicesRoutes from './routes/devices';
+import adminRoutes from './routes/admin';
+import clipboardRoutes from './routes/clipboard';
+import dndRoutes from './routes/dnd';
+import mediaRoutes from './routes/media';
+import hotspotRoutes from './routes/hotspot';
+import findPhoneRoutes from './routes/findPhone';
+import linksRoutes from './routes/links';
+import phoneStatusRoutes from './routes/phoneStatus';
+import fileTransfersRoutes from './routes/fileTransfers';
+import readReceiptsRoutes from './routes/readReceipts';
+import typingRoutes from './routes/typing';
+import scheduledMessagesRoutes from './routes/scheduledMessages';
+import notificationsRoutes from './routes/notifications';
+import voicemailsRoutes from './routes/voicemails';
+import continuityRoutes from './routes/continuity';
+import e2eeRoutes from './routes/e2ee';
+import spamRoutes from './routes/spam';
+import photosRoutes from './routes/photos';
+import usageRoutes from './routes/usage';
 
 const app = express();
 
@@ -65,6 +84,25 @@ app.use('/api/messages', messagesRoutes);
 app.use('/api/contacts', contactsRoutes);
 app.use('/api/calls', callsRoutes);
 app.use('/api/devices', devicesRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/clipboard', clipboardRoutes);
+app.use('/api/dnd', dndRoutes);
+app.use('/api/media', mediaRoutes);
+app.use('/api/hotspot', hotspotRoutes);
+app.use('/api/find-phone', findPhoneRoutes);
+app.use('/api/links', linksRoutes);
+app.use('/api/phone-status', phoneStatusRoutes);
+app.use('/api/file-transfers', fileTransfersRoutes);
+app.use('/api/read-receipts', readReceiptsRoutes);
+app.use('/api/typing', typingRoutes);
+app.use('/api/scheduled-messages', scheduledMessagesRoutes);
+app.use('/api/notifications', notificationsRoutes);
+app.use('/api/voicemails', voicemailsRoutes);
+app.use('/api/continuity', continuityRoutes);
+app.use('/api/e2ee', e2eeRoutes);
+app.use('/api/spam', spamRoutes);
+app.use('/api/photos', photosRoutes);
+app.use('/api/usage', usageRoutes);
 
 // 404 handler
 app.use((req, res) => {
