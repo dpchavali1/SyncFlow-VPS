@@ -70,7 +70,8 @@ fun MainNavigation(
         // Small delay to let the UI render first
         kotlinx.coroutines.delay(2000)
         // Check if user is authenticated and phone not registered
-        val userId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
+        val vpsClient = com.phoneintegration.app.vps.VPSClient.getInstance(context)
+        val userId = vpsClient.userId
         if (userId != null && !isPhoneNumberRegistered(context)) {
             showPhoneRegistrationDialog = true
         }

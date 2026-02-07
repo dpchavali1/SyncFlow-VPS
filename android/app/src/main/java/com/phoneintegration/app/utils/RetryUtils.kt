@@ -148,13 +148,6 @@ fun Throwable.isRetryable(): Boolean {
         is java.net.SocketException,
         is java.io.InterruptedIOException -> true
 
-        // Firebase-specific
-        is com.google.firebase.database.DatabaseException -> {
-            message?.contains("network", ignoreCase = true) == true ||
-            message?.contains("timeout", ignoreCase = true) == true ||
-            message?.contains("unavailable", ignoreCase = true) == true
-        }
-
         // General IO errors
         is java.io.IOException -> {
             // Retry most IO exceptions except security-related
@@ -165,7 +158,10 @@ fun Throwable.isRetryable(): Boolean {
         else -> {
             message?.contains("rate limit", ignoreCase = true) == true ||
             message?.contains("503", ignoreCase = true) == true ||
-            message?.contains("temporarily unavailable", ignoreCase = true) == true
+            message?.contains("temporarily unavailable", ignoreCase = true) == true ||
+            message?.contains("network", ignoreCase = true) == true ||
+            message?.contains("timeout", ignoreCase = true) == true ||
+            message?.contains("unavailable", ignoreCase = true) == true
         }
     }
 }
@@ -174,10 +170,17 @@ fun Throwable.isRetryable(): Boolean {
  * Firebase-specific retry check
  */
 fun Throwable.isFirebaseRetryable(): Boolean {
+    return this.isRetryable() || (this.message?.contains("firebase", ignoreCase = true) == true)
+}
+
+/**
+ * Network-specific retry check
+ */
+fun Throwable.isNetworkRetryable(): Boolean {
     // First check general retryable conditions
     if (this.isRetryable()) return true
 
-    // Firebase-specific checks
+    // Network-specific checks
     val message = this.message?.lowercase() ?: return false
 
     return message.contains("network") ||

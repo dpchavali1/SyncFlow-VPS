@@ -12,22 +12,20 @@ import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Base64
 import android.util.Log
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.FirebaseDatabase
-import com.google.firebase.database.ServerValue
 import com.phoneintegration.app.auth.UnifiedIdentityManager
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.*
-import kotlinx.coroutines.tasks.await
 import java.io.ByteArrayOutputStream
 
 /**
- * Service that mirrors Android notifications to Firebase for display on macOS.
+ * Service that mirrors Android notifications to VPS for display on macOS.
  * Requires user to enable Notification Access in Settings.
+ *
+ * VPS Backend Only - Uses VPS API instead of Firebase.
  */
 class NotificationMirrorService : NotificationListenerService() {
 
-    private val auth = FirebaseAuth.getInstance()
-    private val database = FirebaseDatabase.getInstance()
+    private lateinit var vpsClient: VPSClient
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     // Track sent notifications to avoid duplicates
@@ -108,6 +106,7 @@ class NotificationMirrorService : NotificationListenerService() {
 
     override fun onCreate() {
         super.onCreate()
+        vpsClient = VPSClient.getInstance(applicationContext)
         Log.d(TAG, "NotificationMirrorService created")
     }
 
@@ -192,17 +191,11 @@ class NotificationMirrorService : NotificationListenerService() {
             return
         }
 
-        Log.d(TAG, "Syncing notification to Firebase for unified user: $userId")
-        val firebaseId = database.reference
-            .child(USERS_PATH)
-            .child(userId)
-            .child(NOTIFICATIONS_PATH)
-            .push()
-            .key ?: return
+        Log.d(TAG, "Syncing notification to VPS for unified user: $userId")
+        val notificationUniqueId = "${sbn.packageName}_${sbn.id}_${System.currentTimeMillis()}"
+        notificationKeyToFirebaseId[sbn.key] = notificationUniqueId
 
-        notificationKeyToFirebaseId[sbn.key] = firebaseId
-
-        // Send to Firebase
+        // Send to VPS
         scope.launch {
             mirrorNotification(
                 appPackage = sbn.packageName,
@@ -213,7 +206,7 @@ class NotificationMirrorService : NotificationListenerService() {
                 timestamp = sbn.postTime,
                 notificationId = sbn.id.toString(),
                 userId = userId,
-                firebaseId = firebaseId
+                vpsId = notificationUniqueId
             )
         }
     }
@@ -283,14 +276,8 @@ class NotificationMirrorService : NotificationListenerService() {
 
         scope.launch {
             try {
-                database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(NOTIFICATIONS_PATH)
-                    .child(firebaseId)
-                    .removeValue()
-                    .await()
-                Log.d(TAG, "Notification removed from Firebase: ${sbn.packageName}")
+                vpsClient.removeMirroredNotification(firebaseId)
+                Log.d(TAG, "Notification removed from VPS: ${sbn.packageName}")
             } catch (e: Exception) {
                 Log.e(TAG, "Error removing mirrored notification", e)
             }
@@ -345,7 +332,7 @@ class NotificationMirrorService : NotificationListenerService() {
     }
 
     /**
-     * Send notification to Firebase
+     * Send notification to VPS
      */
     private suspend fun mirrorNotification(
         appPackage: String,
@@ -356,23 +343,18 @@ class NotificationMirrorService : NotificationListenerService() {
         timestamp: Long,
         notificationId: String,
         userId: String,
-        firebaseId: String
+        vpsId: String
     ) {
         try {
-            val notificationRef = database.reference
-                .child(USERS_PATH)
-                .child(userId)
-                .child(NOTIFICATIONS_PATH)
-                .child(firebaseId)
-
             val notificationData = mutableMapOf<String, Any>(
+                "id" to vpsId,
                 "appPackage" to appPackage,
                 "appName" to appName,
                 "title" to title,
                 "text" to text,
                 "timestamp" to timestamp,
                 "notificationId" to notificationId,
-                "syncedAt" to ServerValue.TIMESTAMP
+                "syncedAt" to System.currentTimeMillis()
             )
 
             // Add icon if available (keep it small)
@@ -380,45 +362,14 @@ class NotificationMirrorService : NotificationListenerService() {
                 notificationData["appIcon"] = appIcon
             }
 
-            notificationRef.setValue(notificationData).await()
+            vpsClient.syncMirroredNotification(notificationData)
 
             Log.d(TAG, "Notification mirrored: $appName - $title")
 
-            // Clean up old notifications
-            cleanupOldNotifications(userId)
+            // VPS handles cleanup server-side
 
         } catch (e: Exception) {
             Log.e(TAG, "Error mirroring notification", e)
-        }
-    }
-
-    /**
-     * Remove old notifications to keep database clean
-     */
-    private suspend fun cleanupOldNotifications(userId: String) {
-        try {
-            val notificationsRef = database.reference
-                .child(USERS_PATH)
-                .child(userId)
-                .child(NOTIFICATIONS_PATH)
-
-            val snapshot = notificationsRef.orderByChild("syncedAt").get().await()
-            val count = snapshot.childrenCount
-
-            if (count > MAX_NOTIFICATIONS) {
-                val toDelete = (count - MAX_NOTIFICATIONS).toInt()
-                var deleted = 0
-
-                for (child in snapshot.children) {
-                    if (deleted >= toDelete) break
-                    child.ref.removeValue().await()
-                    deleted++
-                }
-
-                Log.d(TAG, "Cleaned up $deleted old notifications")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error cleaning up notifications", e)
         }
     }
 }

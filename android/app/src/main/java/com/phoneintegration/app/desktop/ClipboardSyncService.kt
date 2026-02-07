@@ -4,10 +4,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.util.Log
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.*
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.*
-import kotlinx.coroutines.tasks.await
 
 /**
  * ClipboardSyncService.kt - Real-Time Clipboard Synchronization for SyncFlow
@@ -84,10 +82,12 @@ import kotlinx.coroutines.tasks.await
  *
  * ## Security Considerations
  *
- * - Clipboard content is stored in user's private Firebase path
- * - Data is encrypted in transit (Firebase TLS)
+ * - Clipboard content is stored in user's private VPS database
+ * - Data is encrypted in transit (HTTPS)
  * - Content is overwritten with each sync (not stored historically)
  * - Consider sensitive data implications (passwords, etc.)
+ *
+ * VPS Backend Only - Uses VPS API instead of Firebase.
  *
  * @see FileTransferService For file-based sync
  * @see PhotoSyncService For photo sync
@@ -100,7 +100,7 @@ import kotlinx.coroutines.tasks.await
 /**
  * Service that syncs clipboard content between Android and macOS/desktop.
  *
- * Provides real-time text clipboard synchronization using Firebase Realtime Database.
+ * Provides real-time text clipboard synchronization using VPS API.
  * Changes on either platform are reflected on the other within seconds.
  *
  * ## Usage
@@ -135,20 +135,17 @@ class ClipboardSyncService(context: Context) {
     /** Application context for system service access */
     private val appContext: Context = context.applicationContext
 
-    /** Firebase Auth for user identification */
-    private val auth = FirebaseAuth.getInstance()
-
-    /** Firebase Realtime Database for clipboard data */
-    private val database = FirebaseDatabase.getInstance()
+    /** VPS Client for API calls */
+    private val vpsClient = VPSClient.getInstance(appContext)
 
     /** System ClipboardManager for local clipboard access */
     private val clipboardManager = appContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
 
-    /** Listener for local clipboard changes (Android -> Firebase) */
+    /** Listener for local clipboard changes (Android -> VPS) */
     private var clipboardListener: ClipboardManager.OnPrimaryClipChangedListener? = null
 
-    /** Listener for remote clipboard changes (Firebase -> Android) */
-    private var clipboardValueListener: ValueEventListener? = null
+    /** Polling job for remote clipboard changes (VPS -> Android) */
+    private var clipboardPollingJob: Job? = null
 
     /** Coroutine scope for async operations */
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -182,15 +179,9 @@ class ClipboardSyncService(context: Context) {
     companion object {
         private const val TAG = "ClipboardSyncService"
 
-        /** Firebase Database path for clipboard data */
-        private const val CLIPBOARD_PATH = "clipboard"
-
-        /** Firebase Database root path for user data */
-        private const val USERS_PATH = "users"
-
         /**
          * Maximum clipboard content length in characters.
-         * Large content is skipped to prevent Firebase write issues and
+         * Large content is skipped to prevent API issues and
          * excessive bandwidth usage.
          */
         private const val MAX_CLIPBOARD_LENGTH = 50000 // 50KB max for text
@@ -200,6 +191,11 @@ class ClipboardSyncService(context: Context) {
          * Prevents rapid-fire syncs during text editing operations.
          */
         private const val SYNC_DEBOUNCE_MS = 500L
+
+        /**
+         * Polling interval for remote clipboard changes.
+         */
+        private const val POLL_INTERVAL_MS = 2000L
     }
 
     // -------------------------------------------------------------------------
@@ -230,7 +226,7 @@ class ClipboardSyncService(context: Context) {
     /**
      * Start clipboard sync - enables bidirectional synchronization.
      *
-     * Registers both local clipboard listener and Firebase listener.
+     * Registers both local clipboard listener and VPS polling.
      * Ensures clean state by stopping any existing listeners first.
      *
      * Call this when:
@@ -240,7 +236,6 @@ class ClipboardSyncService(context: Context) {
      */
     fun startSync() {
         Log.d(TAG, "Starting clipboard sync")
-        database.goOnline()
         stopListeningForLocalClipboard()
         stopListeningForRemoteClipboard()
         startListeningForLocalClipboard()
@@ -283,7 +278,7 @@ class ClipboardSyncService(context: Context) {
      *
      * The [isUpdatingFromRemote] flag is checked first. When we update the
      * local clipboard from a remote change, this prevents immediately syncing
-     * that content back to Firebase.
+     * that content back to VPS.
      *
      * ## Content Validation
      *
@@ -321,7 +316,7 @@ class ClipboardSyncService(context: Context) {
 
             scope.launch {
                 delay(SYNC_DEBOUNCE_MS) // Debounce
-                syncClipboardToFirebase(text)
+                syncClipboardToVPS(text)
             }
         }
 
@@ -337,114 +332,69 @@ class ClipboardSyncService(context: Context) {
     }
 
     // -------------------------------------------------------------------------
-    // REGION: Remote Clipboard Monitoring (Firebase -> Android)
+    // REGION: Remote Clipboard Monitoring (VPS -> Android)
     // -------------------------------------------------------------------------
 
     /**
-     * Listen for clipboard changes from other devices via Firebase.
+     * Listen for clipboard changes from other devices via VPS polling.
      *
-     * Registers a [ValueEventListener] on the user's clipboard path that
-     * fires whenever the data changes (including initial load).
+     * Polls the VPS API for clipboard updates and updates local clipboard
+     * when changes are detected.
      *
      * ## Event Handling
      *
      * - **Source check**: Ignores updates where source="android" (our own updates)
      * - **Timestamp check**: Only accepts content newer than [lastSyncedTimestamp]
      * - **Local update**: Calls [updateLocalClipboard] for valid remote content
-     *
-     * ## Firebase Path
-     *
-     * `users/{userId}/clipboard`
-     *
-     * ## Threading
-     *
-     * Listener callbacks run on Firebase's internal thread. Local clipboard
-     * update is performed on the calling thread (should be safe as
-     * ClipboardManager is thread-safe for setPrimaryClip).
      */
     private fun startListeningForRemoteClipboard() {
-        scope.launch {
-            try {
-                val currentUser = auth.currentUser ?: return@launch
-                val userId = currentUser.uid
+        clipboardPollingJob?.cancel()
+        clipboardPollingJob = scope.launch {
+            while (isActive) {
+                try {
+                    if (!vpsClient.isAuthenticated) {
+                        delay(POLL_INTERVAL_MS)
+                        continue
+                    }
 
-                val clipboardRef = database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(CLIPBOARD_PATH)
-
-                val listener = object : ValueEventListener {
-                    override fun onDataChange(snapshot: DataSnapshot) {
-                        val source = snapshot.child("source").value as? String ?: return
+                    val clipboardData = vpsClient.getClipboard()
+                    if (clipboardData != null) {
+                        val source = clipboardData.source
 
                         // Only process if from another device
-                        if (source == "android") return
+                        if (source != "android") {
+                            val timestamp = clipboardData.timestamp
 
-                        val text = snapshot.child("text").value as? String ?: return
-                        val timestamp = snapshot.child("timestamp").value as? Long ?: return
-
-                        // Check if this is newer than what we have
-                        if (timestamp <= lastSyncedTimestamp) return
-
-                        Log.d(TAG, "Received clipboard from $source: ${text.take(50)}...")
-
-                        // Update local clipboard
-                        updateLocalClipboard(text, timestamp)
+                            // Check if this is newer than what we have
+                            if (timestamp > lastSyncedTimestamp) {
+                                Log.d(TAG, "Received clipboard from $source: ${clipboardData.text.take(50)}...")
+                                updateLocalClipboard(clipboardData.text, timestamp)
+                            }
+                        }
                     }
-
-                    override fun onCancelled(error: DatabaseError) {
-                        Log.e(TAG, "Clipboard listener cancelled: ${error.message}")
-                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error polling remote clipboard", e)
                 }
-
-                clipboardValueListener = listener
-                clipboardRef.addValueEventListener(listener)
-
-                Log.d(TAG, "Remote clipboard listener registered")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error starting remote clipboard listener", e)
+                delay(POLL_INTERVAL_MS)
             }
         }
+        Log.d(TAG, "Remote clipboard polling started")
     }
 
     private fun stopListeningForRemoteClipboard() {
-        clipboardValueListener?.let { listener ->
-            scope.launch {
-                try {
-                    val userId = auth.currentUser?.uid ?: return@launch
-                    database.reference
-                        .child(USERS_PATH)
-                        .child(userId)
-                        .child(CLIPBOARD_PATH)
-                        .removeEventListener(listener)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error removing clipboard listener", e)
-                }
-            }
-        }
-        clipboardValueListener = null
+        clipboardPollingJob?.cancel()
+        clipboardPollingJob = null
     }
 
     // -------------------------------------------------------------------------
-    // REGION: Firebase Sync Operations
+    // REGION: VPS Sync Operations
     // -------------------------------------------------------------------------
 
     /**
-     * Sync local clipboard content to Firebase.
+     * Sync local clipboard content to VPS.
      *
      * Writes the provided text to the user's clipboard path with metadata
      * including timestamp and source identifier.
-     *
-     * ## Firebase Write Structure
-     *
-     * ```json
-     * {
-     *   "text": "clipboard content",
-     *   "timestamp": 1704067200000,
-     *   "source": "android",
-     *   "type": "text"
-     * }
-     * ```
      *
      * ## State Updates
      *
@@ -456,15 +406,9 @@ class ClipboardSyncService(context: Context) {
      *
      * @param text Clipboard text content to sync
      */
-    private suspend fun syncClipboardToFirebase(text: String) {
+    private suspend fun syncClipboardToVPS(text: String) {
         try {
-            val currentUser = auth.currentUser ?: return
-            val userId = currentUser.uid
-
-            val clipboardRef = database.reference
-                .child(USERS_PATH)
-                .child(userId)
-                .child(CLIPBOARD_PATH)
+            if (!vpsClient.isAuthenticated) return
 
             val timestamp = System.currentTimeMillis()
 
@@ -475,12 +419,12 @@ class ClipboardSyncService(context: Context) {
                 "type" to "text"
             )
 
-            clipboardRef.setValue(clipboardData).await()
+            vpsClient.syncClipboard(clipboardData)
 
             lastSyncedContent = text
             lastSyncedTimestamp = timestamp
 
-            Log.d(TAG, "Clipboard synced to Firebase: ${text.take(50)}...")
+            Log.d(TAG, "Clipboard synced to VPS: ${text.take(50)}...")
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing clipboard", e)
         }
@@ -540,7 +484,7 @@ class ClipboardSyncService(context: Context) {
     /**
      * Manually trigger a sync of the current clipboard content.
      *
-     * Reads the current Android clipboard and syncs to Firebase if valid.
+     * Reads the current Android clipboard and syncs to VPS if valid.
      * Use this for:
      * - User-initiated manual sync
      * - Initial sync when service starts
@@ -554,7 +498,7 @@ class ClipboardSyncService(context: Context) {
 
         val text = clipData.getItemAt(0).text?.toString()
         if (!text.isNullOrBlank() && text.length <= MAX_CLIPBOARD_LENGTH) {
-            syncClipboardToFirebase(text)
+            syncClipboardToVPS(text)
         }
     }
 

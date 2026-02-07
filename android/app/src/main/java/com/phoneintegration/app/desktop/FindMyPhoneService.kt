@@ -10,32 +10,31 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.*
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.*
-import kotlinx.coroutines.tasks.await
 
 /**
  * Service that allows finding the phone by playing a loud ringtone
  * when triggered from macOS/desktop.
+ *
+ * VPS Backend Only - Uses VPS API instead of Firebase.
  */
 class FindMyPhoneService(context: Context) {
     private val context: Context = context.applicationContext
-    private val auth = FirebaseAuth.getInstance()
-    private val database = FirebaseDatabase.getInstance()
+    private val vpsClient = VPSClient.getInstance(context)
 
     private var mediaPlayer: MediaPlayer? = null
     private var vibrator: Vibrator? = null
-    private var findRequestHandle: ChildEventListener? = null
+    private var findRequestPollingJob: Job? = null
     private var isRinging = false
+    private val processedRequests = mutableSetOf<String>()
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     companion object {
         private const val TAG = "FindMyPhoneService"
-        private const val FIND_PHONE_PATH = "find_my_phone"
-        private const val USERS_PATH = "users"
         private const val RING_DURATION_MS = 30000L // Ring for 30 seconds max
+        private const val POLL_INTERVAL_MS = 2000L
     }
 
     /**
@@ -43,7 +42,6 @@ class FindMyPhoneService(context: Context) {
      */
     fun startListening() {
         Log.d(TAG, "Starting Find My Phone service")
-        database.goOnline()
         listenForFindRequests()
     }
 
@@ -53,99 +51,64 @@ class FindMyPhoneService(context: Context) {
     fun stopListening() {
         Log.d(TAG, "Stopping Find My Phone service")
         stopRinging()
-        removeFindRequestListener()
+        findRequestPollingJob?.cancel()
+        findRequestPollingJob = null
         scope.cancel()
     }
 
     /**
-     * Listen for find phone requests from other devices
+     * Listen for find phone requests from other devices via polling
      */
     private fun listenForFindRequests() {
-        scope.launch {
-            try {
-                val currentUser = auth.currentUser ?: return@launch
-                val userId = currentUser.uid
-
-                val findRef = database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(FIND_PHONE_PATH)
-
-                findRequestHandle = object : ChildEventListener {
-                    override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
-                        handleFindRequest(snapshot)
+        findRequestPollingJob?.cancel()
+        findRequestPollingJob = scope.launch {
+            while (isActive) {
+                try {
+                    if (!vpsClient.isAuthenticated) {
+                        delay(POLL_INTERVAL_MS)
+                        continue
                     }
 
-                    override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
-                        handleFindRequest(snapshot)
-                    }
+                    val requests = vpsClient.getFindPhoneRequests()
+                    for (request in requests) {
+                        // Skip if already processed locally
+                        if (processedRequests.contains(request.id)) continue
 
-                    override fun onChildRemoved(snapshot: DataSnapshot) {}
-                    override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
-                    override fun onCancelled(error: DatabaseError) {
-                        Log.e(TAG, "Find phone listener cancelled: ${error.message}")
+                        // Check if request is recent (within last 30 seconds)
+                        val now = System.currentTimeMillis()
+                        if (now - request.timestamp > 30000) {
+                            Log.d(TAG, "Ignoring old find request: ${request.id}")
+                            processedRequests.add(request.id)
+                            continue
+                        }
+
+                        // Check if already processed on server
+                        if (request.status == "ringing" || request.status == "stopped") {
+                            processedRequests.add(request.id)
+                            continue
+                        }
+
+                        Log.d(TAG, "Received find phone request: action=${request.action}, id=${request.id}")
+
+                        when (request.action) {
+                            "ring" -> {
+                                startRinging()
+                                updateRequestStatus(request.id, "ringing")
+                            }
+                            "stop" -> {
+                                stopRinging()
+                                updateRequestStatus(request.id, "stopped")
+                            }
+                        }
+                        processedRequests.add(request.id)
                     }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error polling find phone requests", e)
                 }
-
-                findRef.addChildEventListener(findRequestHandle!!)
-                Log.d(TAG, "Find phone listener registered")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error starting find phone listener", e)
+                delay(POLL_INTERVAL_MS)
             }
         }
-    }
-
-    private fun removeFindRequestListener() {
-        scope.launch {
-            try {
-                val userId = auth.currentUser?.uid ?: return@launch
-                findRequestHandle?.let { listener ->
-                    database.reference
-                        .child(USERS_PATH)
-                        .child(userId)
-                        .child(FIND_PHONE_PATH)
-                        .removeEventListener(listener)
-                }
-                findRequestHandle = null
-            } catch (e: Exception) {
-                Log.e(TAG, "Error removing find phone listener", e)
-            }
-        }
-    }
-
-    /**
-     * Handle incoming find phone request
-     */
-    private fun handleFindRequest(snapshot: DataSnapshot) {
-        val requestId = snapshot.key ?: return
-        val action = snapshot.child("action").value as? String ?: return
-        val timestamp = snapshot.child("timestamp").value as? Long ?: 0
-        val status = snapshot.child("status").value as? String
-
-        // Check if request is recent (within last 30 seconds)
-        val now = System.currentTimeMillis()
-        if (now - timestamp > 30000) {
-            Log.d(TAG, "Ignoring old find request: $requestId")
-            return
-        }
-
-        // Check if already processed
-        if (status == "ringing" || status == "stopped") {
-            return
-        }
-
-        Log.d(TAG, "Received find phone request: action=$action, id=$requestId")
-
-        when (action) {
-            "ring" -> {
-                startRinging()
-                updateRequestStatus(requestId, "ringing")
-            }
-            "stop" -> {
-                stopRinging()
-                updateRequestStatus(requestId, "stopped")
-            }
-        }
+        Log.d(TAG, "Find phone polling started")
     }
 
     /**
@@ -267,22 +230,14 @@ class FindMyPhoneService(context: Context) {
     }
 
     /**
-     * Update the request status in Firebase
+     * Update the request status in VPS
      */
     private fun updateRequestStatus(requestId: String, status: String) {
         scope.launch {
             try {
-                val userId = auth.currentUser?.uid ?: return@launch
+                if (!vpsClient.isAuthenticated) return@launch
 
-                database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(FIND_PHONE_PATH)
-                    .child(requestId)
-                    .child("status")
-                    .setValue(status)
-                    .await()
-
+                vpsClient.updateFindPhoneRequestStatus(requestId, status)
                 Log.d(TAG, "Updated request $requestId status to $status")
             } catch (e: Exception) {
                 Log.e(TAG, "Error updating request status", e)

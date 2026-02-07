@@ -1,5 +1,6 @@
 package com.phoneintegration.app.ui.support
 
+import android.util.Log
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -22,11 +23,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
-import com.google.firebase.functions.FirebaseFunctions
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
 
 data class ChatMessage(
     val role: String, // "user" or "assistant"
@@ -34,13 +35,17 @@ data class ChatMessage(
     val timestamp: Long = System.currentTimeMillis()
 )
 
+private const val TAG = "SupportChatScreen"
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SupportChatScreen(
     onBack: () -> Unit
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    val vpsClient = remember { VPSClient.getInstance(context) }
 
     var messages by remember {
         mutableStateOf(
@@ -73,27 +78,14 @@ fun SupportChatScreen(
 
         scope.launch {
             try {
-                val functions = FirebaseFunctions.getInstance()
                 val history = messages.takeLast(6).map { msg ->
                     mapOf("role" to msg.role, "content" to msg.content)
                 }
 
-                val data = mapOf(
-                    "message" to text,
-                    "conversationHistory" to history
-                )
+                val result = vpsClient.supportChat(text, history)
 
-                val result = functions
-                    .getHttpsCallable("supportChat")
-                    .call(data)
-                    .await()
-
-                val responseData = result.data as? Map<*, *>
-                val success = responseData?.get("success") as? Boolean ?: false
-                val response = responseData?.get("response") as? String
-
-                if (success && response != null) {
-                    messages = messages + ChatMessage(role = "assistant", content = response)
+                if (result.success && result.response != null) {
+                    messages = messages + ChatMessage(role = "assistant", content = result.response)
                 } else {
                     messages = messages + ChatMessage(
                         role = "assistant",
@@ -101,6 +93,7 @@ fun SupportChatScreen(
                     )
                 }
             } catch (e: Exception) {
+                Log.e(TAG, "Error sending support message: ${e.message}")
                 messages = messages + ChatMessage(
                     role = "assistant",
                     content = "Sorry, I couldn't process your question. Please try again or contact syncflow.contact@gmail.com"

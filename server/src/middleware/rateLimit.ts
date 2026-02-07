@@ -71,7 +71,8 @@ export const authRateLimit = rateLimit({
 
 export const apiRateLimit = rateLimit({
   windowMs: 60000,
-  maxRequests: 100,
+  // Increase to accommodate initial sync bursts (messages/contacts/calls) from mobile + desktop.
+  maxRequests: 1000,
   keyPrefix: 'rl:api',
   keyGenerator: (req) => req.userId || req.ip || 'unknown',
 });

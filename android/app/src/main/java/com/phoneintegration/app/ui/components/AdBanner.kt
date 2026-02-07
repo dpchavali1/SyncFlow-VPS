@@ -17,12 +17,13 @@ import com.google.android.gms.ads.AdRequest
 import com.google.android.gms.ads.AdSize
 import com.google.android.gms.ads.AdView
 import com.google.android.gms.ads.LoadAdError
-import com.google.firebase.auth.FirebaseAuth
-import kotlinx.coroutines.tasks.await
+import com.phoneintegration.app.vps.VPSAuthManager
 
 /**
  * Ad banner component that shows ads only to free/trial users.
  * Premium subscribers don't see ads.
+ *
+ * VPS Backend Only - Uses VPSAuthManager for user info.
  *
  * Test Ad Unit ID: ca-app-pub-3940256099942544/6300978111
  * Replace with production ID before release.
@@ -101,30 +102,41 @@ fun AdBannerCompact(
 
 /**
  * Check if the current user has a premium subscription
- * Uses Cloud Function for fast response (avoids Firebase offline mode delays)
+ * VPS Backend Only - checks local preferences (VPS doesn't have usage tracking yet)
+ *
+ * In VPS mode, premium status would need to be implemented via:
+ * - VPS API endpoint for subscription status
+ * - Local SharedPreferences cache of subscription status
+ *
+ * For now, default to showing ads (free tier behavior)
  */
 private suspend fun isPremiumUser(context: Context): Boolean {
-    val auth = FirebaseAuth.getInstance()
-    val currentUser = auth.currentUser ?: return false
-    val userId = currentUser.uid
-
     return try {
-        val functions = com.google.firebase.functions.FirebaseFunctions.getInstance()
-        val result = functions
-            .getHttpsCallable("getUserUsage")
-            .call(mapOf("userId" to userId))
-            .await()
+        val authManager = VPSAuthManager.getInstance(context)
+        val currentUser = authManager.getCurrentUser()
 
-        val data = result.data as? Map<*, *>
-        val usageData = data?.get("usage") as? Map<*, *>
-        val planRaw = (usageData?.get("plan") as? String)?.lowercase()
-        val planExpiresAt = (usageData?.get("planExpiresAt") as? Number)?.toLong()
+        if (currentUser == null) {
+            // Not authenticated, show ads
+            return false
+        }
+
+        // Check if user is admin (admins don't see ads)
+        if (currentUser.admin) {
+            return true
+        }
+
+        // VPS doesn't have subscription tracking yet
+        // For now, default to free tier (show ads)
+        // TODO: Add subscription endpoint to VPS when needed
+        val prefs = context.getSharedPreferences("syncflow_subscription", Context.MODE_PRIVATE)
+        val plan = prefs.getString("plan", "free")?.lowercase()
+        val planExpiresAt = prefs.getLong("plan_expires_at", 0L)
         val now = System.currentTimeMillis()
 
-        when (planRaw) {
+        when (plan) {
             "lifetime", "3year" -> true
-            "monthly", "yearly", "paid" -> planExpiresAt?.let { it > now } ?: true
-            else -> false // Trial and free users see ads
+            "monthly", "yearly", "paid" -> planExpiresAt > now
+            else -> false // Free and trial users see ads
         }
     } catch (e: Exception) {
         Log.e("AdBanner", "Error checking premium status", e)

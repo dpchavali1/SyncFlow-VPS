@@ -10,14 +10,14 @@ import android.provider.MediaStore
 import android.util.Log
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.*
-import com.google.firebase.functions.FirebaseFunctions
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.*
-import kotlinx.coroutines.tasks.await
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.asRequestBody
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
+import java.util.concurrent.TimeUnit
 
 /**
  * FileTransferService.kt - Cross-Platform File Transfer Service for SyncFlow
@@ -97,9 +97,11 @@ import java.net.URL
 /**
  * Service that handles file transfers between macOS/desktop and Android.
  *
- * Files are uploaded to Cloudflare R2 and synced via Realtime Database.
+ * Files are uploaded to Cloudflare R2 and synced via VPS.
  * This service provides bidirectional file transfer capabilities with
  * subscription-based size limits.
+ *
+ * VPS Backend Only - Uses VPS API instead of Firebase.
  *
  * ## Usage
  *
@@ -131,17 +133,18 @@ class FileTransferService(context: Context) {
     /** Application context for system services and content resolver access */
     private val context: Context = context.applicationContext
 
-    /** Firebase Auth instance for user identification */
-    private val auth = FirebaseAuth.getInstance()
+    /** VPS Client for API calls */
+    private val vpsClient = VPSClient.getInstance(this.context)
 
-    /** Firebase Realtime Database for transfer metadata and coordination */
-    private val database = FirebaseDatabase.getInstance()
+    /** HTTP client for file downloads/uploads */
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(120, TimeUnit.SECONDS)
+        .writeTimeout(120, TimeUnit.SECONDS)
+        .build()
 
-    /** Firebase Cloud Functions for R2 presigned URL generation */
-    private val functions = FirebaseFunctions.getInstance()
-
-    /** Active listener for incoming file transfers from Firebase */
-    private var fileListenerHandle: ChildEventListener? = null
+    /** Polling job for file transfers */
+    private var pollingJob: Job? = null
 
     /** Coroutine scope for async operations, uses SupervisorJob for independent failure handling */
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -149,8 +152,8 @@ class FileTransferService(context: Context) {
     /**
      * Set of file IDs currently being processed.
      *
-     * Prevents duplicate processing when Firebase sends multiple events
-     * for the same transfer (e.g., on reconnection). Access is synchronized.
+     * Prevents duplicate processing when polling returns the same transfer.
+     * Access is synchronized.
      */
     private val processingFileIds = mutableSetOf<String>()
 
@@ -175,6 +178,9 @@ class FileTransferService(context: Context) {
 
         /** Notification ID (reused for download progress updates) */
         private const val NOTIFICATION_ID = 9001
+
+        /** Polling interval for incoming file transfers */
+        private const val POLLING_INTERVAL_MS = 10000L // Poll every 10 seconds
 
         // -----------------------------------------------------------------
         // Subscription Tier Limits
@@ -217,12 +223,8 @@ class FileTransferService(context: Context) {
     /**
      * Check if the current user has a Pro subscription.
      *
-     * Queries Firebase Database for the user's subscription plan.
+     * Queries VPS API for the user's subscription plan.
      * Returns true for any non-free plan (pro, premium, etc.).
-     *
-     * ## Firebase Path
-     *
-     * `users/{userId}/subscription/plan`
      *
      * ## Failure Handling
      *
@@ -233,17 +235,10 @@ class FileTransferService(context: Context) {
      */
     private suspend fun isPro(): Boolean {
         return try {
-            val userId = auth.currentUser?.uid ?: return false
-            // Check user's subscription directly
-            val snapshot = database.reference
-                .child("users")
-                .child(userId)
-                .child("subscription")
-                .child("plan")
-                .get()
-                .await()
+            if (!vpsClient.isAuthenticated) return false
 
-            val plan = snapshot.getValue(String::class.java)
+            val subscription = vpsClient.getUserSubscription()
+            val plan = subscription["plan"] as? String
             plan != null && plan != "free"
         } catch (e: Exception) {
             Log.w(TAG, "Error checking pro status: ${e.message}")
@@ -343,8 +338,7 @@ class FileTransferService(context: Context) {
     /**
      * Start listening for incoming file transfers from desktop clients.
      *
-     * Initializes Firebase connection and registers a [ChildEventListener]
-     * on the user's file_transfers path to receive real-time updates.
+     * Starts polling VPS API for file transfers.
      *
      * Call this when:
      * - App starts and user is authenticated
@@ -353,14 +347,13 @@ class FileTransferService(context: Context) {
      */
     fun startListening() {
         Log.d(TAG, "Starting file transfer service")
-        database.goOnline()
-        listenForFileTransfers()
+        startPolling()
     }
 
     /**
      * Stop listening for file transfers and clean up resources.
      *
-     * Removes Firebase listener and cancels the coroutine scope.
+     * Stops polling and cancels the coroutine scope.
      * Call this when:
      * - User signs out
      * - Desktop sync feature is disabled
@@ -368,81 +361,51 @@ class FileTransferService(context: Context) {
      */
     fun stopListening() {
         Log.d(TAG, "Stopping file transfer service")
-        removeFileListener()
+        stopPolling()
         scope.cancel()
     }
 
     // -------------------------------------------------------------------------
-    // REGION: Firebase Listener Management
+    // REGION: Polling Management
     // -------------------------------------------------------------------------
 
     /**
-     * Register Firebase listener for incoming file transfers.
-     *
-     * Creates a [ChildEventListener] on the user's file_transfers path.
-     * Only processes transfers from non-Android sources (i.e., desktop).
-     *
-     * ## Firebase Path
-     *
-     * `users/{userId}/file_transfers`
-     *
-     * ## Listener Behavior
-     *
-     * - `onChildAdded`: Triggers [handleFileTransfer] for new transfers
-     * - `onChildChanged`: Reserved for status updates (currently no-op)
-     * - `onChildRemoved/Moved`: No-op (cleanup handled elsewhere)
-     * - `onCancelled`: Logs error for debugging
+     * Start polling VPS API for incoming file transfers.
      */
-    private fun listenForFileTransfers() {
-        scope.launch {
-            try {
-                val currentUser = auth.currentUser ?: return@launch
-                val userId = currentUser.uid
-
-                val filesRef = database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(FILE_TRANSFERS_PATH)
-
-                fileListenerHandle = object : ChildEventListener {
-                    override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
-                        handleFileTransfer(snapshot)
+    private fun startPolling() {
+        pollingJob?.cancel()
+        pollingJob = scope.launch {
+            while (isActive) {
+                try {
+                    if (vpsClient.isAuthenticated) {
+                        pollFileTransfers()
                     }
-
-                    override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
-                        // Handle status changes if needed
-                    }
-
-                    override fun onChildRemoved(snapshot: DataSnapshot) {}
-                    override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
-                    override fun onCancelled(error: DatabaseError) {
-                        Log.e(TAG, "File listener cancelled: ${error.message}")
-                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error polling file transfers", e)
                 }
-
-                filesRef.addChildEventListener(fileListenerHandle!!)
-                Log.d(TAG, "File transfer listener registered")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error starting file listener", e)
+                delay(POLLING_INTERVAL_MS)
             }
         }
+        Log.d(TAG, "File transfer polling started")
     }
 
-    private fun removeFileListener() {
-        scope.launch {
-            try {
-                val userId = auth.currentUser?.uid ?: return@launch
-                fileListenerHandle?.let { listener ->
-                    database.reference
-                        .child(USERS_PATH)
-                        .child(userId)
-                        .child(FILE_TRANSFERS_PATH)
-                        .removeEventListener(listener)
-                }
-                fileListenerHandle = null
-            } catch (e: Exception) {
-                Log.e(TAG, "Error removing file listener", e)
+    private fun stopPolling() {
+        pollingJob?.cancel()
+        pollingJob = null
+        Log.d(TAG, "File transfer polling stopped")
+    }
+
+    /**
+     * Poll for file transfers from VPS API
+     */
+    private suspend fun pollFileTransfers() {
+        try {
+            val transfers = vpsClient.getFileTransfers()
+            for (transfer in transfers) {
+                handleFileTransfer(transfer)
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error fetching file transfers", e)
         }
     }
 
@@ -451,7 +414,7 @@ class FileTransferService(context: Context) {
     // -------------------------------------------------------------------------
 
     /**
-     * Process an incoming file transfer from Firebase.
+     * Process an incoming file transfer from VPS.
      *
      * Validates the transfer and initiates download if eligible.
      *
@@ -465,12 +428,12 @@ class FileTransferService(context: Context) {
      * ## Thread Safety
      *
      * Access to [processingFileIds] is synchronized to prevent race conditions
-     * when multiple Firebase events arrive simultaneously.
+     * when multiple API responses arrive simultaneously.
      *
-     * @param snapshot Firebase DataSnapshot containing transfer metadata
+     * @param transfer VPSFileTransfer containing transfer metadata
      */
-    private fun handleFileTransfer(snapshot: DataSnapshot) {
-        val fileId = snapshot.key ?: return
+    private fun handleFileTransfer(transfer: com.phoneintegration.app.vps.VPSFileTransfer) {
+        val fileId = transfer.id
 
         // Prevent duplicate processing of the same file
         synchronized(processingFileIds) {
@@ -480,18 +443,18 @@ class FileTransferService(context: Context) {
             }
         }
 
-        val fileName = snapshot.child("fileName").value as? String ?: return
-        val fileSize = (snapshot.child("fileSize").value as? Long) ?: 0
-        val contentType = snapshot.child("contentType").value as? String ?: "application/octet-stream"
-        val source = snapshot.child("source").value as? String ?: "unknown"
-        val status = snapshot.child("status").value as? String ?: "pending"
-        val timestamp = snapshot.child("timestamp").value as? Long ?: 0
+        val fileName = transfer.fileName
+        val fileSize = transfer.fileSize
+        val contentType = transfer.contentType
+        val source = transfer.source
+        val status = transfer.status
+        val timestamp = transfer.timestamp
 
-        // Support both R2 (r2Key) and legacy Firebase Storage (downloadUrl)
-        val r2Key = snapshot.child("r2Key").value as? String
-        val legacyDownloadUrl = snapshot.child("downloadUrl").value as? String
+        // Support both R2 (r2Key) and direct download URL
+        val r2Key = transfer.r2Key
+        val downloadUrl = transfer.downloadUrl
 
-        if (r2Key == null && legacyDownloadUrl == null) {
+        if (r2Key == null && downloadUrl == null) {
             return
         }
 
@@ -522,7 +485,7 @@ class FileTransferService(context: Context) {
         // Download the file
         scope.launch {
             try {
-                downloadFile(fileId, fileName, fileSize, contentType, r2Key, legacyDownloadUrl)
+                downloadFile(fileId, fileName, fileSize, contentType, r2Key, downloadUrl)
             } finally {
                 // Remove from processing set after completion (success or failure)
                 synchronized(processingFileIds) {
@@ -533,23 +496,18 @@ class FileTransferService(context: Context) {
     }
 
     /**
-     * Download a file from R2 storage or legacy Firebase Storage URL.
+     * Download a file from R2 storage or direct URL.
      *
      * ## Download Flow
      *
      * 1. Validate file size against tier limits
      * 2. Show download progress notification
      * 3. Update transfer status to "downloading"
-     * 4. Get presigned URL (R2) or use legacy URL directly
+     * 4. Get presigned URL (R2) or use direct URL
      * 5. Download to temp file
      * 6. Save to Downloads/SyncFlow via MediaStore
      * 7. Update status to "downloaded"
-     * 8. Clean up R2 file and Firebase record
-     *
-     * ## R2 vs Legacy Firebase Storage
-     *
-     * - **R2 (preferred)**: Uses `r2Key` field, gets presigned URL via Cloud Function
-     * - **Legacy**: Uses `downloadUrl` field directly (Firebase Storage URL)
+     * 8. Clean up R2 file and VPS record
      *
      * ## Error Handling
      *
@@ -561,8 +519,8 @@ class FileTransferService(context: Context) {
      * @param fileName Display name for the downloaded file
      * @param fileSize Size in bytes for validation
      * @param contentType MIME type for MediaStore
-     * @param r2Key Cloudflare R2 storage key (null if legacy)
-     * @param legacyDownloadUrl Direct Firebase Storage URL (null if R2)
+     * @param r2Key Cloudflare R2 storage key (null if direct URL)
+     * @param directDownloadUrl Direct download URL (null if R2)
      */
     private suspend fun downloadFile(
         fileId: String,
@@ -570,10 +528,10 @@ class FileTransferService(context: Context) {
         fileSize: Long,
         contentType: String,
         r2Key: String?,
-        legacyDownloadUrl: String?
+        directDownloadUrl: String?
     ) {
         try {
-            val userId = auth.currentUser?.uid ?: return
+            if (!vpsClient.isAuthenticated) return
 
             // Check file size
             if (fileSize > MAX_FILE_SIZE) {
@@ -589,42 +547,32 @@ class FileTransferService(context: Context) {
             // Update status to downloading
             updateTransferStatus(fileId, "downloading")
 
-            // Get download URL - either from R2 or legacy Firebase Storage
+            // Get download URL - either from R2 via VPS or use direct URL
             val downloadUrl: String = if (r2Key != null) {
-                // Get presigned download URL from R2
-                val result = functions
-                    .getHttpsCallable("getR2DownloadUrl")
-                    .call(mapOf(
-                        "syncGroupUserId" to userId,
-                        "fileKey" to r2Key
-                    ))
-                    .await()
-
-                @Suppress("UNCHECKED_CAST")
-                val data = result.data as? Map<String, Any>
-                data?.get("downloadUrl") as? String
-                    ?: throw Exception("Failed to get download URL from R2")
+                // Get presigned download URL from R2 via VPS
+                vpsClient.getDownloadUrl(r2Key)
             } else {
-                legacyDownloadUrl ?: throw Exception("No download URL available")
+                directDownloadUrl ?: throw Exception("No download URL available")
             }
 
             // Download to temp file first
             val tempFile = File(context.cacheDir, "download_$fileName")
 
             withContext(Dispatchers.IO) {
-                val connection = URL(downloadUrl).openConnection() as HttpURLConnection
-                connection.requestMethod = "GET"
-                connection.connectTimeout = 30000
-                connection.readTimeout = 60000
+                val request = Request.Builder()
+                    .url(downloadUrl)
+                    .build()
 
-                if (connection.responseCode == HttpURLConnection.HTTP_OK) {
-                    connection.inputStream.use { input ->
+                httpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        throw Exception("Download failed with status: ${response.code}")
+                    }
+
+                    response.body?.byteStream()?.use { input ->
                         tempFile.outputStream().use { output ->
                             input.copyTo(output)
                         }
                     }
-                } else {
-                    throw Exception("Download failed with status: ${connection.responseCode}")
                 }
             }
 
@@ -647,31 +595,19 @@ class FileTransferService(context: Context) {
             // Delete file from R2 after successful download (in background)
             if (r2Key != null) {
                 try {
-                    functions
-                        .getHttpsCallable("deleteR2File")
-                        .call(mapOf(
-                            "syncGroupUserId" to userId,
-                            "fileKey" to r2Key
-                        ))
-                        .await()
+                    vpsClient.deleteR2File(r2Key)
                     Log.d(TAG, "Cleaned up file from R2: $fileName")
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to clean up file from R2 (non-fatal): ${e.message}")
                 }
             }
 
-            // Clean up the transfer record from Database after a delay
+            // Clean up the transfer record from VPS after a delay
             // This gives the sender time to see the "downloaded" status
             try {
                 delay(5000) // Wait 5 seconds
-                database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(FILE_TRANSFERS_PATH)
-                    .child(fileId)
-                    .removeValue()
-                    .await()
-                Log.d(TAG, "Cleaned up transfer record from Database: $fileId")
+                vpsClient.deleteFileTransfer(fileId)
+                Log.d(TAG, "Cleaned up transfer record from VPS: $fileId")
             } catch (e: Exception) {
                 Log.w(TAG, "Failed to clean up transfer record (non-fatal): ${e.message}")
             }
@@ -758,25 +694,11 @@ class FileTransferService(context: Context) {
      * ## Upload Flow
      *
      * 1. Check tier limits via [canTransfer]
-     * 2. Get presigned upload URL from `getR2UploadUrl` Cloud Function
+     * 2. Get presigned upload URL from VPS API
      * 3. Upload file directly to R2 via HTTP PUT
-     * 4. Confirm upload via `confirmR2Upload` (records usage statistics)
-     * 5. Create transfer record in Firebase Database
-     * 6. Desktop clients receive notification via Firebase listener
-     *
-     * ## Firebase Cloud Function Calls
-     *
-     * **getR2UploadUrl:**
-     * ```
-     * Request: { syncGroupUserId, fileName, contentType, fileSize, transferType }
-     * Response: { uploadUrl, r2Key }
-     * ```
-     *
-     * **confirmR2Upload:**
-     * ```
-     * Request: { syncGroupUserId, fileKey, fileSize, transferType }
-     * Response: { success: true }
-     * ```
+     * 4. Confirm upload via VPS API (records usage statistics)
+     * 5. Create transfer record in VPS
+     * 6. Desktop clients receive notification via polling
      *
      * ## Error Handling
      *
@@ -791,7 +713,7 @@ class FileTransferService(context: Context) {
      */
     suspend fun uploadFile(file: File, fileName: String, contentType: String): Boolean {
         return try {
-            val userId = auth.currentUser?.uid ?: return false
+            if (!vpsClient.isAuthenticated) return false
             val fileSize = file.length()
 
             // Check tiered limits (file size)
@@ -802,80 +724,35 @@ class FileTransferService(context: Context) {
                 return false
             }
 
-            // Step 1: Get presigned upload URL from R2
-            val urlResult = functions
-                .getHttpsCallable("getR2UploadUrl")
-                .call(mapOf(
-                    "syncGroupUserId" to userId,
-                    "fileName" to fileName,
-                    "contentType" to contentType,
-                    "fileSize" to fileSize,
-                    "transferType" to "files"
-                ))
-                .await()
-
-            @Suppress("UNCHECKED_CAST")
-            val urlData = urlResult.data as? Map<String, Any>
-            val uploadUrl = urlData?.get("uploadUrl") as? String
-                ?: throw Exception("Failed to get upload URL")
-            val r2Key = urlData["fileKey"] as? String
-                ?: throw Exception("Failed to get file key")
+            // Step 1: Get presigned upload URL from R2 via VPS
+            val urlResponse = vpsClient.getUploadUrl(fileName, contentType, fileSize, "files")
+            val uploadUrl = urlResponse.uploadUrl
+            val r2Key = urlResponse.fileKey
 
             Log.d(TAG, "Got R2 upload URL for: $fileName")
 
             // Step 2: Upload file directly to R2 using presigned URL
             withContext(Dispatchers.IO) {
-                val connection = URL(uploadUrl).openConnection() as HttpURLConnection
-                connection.requestMethod = "PUT"
-                connection.doOutput = true
-                connection.setRequestProperty("Content-Type", contentType)
-                connection.setRequestProperty("Content-Length", fileSize.toString())
-                connection.connectTimeout = 30000
-                connection.readTimeout = 120000
+                val requestBody = file.asRequestBody(contentType.toMediaType())
+                val request = Request.Builder()
+                    .url(uploadUrl)
+                    .put(requestBody)
+                    .build()
 
-                file.inputStream().use { input ->
-                    connection.outputStream.use { output ->
-                        input.copyTo(output)
+                httpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        throw Exception("Upload to R2 failed with status: ${response.code}")
                     }
-                }
-
-                if (connection.responseCode != HttpURLConnection.HTTP_OK) {
-                    throw Exception("Upload to R2 failed with status: ${connection.responseCode}")
                 }
             }
 
             Log.d(TAG, "File uploaded to R2: $fileName")
 
             // Step 3: Confirm upload to record usage
-            functions
-                .getHttpsCallable("confirmR2Upload")
-                .call(mapOf(
-                    "syncGroupUserId" to userId,
-                    "fileKey" to r2Key,
-                    "fileSize" to fileSize,
-                    "transferType" to "files"
-                ))
-                .await()
+            vpsClient.confirmUpload(r2Key, fileSize, "files")
 
-            // Step 4: Create transfer record in database
-            val fileId = System.currentTimeMillis().toString()
-            val transferRef = database.reference
-                .child(USERS_PATH)
-                .child(userId)
-                .child(FILE_TRANSFERS_PATH)
-                .child(fileId)
-
-            val transferData = mapOf(
-                "fileName" to fileName,
-                "fileSize" to fileSize,
-                "contentType" to contentType,
-                "r2Key" to r2Key,
-                "source" to "android",
-                "status" to "pending",
-                "timestamp" to ServerValue.TIMESTAMP
-            )
-
-            transferRef.setValue(transferData).await()
+            // Step 4: Create transfer record via VPS
+            vpsClient.createFileTransfer(fileName, fileSize, contentType, r2Key, "android")
 
             Log.d(TAG, "File uploaded: $fileName (${fileSize / 1024}KB)")
             showToast("File shared: $fileName")
@@ -898,7 +775,7 @@ class FileTransferService(context: Context) {
     // -------------------------------------------------------------------------
 
     /**
-     * Update the status of a file transfer in Firebase Database.
+     * Update the status of a file transfer via VPS API.
      *
      * Status values:
      * - "pending" - Transfer created, awaiting download
@@ -912,22 +789,9 @@ class FileTransferService(context: Context) {
      */
     private suspend fun updateTransferStatus(fileId: String, status: String, error: String? = null) {
         try {
-            val userId = auth.currentUser?.uid ?: return
+            if (!vpsClient.isAuthenticated) return
 
-            val updates = mutableMapOf<String, Any>(
-                "status" to status
-            )
-            if (error != null) {
-                updates["error"] = error
-            }
-
-            database.reference
-                .child(USERS_PATH)
-                .child(userId)
-                .child(FILE_TRANSFERS_PATH)
-                .child(fileId)
-                .updateChildren(updates)
-                .await()
+            vpsClient.updateFileTransferStatus(fileId, status, error)
         } catch (e: Exception) {
             Log.e(TAG, "Error updating transfer status", e)
         }

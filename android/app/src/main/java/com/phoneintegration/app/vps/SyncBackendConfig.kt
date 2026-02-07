@@ -37,7 +37,7 @@ class SyncBackendConfig private constructor(private val context: Context) {
         private const val KEY_MIGRATION_COMPLETE = "migration_complete"
 
         // Default VPS server URL
-        const val DEFAULT_VPS_URL = "http://5.78.188.206"
+        const val DEFAULT_VPS_URL = "https://api.sfweb.app"
 
         @Volatile
         private var instance: SyncBackendConfig? = null
@@ -61,13 +61,14 @@ class SyncBackendConfig private constructor(private val context: Context) {
 
     /**
      * Get the saved backend configuration
+     * DEFAULT: VPS for this version (SyncFlow-VPS)
      */
     private fun getSavedBackend(): SyncBackend {
-        val backendName = prefs.getString(KEY_BACKEND, SyncBackend.FIREBASE.name)
+        val backendName = prefs.getString(KEY_BACKEND, SyncBackend.VPS.name)
         return try {
-            SyncBackend.valueOf(backendName ?: SyncBackend.FIREBASE.name)
+            SyncBackend.valueOf(backendName ?: SyncBackend.VPS.name)
         } catch (e: Exception) {
-            SyncBackend.FIREBASE
+            SyncBackend.VPS
         }
     }
 

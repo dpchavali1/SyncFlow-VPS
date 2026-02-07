@@ -610,9 +610,9 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
             _availableSims.value = sims
             Log.d("SmsViewModel", "Loaded ${sims.size} active SIM(s)")
             try {
-                simManager.syncSimsToFirebase(syncService)
+                simManager.syncSimsToVps(syncService)
             } catch (e: Exception) {
-                Log.e("SmsViewModel", "Failed to sync SIMs to Firebase", e)
+                Log.e("SmsViewModel", "Failed to sync SIMs to VPS", e)
             }
         }
     }
@@ -968,7 +968,7 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
 
                 // Sync groups to Firebase (low priority)
                 delay(2000)
-                syncService.syncGroups(groups)
+                syncService.syncGroups(groups.map { it.group })
             }
         } catch (e: Exception) {
             Log.e("SmsViewModel", "Error loading groups", e)

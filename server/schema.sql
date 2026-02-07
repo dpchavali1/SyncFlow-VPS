@@ -84,6 +84,9 @@ CREATE TABLE user_messages (
     mms_parts JSONB, -- For MMS attachments
     sim_subscription_id INTEGER,
     encrypted BOOLEAN DEFAULT FALSE,
+    encrypted_body TEXT,
+    encrypted_nonce TEXT,
+    key_map JSONB,
     e2ee_device_id VARCHAR(128),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()

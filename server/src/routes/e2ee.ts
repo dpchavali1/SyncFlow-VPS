@@ -2,12 +2,21 @@ import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { query, queryOne } from '../services/database';
 import { authenticate } from '../middleware/auth';
-import { apiRateLimit } from '../middleware/rateLimit';
+import { rateLimit } from '../middleware/rateLimit';
+import { broadcastToDevice } from '../services/websocket';
 
 const router = Router();
 
+// E2EE routes get a higher rate limit since key exchange requires polling
+const e2eeRateLimit = rateLimit({
+  windowMs: 60000,
+  maxRequests: 200,
+  keyPrefix: 'rl:e2ee',
+  keyGenerator: (req) => req.userId || req.ip || 'unknown',
+});
+
 router.use(authenticate);
-router.use(apiRateLimit);
+router.use(e2eeRateLimit);
 
 // Validation schemas
 const publicKeySchema = z.object({
@@ -99,6 +108,11 @@ router.get('/device-keys/:userId', async (req: Request, res: Response) => {
       };
     }
 
+    // Log on first poll to help debug E2EE key exchange issues
+    if (keys.length === 0) {
+      console.log(`[E2EE] GET device-keys for userId=${userId}: no keys found (caller deviceId=${req.deviceId})`);
+    }
+
     res.json(keyMap);
   } catch (error) {
     console.error('Get E2EE device keys error:', error);
@@ -113,6 +127,8 @@ router.post('/device-key/:deviceId', async (req: Request, res: Response) => {
     const body = deviceKeySchema.parse(req.body);
     const userId = req.userId!;
 
+    console.log(`[E2EE] Storing key for userId=${userId}, deviceId=${deviceId}, keyLength=${body.encryptedKey.length}`);
+
     await query(
       `INSERT INTO user_e2ee_keys (user_id, device_id, encrypted_key, created_at, updated_at)
        VALUES ($1, $2, $3, NOW(), NOW())
@@ -122,9 +138,18 @@ router.post('/device-key/:deviceId', async (req: Request, res: Response) => {
       [userId, deviceId, body.encryptedKey]
     );
 
+    console.log(`[E2EE] Key stored successfully for userId=${userId}, deviceId=${deviceId}`);
+
+    // Notify the target device that its E2EE key is available
+    broadcastToDevice(userId, deviceId, {
+      type: 'e2ee_key_available',
+      data: { deviceId },
+    });
+
     res.json({ success: true });
   } catch (error) {
     if (error instanceof z.ZodError) {
+      console.error(`[E2EE] Validation error for device-key:`, error.errors);
       res.status(400).json({ error: 'Invalid request', details: error.errors });
       return;
     }
@@ -160,6 +185,13 @@ router.post('/key-request', async (req: Request, res: Response) => {
       return;
     }
 
+    // Get the requesting device's public key to include in the notification
+    const pubKeyResult = await query(
+      `SELECT public_key FROM e2ee_public_keys WHERE uid = $1 AND device_id = $2`,
+      [userId, deviceId]
+    );
+    const requestingPublicKey = pubKeyResult.length > 0 ? pubKeyResult[0].public_key : null;
+
     const result = await query(
       `INSERT INTO e2ee_key_requests (user_id, requesting_device, target_device, status, created_at)
        VALUES ($1, $2, $3, 'pending', NOW())
@@ -167,6 +199,17 @@ router.post('/key-request', async (req: Request, res: Response) => {
       [userId, deviceId, targetDevice]
     );
 
+    // Notify target device via WebSocket so it can auto-push keys
+    broadcastToDevice(userId, targetDevice, {
+      type: 'e2ee_key_request',
+      data: {
+        requestId: result[0].id,
+        requestingDevice: deviceId,
+        requestingPublicKey,
+      },
+    });
+
+    console.log(`[E2EE] Key request created: ${deviceId} -> ${targetDevice} (requestId=${result[0].id})`);
     res.json({ id: result[0].id, success: true });
   } catch (error) {
     console.error('Create key request error:', error);

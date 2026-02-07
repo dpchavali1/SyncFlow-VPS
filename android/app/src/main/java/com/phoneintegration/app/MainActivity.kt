@@ -703,6 +703,15 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             val bgStartTime = System.currentTimeMillis()
 
+            // Authenticate with VPS on startup (ensures userId is available for UI)
+            try {
+                val unifiedIdentityManager = com.phoneintegration.app.auth.UnifiedIdentityManager.getInstance(appContext)
+                val userId = unifiedIdentityManager.getUnifiedUserId()
+                android.util.Log.d("MainActivity", "VPS authenticated on startup: userId=$userId")
+            } catch (e: Exception) {
+                android.util.Log.e("MainActivity", "VPS startup auth failed: ${e.message}")
+            }
+
             // Only initialize E2EE and register FCM token if user has paired devices
             // This prevents Firebase writes/reads on fresh install
             val hasPairedDevices = com.phoneintegration.app.desktop.DesktopSyncService.hasPairedDevices(appContext)
@@ -717,34 +726,8 @@ class MainActivity : ComponentActivity() {
                     android.util.Log.e("MainActivity", "Error initializing Signal Protocol", e)
                 }
 
-                // Register FCM token for receiving video call notifications
-                // This is critical - without the token, FCM can't deliver call notifications
-                try {
-                    val userId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
-                    if (userId != null) {
-                        com.google.firebase.messaging.FirebaseMessaging.getInstance().token
-                            .addOnSuccessListener { token ->
-                                android.util.Log.d("MainActivity", "Registering FCM token for user $userId")
-                                com.google.firebase.database.FirebaseDatabase.getInstance().reference
-                                    .child("fcm_tokens")
-                                    .child(userId)
-                                    .setValue(token)
-                                    .addOnSuccessListener {
-                                        android.util.Log.d("MainActivity", "FCM token registered successfully")
-                                    }
-                                    .addOnFailureListener { e ->
-                                        android.util.Log.e("MainActivity", "Failed to register FCM token", e)
-                                    }
-                            }
-                            .addOnFailureListener { e ->
-                                android.util.Log.e("MainActivity", "Failed to get FCM token", e)
-                            }
-                    } else {
-                        android.util.Log.w("MainActivity", "Cannot register FCM token - user not authenticated")
-                    }
-                } catch (e: Exception) {
-                    android.util.Log.e("MainActivity", "Error registering FCM token", e)
-                }
+                // VPS handles device registration - no FCM token needed
+                android.util.Log.d("MainActivity", "VPS mode - skipping FCM token registration")
             } else {
                 android.util.Log.d("MainActivity", "Skipping E2EE and FCM init - no paired devices yet")
             }
@@ -782,6 +765,13 @@ class MainActivity : ComponentActivity() {
             com.phoneintegration.app.desktop.CallHistorySyncWorker.schedule(appContext)
 
             android.util.Log.d("MainActivity", "Background init done in ${System.currentTimeMillis() - bgStartTime}ms")
+
+            // Restore phone registration from VPS if missing locally (e.g., after reinstall)
+            try {
+                com.phoneintegration.app.ui.components.restorePhoneRegistrationFromVPS(appContext)
+            } catch (e: Exception) {
+                android.util.Log.e("MainActivity", "Failed to restore phone registration", e)
+            }
 
             // Only trigger immediate sync if user has paired devices
             // This prevents unnecessary Cloud Function calls on fresh install

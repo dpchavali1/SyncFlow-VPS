@@ -9,38 +9,36 @@ import android.os.Build
 import android.service.notification.NotificationListenerService
 import android.util.Log
 import android.view.KeyEvent
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.*
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.*
-import kotlinx.coroutines.tasks.await
 
 /**
  * Service to control media playback on Android from macOS.
  * Requires Notification Listener permission to access MediaSessions.
+ *
+ * VPS Backend Only - Uses VPS API instead of Firebase.
  */
 class MediaControlService(context: Context) {
     private val context: Context = context.applicationContext
-    private val auth = FirebaseAuth.getInstance()
-    private val database = FirebaseDatabase.getInstance()
+    private val vpsClient = VPSClient.getInstance(context)
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
-    private var commandListener: ValueEventListener? = null
+    private var commandPollingJob: Job? = null
     private var sessionListener: MediaSessionManager.OnActiveSessionsChangedListener? = null
     private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private var lastSyncedState: MediaState? = null
     private var syncJob: Job? = null
     private var statusPollingJob: Job? = null
-    private var devicesListener: ValueEventListener? = null
+    private var devicesPollingJob: Job? = null
     private var hasActiveDesktop: Boolean = false
 
     companion object {
         private const val TAG = "MediaControlService"
-        private const val MEDIA_STATUS_PATH = "media_status"
-        private const val MEDIA_COMMAND_PATH = "media_command"
-        private const val USERS_PATH = "users"
         private const val SYNC_DEBOUNCE_MS = 1000L
         private const val STATUS_POLL_INTERVAL_MS = 5000L
+        private const val COMMAND_POLL_INTERVAL_MS = 2000L
+        private const val DEVICES_POLL_INTERVAL_MS = 30000L
         private const val DESKTOP_ACTIVE_WINDOW_MS = 2 * 60 * 1000L
     }
 
@@ -63,9 +61,6 @@ class MediaControlService(context: Context) {
         if (!scope.isActive) {
             scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         }
-
-        // Force Firebase online connection
-        database.goOnline()
 
         registerSessionListener()
         startListeningForCommands()
@@ -134,28 +129,24 @@ class MediaControlService(context: Context) {
     }
 
     /**
-     * Listen for media commands from macOS
+     * Listen for media commands from macOS via polling
      */
     private fun startListeningForCommands() {
-        scope.launch {
-            try {
-                val currentUser = auth.currentUser ?: return@launch
-                val userId = currentUser.uid
+        commandPollingJob?.cancel()
+        commandPollingJob = scope.launch {
+            while (isActive) {
+                try {
+                    if (!vpsClient.isAuthenticated) {
+                        delay(COMMAND_POLL_INTERVAL_MS)
+                        continue
+                    }
 
-                val commandRef = database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(MEDIA_COMMAND_PATH)
-
-                val listener = object : ValueEventListener {
-                    override fun onDataChange(snapshot: DataSnapshot) {
-                        val action = snapshot.child("action").value as? String ?: return
-                        val timestamp = snapshot.child("timestamp").value as? Long ?: return
-
+                    val commands = vpsClient.getMediaCommands()
+                    for (command in commands) {
                         // Only process recent commands
-                        if (System.currentTimeMillis() - timestamp > 10000) return
+                        if (System.currentTimeMillis() - command.timestamp > 10000) continue
 
-                        when (action) {
+                        when (command.action) {
                             "play" -> sendMediaKeyEvent(KeyEvent.KEYCODE_MEDIA_PLAY)
                             "pause" -> sendMediaKeyEvent(KeyEvent.KEYCODE_MEDIA_PAUSE)
                             "play_pause" -> sendMediaKeyEvent(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE)
@@ -166,46 +157,25 @@ class MediaControlService(context: Context) {
                             "volume_down" -> adjustVolume(AudioManager.ADJUST_LOWER)
                             "volume_mute" -> adjustVolume(AudioManager.ADJUST_TOGGLE_MUTE)
                             "set_volume" -> {
-                                val volume = snapshot.child("volume").value as? Long
-                                if (volume != null) {
-                                    setVolume(volume.toInt())
-                                }
+                                command.volume?.let { setVolume(it) }
                             }
                         }
 
-                        snapshot.ref.removeValue()
+                        // Mark command as processed
+                        vpsClient.markMediaCommandProcessed(command.id)
                         debouncedSync()
                     }
-
-                    override fun onCancelled(error: DatabaseError) {
-                        Log.e(TAG, "Command listener cancelled: ${error.message}")
-                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error polling media commands", e)
                 }
-
-                commandListener = listener
-                commandRef.addValueEventListener(listener)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error starting command listener", e)
+                delay(COMMAND_POLL_INTERVAL_MS)
             }
         }
     }
 
     private fun stopListeningForCommands() {
-        commandListener?.let { listener ->
-            scope.launch {
-                try {
-                    val userId = auth.currentUser?.uid ?: return@launch
-                    database.reference
-                        .child(USERS_PATH)
-                        .child(userId)
-                        .child(MEDIA_COMMAND_PATH)
-                        .removeEventListener(listener)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error removing command listener", e)
-                }
-            }
-        }
-        commandListener = null
+        commandPollingJob?.cancel()
+        commandPollingJob = null
     }
 
     /**
@@ -293,7 +263,7 @@ class MediaControlService(context: Context) {
     }
 
     /**
-     * Sync current media status to Firebase
+     * Sync current media status to VPS
      */
     private fun syncMediaStatus() {
         scope.launch { syncMediaStatusOnce(forceSync = false) }
@@ -302,34 +272,28 @@ class MediaControlService(context: Context) {
     private suspend fun syncMediaStatusOnce(forceSync: Boolean = false) {
         try {
             if (!forceSync && !shouldSyncNow()) return
+            if (!vpsClient.isAuthenticated) return
 
-            val currentUser = auth.currentUser ?: return
-            val userId = currentUser.uid
             val currentState = getCurrentMediaState()
 
             // Skip if no change (unless forcing)
             if (!forceSync && currentState == lastSyncedState) return
             lastSyncedState = currentState
 
-            val statusRef = database.reference
-                .child(USERS_PATH)
-                .child(userId)
-                .child(MEDIA_STATUS_PATH)
-
-            val statusData = mutableMapOf<String, Any?>(
+            val statusData = mapOf(
                 "isPlaying" to currentState.isPlaying,
-                "title" to currentState.title,
-                "artist" to currentState.artist,
-                "album" to currentState.album,
-                "appName" to currentState.appName,
-                "packageName" to currentState.packageName,
+                "title" to (currentState.title ?: ""),
+                "artist" to (currentState.artist ?: ""),
+                "album" to (currentState.album ?: ""),
+                "appName" to (currentState.appName ?: ""),
+                "packageName" to (currentState.packageName ?: ""),
                 "volume" to currentState.volume,
                 "maxVolume" to currentState.maxVolume,
                 "hasPermission" to hasNotificationListenerPermission(),
-                "timestamp" to ServerValue.TIMESTAMP
+                "timestamp" to System.currentTimeMillis()
             )
 
-            statusRef.setValue(statusData)
+            vpsClient.syncMediaStatus(statusData)
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing media status", e)
         }
@@ -351,84 +315,55 @@ class MediaControlService(context: Context) {
     }
 
     private fun startListeningForDevices() {
-        scope.launch {
-            try {
-                val currentUser = auth.currentUser ?: return@launch
-                val userId = currentUser.uid
+        devicesPollingJob?.cancel()
+        devicesPollingJob = scope.launch {
+            while (isActive) {
+                try {
+                    if (!vpsClient.isAuthenticated) {
+                        delay(DEVICES_POLL_INTERVAL_MS)
+                        continue
+                    }
 
-                val devicesRef = database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child("devices")
+                    val devicesResponse = vpsClient.getDevices()
+                    val now = System.currentTimeMillis()
+                    var active = false
 
-                val listener = object : ValueEventListener {
-                    override fun onDataChange(snapshot: DataSnapshot) {
-                        val now = System.currentTimeMillis()
-                        var active = false
+                    for (device in devicesResponse.devices) {
+                        val platform = device.deviceType.lowercase().trim()
+                        if (platform != "macos") continue
 
-                        snapshot.children.forEach { child ->
-                            val platformRaw = child.child("platform").getValue(String::class.java)
-                                ?: child.child("type").getValue(String::class.java)
-                            val platform = platformRaw?.lowercase()?.trim()
+                        // Check if device was seen recently
+                        val lastSeen = device.lastSeen?.let {
+                            try { java.time.Instant.parse(it).toEpochMilli() } catch (e: Exception) { 0L }
+                        } ?: 0L
+                        val recent = lastSeen > 0 && now - lastSeen <= DESKTOP_ACTIVE_WINDOW_MS
 
-                            if (platform != "macos") return@forEach
-
-                            val online = (child.child("online").value as? Boolean) ?: false
-                            val lastSeenValue = child.child("lastSeen").value
-                            val lastSeen = when (lastSeenValue) {
-                                is Long -> lastSeenValue
-                                is Double -> lastSeenValue.toLong()
-                                is Int -> lastSeenValue.toLong()
-                                is String -> lastSeenValue.toLongOrNull() ?: 0L
-                                else -> 0L
-                            }
-                            val recent = lastSeen > 0 && now - lastSeen <= DESKTOP_ACTIVE_WINDOW_MS
-
-                            if (online || recent) {
-                                active = true
-                                return@forEach
-                            }
-                        }
-
-                        if (active != hasActiveDesktop) {
-                            hasActiveDesktop = active
-                            if (active) {
-                                startStatusPolling()
-                                syncMediaStatus()
-                            } else {
-                                stopStatusPolling()
-                            }
+                        if (recent) {
+                            active = true
+                            break
                         }
                     }
 
-                    override fun onCancelled(error: DatabaseError) {
-                        Log.e(TAG, "Device listener cancelled: ${error.message}")
+                    if (active != hasActiveDesktop) {
+                        hasActiveDesktop = active
+                        if (active) {
+                            startStatusPolling()
+                            syncMediaStatus()
+                        } else {
+                            stopStatusPolling()
+                        }
                     }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error polling devices", e)
                 }
-
-                devicesListener = listener
-                devicesRef.addValueEventListener(listener)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error starting device listener", e)
+                delay(DEVICES_POLL_INTERVAL_MS)
             }
         }
     }
 
     private fun stopListeningForDevices() {
-        val listener = devicesListener ?: return
-        scope.launch {
-            try {
-                val userId = auth.currentUser?.uid ?: return@launch
-                database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child("devices")
-                    .removeEventListener(listener)
-            } catch (e: Exception) {
-                Log.e(TAG, "Error removing device listener", e)
-            }
-        }
-        devicesListener = null
+        devicesPollingJob?.cancel()
+        devicesPollingJob = null
         hasActiveDesktop = false
     }
 

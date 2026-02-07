@@ -1,8 +1,10 @@
 package com.phoneintegration.app.usage
 
-import com.google.firebase.database.FirebaseDatabase
-import com.google.firebase.database.ServerValue
-import kotlinx.coroutines.tasks.await
+import android.content.Context
+import android.util.Log
+import com.phoneintegration.app.vps.VPSClient
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -56,14 +58,18 @@ enum class UsageCategory {
     FILE
 }
 
-class UsageTracker(private val database: FirebaseDatabase) {
+/**
+ * Usage Tracker - VPS Backend Only
+ *
+ * Tracks upload and storage usage via VPS API instead of Firebase.
+ */
+class UsageTracker(private val context: Context) {
     companion object {
+        private const val TAG = "UsageTracker"
+
         const val REASON_TRIAL_EXPIRED = "trial_expired"
         const val REASON_MONTHLY_LIMIT = "monthly_quota"
         const val REASON_STORAGE_LIMIT = "storage_quota"
-
-        private const val USERS_PATH = "users"
-        private const val USAGE_PATH = "usage"
 
         private const val TRIAL_DAYS = 7 // 7 day trial
         private const val MILLIS_PER_DAY = 24L * 60L * 60L * 1000L
@@ -77,54 +83,48 @@ class UsageTracker(private val database: FirebaseDatabase) {
         private const val PAID_STORAGE_BYTES = 2L * 1024L * 1024L * 1024L
     }
 
+    private val vpsClient = VPSClient.getInstance(context)
+
     suspend fun isUploadAllowed(
         userId: String,
         bytes: Long,
         countsTowardStorage: Boolean
-    ): UsageCheck {
-        if (bytes <= 0L) return UsageCheck(true)
+    ): UsageCheck = withContext(Dispatchers.IO) {
+        if (bytes <= 0L) return@withContext UsageCheck(true)
 
-        val usageRef = database.reference
-            .child(USERS_PATH)
-            .child(userId)
-            .child(USAGE_PATH)
+        try {
+            val usageResponse = vpsClient.getUserUsage()
+            val usage = usageResponse.usage ?: return@withContext UsageCheck(true)
 
-        val snapshot = usageRef.get().await()
-        val planRaw = snapshot.child("plan").getValue(String::class.java)
-        val planExpiresAt = snapshot.child("planExpiresAt").getValue(Long::class.java)
-        val now = System.currentTimeMillis()
+            val now = System.currentTimeMillis()
+            val isPaid = isPaidPlan(usage.plan, usage.planExpiresAt, now)
 
-        val isPaid = isPaidPlan(planRaw, planExpiresAt, now)
-
-        if (!isPaid) {
-            val trialStart = snapshot.child("trialStartedAt").getValue(Long::class.java)
-                ?: run {
-                    usageRef.child("trialStartedAt").setValue(ServerValue.TIMESTAMP).await()
-                    now
+            if (!isPaid) {
+                val trialStart = usage.trialStartedAt ?: now
+                if (now - trialStart > TRIAL_DAYS * MILLIS_PER_DAY) {
+                    return@withContext UsageCheck(false, REASON_TRIAL_EXPIRED)
                 }
-            if (now - trialStart > TRIAL_DAYS * MILLIS_PER_DAY) {
-                return UsageCheck(false, REASON_TRIAL_EXPIRED)
             }
-        }
 
-        val monthlyLimit = if (isPaid) PAID_MONTHLY_UPLOAD_BYTES else TRIAL_MONTHLY_UPLOAD_BYTES
-        val storageLimit = if (isPaid) PAID_STORAGE_BYTES else TRIAL_STORAGE_BYTES
+            val monthlyLimit = if (isPaid) PAID_MONTHLY_UPLOAD_BYTES else TRIAL_MONTHLY_UPLOAD_BYTES
+            val storageLimit = if (isPaid) PAID_STORAGE_BYTES else TRIAL_STORAGE_BYTES
 
-        val periodKey = currentPeriodKey()
-        val periodSnapshot = snapshot.child("monthly").child(periodKey)
-        val currentUpload = periodSnapshot.child("uploadBytes").getValue(Long::class.java) ?: 0L
-        if (currentUpload + bytes > monthlyLimit) {
-            return UsageCheck(false, REASON_MONTHLY_LIMIT)
-        }
-
-        if (countsTowardStorage) {
-            val storageBytes = snapshot.child("storageBytes").getValue(Long::class.java) ?: 0L
-            if (storageBytes + bytes > storageLimit) {
-                return UsageCheck(false, REASON_STORAGE_LIMIT)
+            if (usage.monthlyUploadBytes + bytes > monthlyLimit) {
+                return@withContext UsageCheck(false, REASON_MONTHLY_LIMIT)
             }
-        }
 
-        return UsageCheck(true)
+            if (countsTowardStorage) {
+                if (usage.storageBytes + bytes > storageLimit) {
+                    return@withContext UsageCheck(false, REASON_STORAGE_LIMIT)
+                }
+            }
+
+            UsageCheck(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error checking upload allowed: ${e.message}")
+            // Allow upload if we can't check (fail open for better UX)
+            UsageCheck(true)
+        }
     }
 
     suspend fun recordUpload(
@@ -132,33 +132,18 @@ class UsageTracker(private val database: FirebaseDatabase) {
         bytes: Long,
         category: UsageCategory,
         countsTowardStorage: Boolean
-    ) {
-        if (bytes <= 0L) return
+    ) = withContext(Dispatchers.IO) {
+        if (bytes <= 0L) return@withContext
 
-        val periodKey = currentPeriodKey()
-        val updates = mutableMapOf<String, Any>(
-            "$USAGE_PATH/monthly/$periodKey/uploadBytes" to ServerValue.increment(bytes),
-            "$USAGE_PATH/lastUpdatedAt" to ServerValue.TIMESTAMP
-        )
-
-        when (category) {
-            UsageCategory.MMS -> {
-                updates["$USAGE_PATH/monthly/$periodKey/mmsBytes"] = ServerValue.increment(bytes)
-            }
-            UsageCategory.FILE -> {
-                updates["$USAGE_PATH/monthly/$periodKey/fileBytes"] = ServerValue.increment(bytes)
-            }
+        try {
+            vpsClient.recordUsage(
+                bytes = bytes,
+                category = category.name.lowercase(),
+                countsTowardStorage = countsTowardStorage
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error recording upload: ${e.message}")
         }
-
-        if (countsTowardStorage) {
-            updates["$USAGE_PATH/storageBytes"] = ServerValue.increment(bytes)
-        }
-
-        database.reference
-            .child(USERS_PATH)
-            .child(userId)
-            .updateChildren(updates)
-            .await()
     }
 
     private fun currentPeriodKey(): String {
@@ -181,80 +166,69 @@ class UsageTracker(private val database: FirebaseDatabase) {
     /**
      * Get current usage statistics for display in UI
      */
-    suspend fun getUsageStats(userId: String): UsageStats {
-        val usageRef = database.reference
-            .child(USERS_PATH)
-            .child(userId)
-            .child(USAGE_PATH)
+    suspend fun getUsageStats(userId: String): UsageStats = withContext(Dispatchers.IO) {
+        try {
+            val usageResponse = vpsClient.getUserUsage()
+            val usage = usageResponse.usage ?: return@withContext UsageStats()
 
-        val snapshot = usageRef.get().await()
-        val planRaw = snapshot.child("plan").getValue(String::class.java)
-        val planExpiresAt = snapshot.child("planExpiresAt").getValue(Long::class.java)
-        val now = System.currentTimeMillis()
+            val now = System.currentTimeMillis()
+            val isPaid = isPaidPlan(usage.plan, usage.planExpiresAt, now)
+            val trialStart = usage.trialStartedAt ?: now
 
-        val isPaid = isPaidPlan(planRaw, planExpiresAt, now)
-        val trialStart = snapshot.child("trialStartedAt").getValue(Long::class.java) ?: now
+            val trialElapsedDays = ((now - trialStart) / MILLIS_PER_DAY).toInt()
+            val trialDaysRemaining = maxOf(0, TRIAL_DAYS - trialElapsedDays)
+            val isTrialExpired = !isPaid && trialElapsedDays > TRIAL_DAYS
 
-        val trialElapsedDays = ((now - trialStart) / MILLIS_PER_DAY).toInt()
-        val trialDaysRemaining = maxOf(0, TRIAL_DAYS - trialElapsedDays)
-        val isTrialExpired = !isPaid && trialElapsedDays > TRIAL_DAYS
+            val monthlyLimit = if (isPaid) PAID_MONTHLY_UPLOAD_BYTES else TRIAL_MONTHLY_UPLOAD_BYTES
+            val storageLimit = if (isPaid) PAID_STORAGE_BYTES else TRIAL_STORAGE_BYTES
 
-        val monthlyLimit = if (isPaid) PAID_MONTHLY_UPLOAD_BYTES else TRIAL_MONTHLY_UPLOAD_BYTES
-        val storageLimit = if (isPaid) PAID_STORAGE_BYTES else TRIAL_STORAGE_BYTES
-
-        val periodKey = currentPeriodKey()
-        val periodSnapshot = snapshot.child("monthly").child(periodKey)
-        val currentUpload = periodSnapshot.child("uploadBytes").getValue(Long::class.java) ?: 0L
-        val storageBytes = snapshot.child("storageBytes").getValue(Long::class.java) ?: 0L
-
-        return UsageStats(
-            monthlyUploadBytes = currentUpload,
-            monthlyLimitBytes = monthlyLimit,
-            storageBytes = storageBytes,
-            storageLimitBytes = storageLimit,
-            isPaid = isPaid,
-            isTrialExpired = isTrialExpired,
-            trialDaysRemaining = trialDaysRemaining,
-            periodKey = periodKey
-        )
+            UsageStats(
+                monthlyUploadBytes = usage.monthlyUploadBytes,
+                monthlyLimitBytes = monthlyLimit,
+                storageBytes = usage.storageBytes,
+                storageLimitBytes = storageLimit,
+                isPaid = isPaid,
+                isTrialExpired = isTrialExpired,
+                trialDaysRemaining = trialDaysRemaining,
+                periodKey = currentPeriodKey()
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting usage stats: ${e.message}")
+            UsageStats()
+        }
     }
 
     /**
-     * Clear all synced messages from Firebase (for resync)
+     * Clear all synced messages (for resync)
+     * Note: In VPS mode, this is handled by the server
      */
-    suspend fun clearSyncedMessages(userId: String) {
-        val messagesRef = database.reference
-            .child(USERS_PATH)
-            .child(userId)
-            .child("messages")
-
-        messagesRef.removeValue().await()
+    suspend fun clearSyncedMessages(userId: String) = withContext(Dispatchers.IO) {
+        try {
+            vpsClient.clearSyncedMessages()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error clearing synced messages: ${e.message}")
+        }
     }
 
     /**
      * Clear storage usage counter (after deleting attachments)
      */
-    suspend fun resetStorageUsage(userId: String) {
-        val usageRef = database.reference
-            .child(USERS_PATH)
-            .child(userId)
-            .child(USAGE_PATH)
-
-        usageRef.child("storageBytes").setValue(0L).await()
+    suspend fun resetStorageUsage(userId: String) = withContext(Dispatchers.IO) {
+        try {
+            vpsClient.resetStorageUsage()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error resetting storage usage: ${e.message}")
+        }
     }
 
     /**
      * Reset monthly upload counter
      */
-    suspend fun resetMonthlyUsage(userId: String) {
-        val periodKey = currentPeriodKey()
-        val usageRef = database.reference
-            .child(USERS_PATH)
-            .child(userId)
-            .child(USAGE_PATH)
-            .child("monthly")
-            .child(periodKey)
-
-        usageRef.removeValue().await()
+    suspend fun resetMonthlyUsage(userId: String) = withContext(Dispatchers.IO) {
+        try {
+            vpsClient.resetMonthlyUsage()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error resetting monthly usage: ${e.message}")
+        }
     }
 }

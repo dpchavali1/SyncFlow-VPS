@@ -1,56 +1,40 @@
 package com.phoneintegration.app.desktop
 
-import android.app.AlarmManager
-import android.app.PendingIntent
-import android.content.BroadcastReceiver
 import android.content.Context
-import android.content.Intent
 import android.os.Build
 import android.telephony.SmsManager
 import android.util.Log
 import androidx.work.*
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.*
+import com.phoneintegration.app.vps.VPSClient
+import com.phoneintegration.app.vps.VPSScheduledMessage
 import kotlinx.coroutines.*
-import kotlinx.coroutines.tasks.await
 import java.util.concurrent.TimeUnit
 
 /**
  * Service to handle scheduled messages from macOS.
  * Messages are scheduled on macOS and sent via Android at the specified time.
+ *
+ * VPS Backend Only - Uses VPS API instead of Firebase.
  */
 class ScheduledMessageService(context: Context) {
     private val context: Context = context.applicationContext
-    private val auth = FirebaseAuth.getInstance()
-    private val database = FirebaseDatabase.getInstance()
+    private val vpsClient = VPSClient.getInstance(context)
 
-    private var scheduledMessagesListener: ValueEventListener? = null
+    private var pollingJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val processedMessageIds = mutableSetOf<String>()
 
     companion object {
         private const val TAG = "ScheduledMsgService"
-        private const val SCHEDULED_MESSAGES_PATH = "scheduled_messages"
-        private const val USERS_PATH = "users"
+        private const val POLLING_INTERVAL_MS = 10000L // Poll every 10 seconds
     }
-
-    data class ScheduledMessage(
-        val id: String,
-        val recipientNumber: String,
-        val recipientName: String?,
-        val message: String,
-        val scheduledTime: Long,  // Unix timestamp in milliseconds
-        val createdAt: Long,
-        val status: String,       // "pending", "sent", "failed", "cancelled"
-        val simSlot: Int?
-    )
 
     /**
      * Start listening for scheduled messages
      */
     fun startListening() {
         Log.d(TAG, "Starting scheduled message service")
-        database.goOnline()
-        listenForScheduledMessages()
+        startPolling()
     }
 
     /**
@@ -58,172 +42,90 @@ class ScheduledMessageService(context: Context) {
      */
     fun stopListening() {
         Log.d(TAG, "Stopping scheduled message service")
-        stopListeningForMessages()
+        stopPolling()
         scope.cancel()
     }
 
     /**
-     * Listen for scheduled messages from Firebase
+     * Start polling for scheduled messages from VPS
      */
-    private fun listenForScheduledMessages() {
-        scope.launch {
-            try {
-                val currentUser = auth.currentUser ?: return@launch
-                val userId = currentUser.uid
-
-                val messagesRef = database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(SCHEDULED_MESSAGES_PATH)
-
-                val listener = object : ValueEventListener {
-                    override fun onDataChange(snapshot: DataSnapshot) {
-                        snapshot.children.forEach { child ->
-                            processScheduledMessage(child)
-                        }
-                    }
-
-                    override fun onCancelled(error: DatabaseError) {
-                        Log.e(TAG, "Scheduled messages listener cancelled: ${error.message}")
-                    }
-                }
-
-                scheduledMessagesListener = listener
-                messagesRef.addValueEventListener(listener)
-                Log.d(TAG, "Scheduled messages listener registered")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error starting scheduled messages listener", e)
-            }
-        }
-    }
-
-    private fun stopListeningForMessages() {
-        scheduledMessagesListener?.let { listener ->
-            scope.launch {
+    private fun startPolling() {
+        pollingJob?.cancel()
+        pollingJob = scope.launch {
+            while (isActive) {
                 try {
-                    val userId = auth.currentUser?.uid ?: return@launch
-                    database.reference
-                        .child(USERS_PATH)
-                        .child(userId)
-                        .child(SCHEDULED_MESSAGES_PATH)
-                        .removeEventListener(listener)
+                    if (vpsClient.isAuthenticated) {
+                        pollScheduledMessages()
+                    }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error removing scheduled messages listener", e)
+                    Log.e(TAG, "Error polling scheduled messages", e)
                 }
+                delay(POLLING_INTERVAL_MS)
             }
         }
-        scheduledMessagesListener = null
-        // Also stop optimized listener
-        stopListeningOptimized()
+        Log.d(TAG, "Scheduled messages polling started")
     }
 
-    // ==========================================
-    // BANDWIDTH OPTIMIZED LISTENERS
-    // ==========================================
-
-    private var optimizedListener: ChildEventListener? = null
+    private fun stopPolling() {
+        pollingJob?.cancel()
+        pollingJob = null
+        Log.d(TAG, "Scheduled messages polling stopped")
+    }
 
     /**
-     * BANDWIDTH OPTIMIZED: Start listening using child events
-     * Only downloads new/changed messages instead of full list on every change
+     * Poll for scheduled messages from VPS API
+     */
+    private suspend fun pollScheduledMessages() {
+        try {
+            val messages = vpsClient.getScheduledMessages()
+            for (message in messages) {
+                processScheduledMessage(message)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error fetching scheduled messages", e)
+        }
+    }
+
+    /**
+     * BANDWIDTH OPTIMIZED: Start listening using polling
+     * Same as startListening for VPS implementation
      */
     fun startListeningOptimized() {
         Log.d(TAG, "Starting scheduled message service (optimized)")
-        database.goOnline()
-        listenForScheduledMessagesOptimized()
-    }
-
-    private fun listenForScheduledMessagesOptimized() {
-        scope.launch {
-            try {
-                val currentUser = auth.currentUser ?: return@launch
-                val userId = currentUser.uid
-
-                val messagesRef = database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(SCHEDULED_MESSAGES_PATH)
-
-                val listener = object : ChildEventListener {
-                    override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
-                        processScheduledMessage(snapshot)
-                    }
-
-                    override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
-                        // Status changes - re-process to check if needs sending
-                        processScheduledMessage(snapshot)
-                    }
-
-                    override fun onChildRemoved(snapshot: DataSnapshot) {
-                        // Message cancelled/removed - cancel any pending work
-                        snapshot.key?.let { messageId ->
-                            WorkManager.getInstance(context).cancelUniqueWork("scheduled_message_$messageId")
-                            Log.d(TAG, "Cancelled work for removed message: $messageId")
-                        }
-                    }
-
-                    override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {
-                        // Not used
-                    }
-
-                    override fun onCancelled(error: DatabaseError) {
-                        Log.e(TAG, "Scheduled messages optimized listener cancelled: ${error.message}")
-                    }
-                }
-
-                optimizedListener = listener
-                messagesRef.addChildEventListener(listener)
-                Log.d(TAG, "Scheduled messages optimized listener registered")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error starting scheduled messages optimized listener", e)
-            }
-        }
-    }
-
-    private fun stopListeningOptimized() {
-        optimizedListener?.let { listener ->
-            scope.launch {
-                try {
-                    val userId = auth.currentUser?.uid ?: return@launch
-                    database.reference
-                        .child(USERS_PATH)
-                        .child(userId)
-                        .child(SCHEDULED_MESSAGES_PATH)
-                        .removeEventListener(listener)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error removing scheduled messages optimized listener", e)
-                }
-            }
-        }
-        optimizedListener = null
+        startPolling()
     }
 
     /**
      * Process a scheduled message entry
      */
-    private fun processScheduledMessage(snapshot: DataSnapshot) {
+    private fun processScheduledMessage(message: VPSScheduledMessage) {
         try {
-            val id = snapshot.key ?: return
-            val status = snapshot.child("status").value as? String ?: return
+            val id = message.id
+
+            // Skip if already processed
+            if (processedMessageIds.contains(id)) return
 
             // Only process pending messages
-            if (status != "pending") return
+            if (message.status != "pending") return
 
-            val recipientNumber = snapshot.child("recipientNumber").value as? String ?: return
-            val message = snapshot.child("message").value as? String ?: return
-            val scheduledTime = snapshot.child("scheduledTime").value as? Long ?: return
+            val recipientNumber = message.recipientNumber
+            val messageBody = message.message
+            val scheduledTime = message.scheduledTime
 
             val now = System.currentTimeMillis()
+
+            // Mark as processed
+            processedMessageIds.add(id)
 
             // If scheduled time has passed, send immediately
             if (scheduledTime <= now) {
                 Log.d(TAG, "Scheduled time passed, sending immediately: $id")
-                sendMessage(id, recipientNumber, message, snapshot.child("simSlot").value as? Long)
+                sendMessage(id, recipientNumber, messageBody, message.simSlot?.toLong())
             } else {
                 // Schedule with WorkManager for future delivery
                 val delay = scheduledTime - now
                 Log.d(TAG, "Scheduling message $id for ${delay}ms from now")
-                scheduleMessage(id, recipientNumber, message, delay, snapshot.child("simSlot").value as? Long)
+                scheduleMessage(id, recipientNumber, messageBody, delay, message.simSlot?.toLong())
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error processing scheduled message", e)
@@ -294,32 +196,14 @@ class ScheduledMessageService(context: Context) {
     }
 
     /**
-     * Update message status in Firebase
+     * Update message status via VPS API
      */
     private fun updateMessageStatus(messageId: String, status: String, errorMessage: String? = null) {
         scope.launch {
             try {
-                val userId = auth.currentUser?.uid ?: return@launch
+                if (!vpsClient.isAuthenticated) return@launch
 
-                val updates = mutableMapOf<String, Any?>(
-                    "status" to status,
-                    "updatedAt" to ServerValue.TIMESTAMP
-                )
-                if (status == "sent") {
-                    updates["sentAt"] = ServerValue.TIMESTAMP
-                }
-                if (errorMessage != null) {
-                    updates["errorMessage"] = errorMessage
-                }
-
-                database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(SCHEDULED_MESSAGES_PATH)
-                    .child(messageId)
-                    .updateChildren(updates)
-                    .await()
-
+                vpsClient.updateScheduledMessageStatus(messageId, status, errorMessage)
                 Log.d(TAG, "Updated message $messageId status to $status")
             } catch (e: Exception) {
                 Log.e(TAG, "Error updating message status", e)
@@ -339,11 +223,15 @@ class ScheduledMessageService(context: Context) {
 
 /**
  * WorkManager Worker to send scheduled messages
+ *
+ * VPS Backend Only - Uses VPS API instead of Firebase.
  */
 class SendScheduledMessageWorker(
     context: Context,
     params: WorkerParameters
 ) : CoroutineWorker(context, params) {
+
+    private val vpsClient = VPSClient.getInstance(context)
 
     companion object {
         private const val TAG = "SendScheduledMsgWorker"
@@ -372,7 +260,7 @@ class SendScheduledMessageWorker(
                 smsManager.sendTextMessage(recipientNumber, null, message, null, null)
             }
 
-            // Update status in Firebase
+            // Update status via VPS API
             updateMessageStatus(messageId, "sent")
 
             Log.d(TAG, "Scheduled message sent successfully: $messageId")
@@ -386,28 +274,9 @@ class SendScheduledMessageWorker(
 
     private suspend fun updateMessageStatus(messageId: String, status: String, errorMessage: String? = null) {
         try {
-            val auth = FirebaseAuth.getInstance()
-            val database = FirebaseDatabase.getInstance()
-            val userId = auth.currentUser?.uid ?: return
+            if (!vpsClient.isAuthenticated) return
 
-            val updates = mutableMapOf<String, Any?>(
-                "status" to status,
-                "updatedAt" to ServerValue.TIMESTAMP
-            )
-            if (status == "sent") {
-                updates["sentAt"] = ServerValue.TIMESTAMP
-            }
-            if (errorMessage != null) {
-                updates["errorMessage"] = errorMessage
-            }
-
-            database.reference
-                .child("users")
-                .child(userId)
-                .child("scheduled_messages")
-                .child(messageId)
-                .updateChildren(updates)
-                .await()
+            vpsClient.updateScheduledMessageStatus(messageId, status, errorMessage)
         } catch (e: Exception) {
             Log.e(TAG, "Error updating message status in worker", e)
         }

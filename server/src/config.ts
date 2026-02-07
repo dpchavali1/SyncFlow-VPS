@@ -40,7 +40,7 @@ export const config = {
   },
 
   // CORS
-  corsOrigins: (process.env.CORS_ORIGINS || 'http://localhost:3001').split(','),
+  corsOrigins: (process.env.CORS_ORIGINS || 'http://localhost:3000,http://localhost:3001,https://sfweb.app').split(','),
 
   // Admin credentials (for VPS admin API)
   admin: {
@@ -55,5 +55,14 @@ export const config = {
     accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
     secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
     bucketName: process.env.R2_BUCKET_NAME || 'syncflow-files',
+  },
+
+  // Stripe (subscription billing)
+  stripe: {
+    secretKey: process.env.STRIPE_SECRET_KEY || '',
+    webhookSecret: process.env.STRIPE_WEBHOOK_SECRET || '',
+    priceMonthly: process.env.STRIPE_PRICE_MONTHLY || '',
+    priceYearly: process.env.STRIPE_PRICE_YEARLY || '',
+    priceLifetime: process.env.STRIPE_PRICE_LIFETIME || '',
   },
 };

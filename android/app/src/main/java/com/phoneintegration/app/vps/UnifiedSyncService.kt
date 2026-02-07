@@ -1,9 +1,10 @@
 /**
- * Unified Sync Service
+ * Unified Sync Service - VPS Backend Only
  *
- * This service provides a unified interface for syncing messages, contacts, and calls
- * to either Firebase or VPS backend based on the current configuration.
- * It acts as an adapter/facade that allows gradual migration from Firebase to VPS.
+ * This service provides the main interface for syncing messages, contacts, and calls
+ * to the VPS backend. Firebase has been completely removed.
+ *
+ * This is the primary sync service to use throughout the app.
  */
 
 package com.phoneintegration.app.vps
@@ -11,7 +12,6 @@ package com.phoneintegration.app.vps
 import android.content.Context
 import android.util.Log
 import com.phoneintegration.app.SmsMessage
-import com.phoneintegration.app.desktop.DesktopSyncService
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 
@@ -26,7 +26,7 @@ sealed class UnifiedSyncState {
 }
 
 /**
- * Unified Sync Service that abstracts Firebase and VPS backends
+ * Unified Sync Service - VPS backend only
  */
 class UnifiedSyncService private constructor(private val context: Context) {
 
@@ -46,15 +46,10 @@ class UnifiedSyncService private constructor(private val context: Context) {
     }
 
     private val appContext = context.applicationContext
-    private val backendConfig = SyncBackendConfig.getInstance(appContext)
 
-    // Lazy initialization of services
+    // VPS Sync Service - the only backend
     private val vpsSyncService: VPSSyncService by lazy {
         VPSSyncService.getInstance(appContext)
-    }
-
-    private val firebaseSyncService: DesktopSyncService by lazy {
-        DesktopSyncService(appContext)
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -63,7 +58,7 @@ class UnifiedSyncService private constructor(private val context: Context) {
     private val _syncState = MutableStateFlow<UnifiedSyncState>(UnifiedSyncState.Idle)
     val syncState: StateFlow<UnifiedSyncState> = _syncState.asStateFlow()
 
-    // Outgoing messages from desktop/web (for both backends)
+    // Outgoing messages from desktop/web
     private val _outgoingMessages = MutableSharedFlow<OutgoingMessageData>()
     val outgoingMessages: SharedFlow<OutgoingMessageData> = _outgoingMessages.asSharedFlow()
 
@@ -72,14 +67,8 @@ class UnifiedSyncService private constructor(private val context: Context) {
     val callRequests: SharedFlow<CallRequestData> = _callRequests.asSharedFlow()
 
     init {
-        // Forward VPS events to unified streams when using VPS
-        scope.launch {
-            backendConfig.currentBackend.collect { backend ->
-                if (backend == SyncBackend.VPS || backend == SyncBackend.HYBRID) {
-                    setupVpsEventForwarding()
-                }
-            }
-        }
+        Log.i(TAG, "UnifiedSyncService initialized (VPS backend only)")
+        setupVpsEventForwarding()
     }
 
     private fun setupVpsEventForwarding() {
@@ -111,35 +100,24 @@ class UnifiedSyncService private constructor(private val context: Context) {
     }
 
     /**
-     * Get the current backend being used
-     */
-    fun getCurrentBackend(): SyncBackend = backendConfig.currentBackend.value
-
-    /**
-     * Check if user is authenticated (on current backend)
+     * Check if user is authenticated
      */
     fun isAuthenticated(): Boolean {
-        return when (backendConfig.currentBackend.value) {
-            SyncBackend.VPS -> vpsSyncService.isAuthenticated
-            SyncBackend.FIREBASE, SyncBackend.HYBRID -> {
-                // For Firebase/Hybrid, check Firebase auth
-                com.google.firebase.auth.FirebaseAuth.getInstance().currentUser != null
-            }
-        }
+        return vpsSyncService.isAuthenticated
     }
 
     /**
-     * Get current user ID (from appropriate backend)
+     * Get current user ID
      */
     suspend fun getCurrentUserId(): String? {
-        return when (backendConfig.currentBackend.value) {
-            SyncBackend.VPS -> vpsSyncService.userId
-            SyncBackend.FIREBASE -> firebaseSyncService.getCurrentUserId()
-            SyncBackend.HYBRID -> {
-                // In hybrid mode, use Firebase auth but VPS for sync
-                firebaseSyncService.getCurrentUserId()
-            }
-        }
+        return vpsSyncService.userId
+    }
+
+    /**
+     * Get current device ID
+     */
+    fun getDeviceId(): String? {
+        return vpsSyncService.deviceId
     }
 
     // ==================== Message Sync ====================
@@ -150,21 +128,7 @@ class UnifiedSyncService private constructor(private val context: Context) {
     suspend fun syncMessage(message: SmsMessage, skipAttachments: Boolean = false) {
         _syncState.value = UnifiedSyncState.Syncing
         try {
-            when (backendConfig.currentBackend.value) {
-                SyncBackend.VPS -> {
-                    vpsSyncService.syncMessage(message, skipAttachments)
-                }
-                SyncBackend.FIREBASE -> {
-                    firebaseSyncService.syncMessage(message, skipAttachments)
-                }
-                SyncBackend.HYBRID -> {
-                    // Sync to both backends
-                    coroutineScope {
-                        launch { vpsSyncService.syncMessage(message, skipAttachments) }
-                        launch { firebaseSyncService.syncMessage(message, skipAttachments) }
-                    }
-                }
-            }
+            vpsSyncService.syncMessage(message, skipAttachments)
             _syncState.value = UnifiedSyncState.Success
             Log.d(TAG, "Message synced: ${message.id}")
         } catch (e: Exception) {
@@ -180,21 +144,7 @@ class UnifiedSyncService private constructor(private val context: Context) {
     suspend fun syncMessages(messages: List<SmsMessage>) {
         _syncState.value = UnifiedSyncState.Syncing
         try {
-            when (backendConfig.currentBackend.value) {
-                SyncBackend.VPS -> {
-                    vpsSyncService.syncMessages(messages)
-                }
-                SyncBackend.FIREBASE -> {
-                    firebaseSyncService.syncMessages(messages)
-                }
-                SyncBackend.HYBRID -> {
-                    // Sync to both backends
-                    coroutineScope {
-                        launch { vpsSyncService.syncMessages(messages) }
-                        launch { firebaseSyncService.syncMessages(messages) }
-                    }
-                }
-            }
+            vpsSyncService.syncMessages(messages)
             _syncState.value = UnifiedSyncState.Success
             Log.d(TAG, "Messages synced: ${messages.size}")
         } catch (e: Exception) {
@@ -209,45 +159,28 @@ class UnifiedSyncService private constructor(private val context: Context) {
      */
     suspend fun markMessageRead(messageId: String) {
         try {
-            when (backendConfig.currentBackend.value) {
-                SyncBackend.VPS -> vpsSyncService.markMessageRead(messageId)
-                SyncBackend.FIREBASE -> {
-                    // Firebase marking handled differently
-                    // firebaseSyncService.markMessageRead(messageId)
-                }
-                SyncBackend.HYBRID -> {
-                    vpsSyncService.markMessageRead(messageId)
-                    // Also update Firebase if needed
-                }
-            }
+            vpsSyncService.markMessageRead(messageId)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to mark message read: ${e.message}")
         }
+    }
+
+    /**
+     * Get messages from VPS
+     */
+    suspend fun getMessages(limit: Int = 100, before: Long? = null): List<VPSMessage> {
+        return vpsSyncService.getMessages(limit, before)
     }
 
     // ==================== Contact Sync ====================
 
     /**
      * Sync contacts
-     * Note: Firebase handles contacts via ContactsSyncWorker, not DesktopSyncService
      */
     suspend fun syncContacts(contacts: List<Map<String, Any?>>) {
         _syncState.value = UnifiedSyncState.Syncing
         try {
-            when (backendConfig.currentBackend.value) {
-                SyncBackend.VPS -> {
-                    vpsSyncService.syncContacts(contacts)
-                }
-                SyncBackend.FIREBASE -> {
-                    // Firebase contacts sync is handled by ContactsSyncWorker
-                    // This unified service only supports VPS direct sync
-                    Log.d(TAG, "Firebase contacts sync via ContactsSyncWorker")
-                }
-                SyncBackend.HYBRID -> {
-                    // VPS sync only - Firebase handled separately by workers
-                    vpsSyncService.syncContacts(contacts)
-                }
-            }
+            vpsSyncService.syncContacts(contacts)
             _syncState.value = UnifiedSyncState.Success
             Log.d(TAG, "Contacts synced: ${contacts.size}")
         } catch (e: Exception) {
@@ -257,29 +190,22 @@ class UnifiedSyncService private constructor(private val context: Context) {
         }
     }
 
+    /**
+     * Get contacts from VPS
+     */
+    suspend fun getContacts(): List<VPSContact> {
+        return vpsSyncService.getContacts()
+    }
+
     // ==================== Call History Sync ====================
 
     /**
      * Sync call history
-     * Note: Firebase handles call history via CallHistorySyncWorker, not DesktopSyncService
      */
     suspend fun syncCallHistory(calls: List<Map<String, Any?>>) {
         _syncState.value = UnifiedSyncState.Syncing
         try {
-            when (backendConfig.currentBackend.value) {
-                SyncBackend.VPS -> {
-                    vpsSyncService.syncCallHistory(calls)
-                }
-                SyncBackend.FIREBASE -> {
-                    // Firebase call history sync is handled by CallHistorySyncWorker
-                    // This unified service only supports VPS direct sync
-                    Log.d(TAG, "Firebase call history sync via CallHistorySyncWorker")
-                }
-                SyncBackend.HYBRID -> {
-                    // VPS sync only - Firebase handled separately by workers
-                    vpsSyncService.syncCallHistory(calls)
-                }
-            }
+            vpsSyncService.syncCallHistory(calls)
             _syncState.value = UnifiedSyncState.Success
             Log.d(TAG, "Call history synced: ${calls.size}")
         } catch (e: Exception) {
@@ -289,28 +215,27 @@ class UnifiedSyncService private constructor(private val context: Context) {
         }
     }
 
+    /**
+     * Get call history from VPS
+     */
+    suspend fun getCallHistory(limit: Int = 100): List<VPSCallHistoryEntry> {
+        return vpsSyncService.getCallHistory(limit)
+    }
+
     // ==================== Outgoing Messages ====================
 
     /**
      * Get pending outgoing messages from desktop/web
      */
     suspend fun getOutgoingMessages(): List<OutgoingMessageData> {
-        return when (backendConfig.currentBackend.value) {
-            SyncBackend.VPS, SyncBackend.HYBRID -> {
-                vpsSyncService.getOutgoingMessages().map { msg ->
-                    OutgoingMessageData(
-                        id = msg.id,
-                        address = msg.address,
-                        body = msg.body,
-                        timestamp = msg.timestamp,
-                        simSubscriptionId = msg.simSubscriptionId
-                    )
-                }
-            }
-            SyncBackend.FIREBASE -> {
-                // Firebase version - get from Firebase
-                emptyList() // TODO: Implement Firebase outgoing messages
-            }
+        return vpsSyncService.getOutgoingMessages().map { msg ->
+            OutgoingMessageData(
+                id = msg.id,
+                address = msg.address,
+                body = msg.body,
+                timestamp = msg.timestamp,
+                simSubscriptionId = msg.simSubscriptionId
+            )
         }
     }
 
@@ -318,14 +243,7 @@ class UnifiedSyncService private constructor(private val context: Context) {
      * Update outgoing message status
      */
     suspend fun updateOutgoingMessageStatus(id: String, status: String, error: String? = null) {
-        when (backendConfig.currentBackend.value) {
-            SyncBackend.VPS, SyncBackend.HYBRID -> {
-                vpsSyncService.updateOutgoingMessageStatus(id, status, error)
-            }
-            SyncBackend.FIREBASE -> {
-                // Firebase version
-            }
-        }
+        vpsSyncService.updateOutgoingMessageStatus(id, status, error)
     }
 
     // ==================== Call Requests ====================
@@ -334,21 +252,14 @@ class UnifiedSyncService private constructor(private val context: Context) {
      * Get pending call requests from desktop/web
      */
     suspend fun getCallRequests(): List<CallRequestData> {
-        return when (backendConfig.currentBackend.value) {
-            SyncBackend.VPS, SyncBackend.HYBRID -> {
-                vpsSyncService.getCallRequests().map { req ->
-                    CallRequestData(
-                        id = req.id,
-                        phoneNumber = req.phoneNumber,
-                        status = req.status,
-                        requestedAt = req.requestedAt,
-                        simSubscriptionId = req.simSubscriptionId
-                    )
-                }
-            }
-            SyncBackend.FIREBASE -> {
-                emptyList() // TODO: Implement Firebase call requests
-            }
+        return vpsSyncService.getCallRequests().map { req ->
+            CallRequestData(
+                id = req.id,
+                phoneNumber = req.phoneNumber,
+                status = req.status,
+                requestedAt = req.requestedAt,
+                simSubscriptionId = req.simSubscriptionId
+            )
         }
     }
 
@@ -356,14 +267,7 @@ class UnifiedSyncService private constructor(private val context: Context) {
      * Update call request status
      */
     suspend fun updateCallRequestStatus(id: String, status: String) {
-        when (backendConfig.currentBackend.value) {
-            SyncBackend.VPS, SyncBackend.HYBRID -> {
-                vpsSyncService.updateCallRequestStatus(id, status)
-            }
-            SyncBackend.FIREBASE -> {
-                // Firebase version
-            }
-        }
+        vpsSyncService.updateCallRequestStatus(id, status)
     }
 
     // ==================== Device Management ====================
@@ -372,23 +276,15 @@ class UnifiedSyncService private constructor(private val context: Context) {
      * Get paired devices
      */
     suspend fun getDevices(): List<DeviceData> {
-        return when (backendConfig.currentBackend.value) {
-            SyncBackend.VPS, SyncBackend.HYBRID -> {
-                vpsSyncService.getDevices().map { device ->
-                    DeviceData(
-                        id = device.id,
-                        deviceName = device.deviceName,
-                        deviceType = device.deviceType,
-                        pairedAt = device.pairedAt,
-                        lastSeen = device.lastSeen,
-                        isCurrent = device.isCurrent
-                    )
-                }
-            }
-            SyncBackend.FIREBASE -> {
-                // Firebase version
-                emptyList() // TODO: Implement
-            }
+        return vpsSyncService.getDevices().map { device ->
+            DeviceData(
+                id = device.id,
+                deviceName = device.deviceName,
+                deviceType = device.deviceType,
+                pairedAt = device.pairedAt,
+                lastSeen = device.lastSeen,
+                isCurrent = device.isCurrent
+            )
         }
     }
 
@@ -396,54 +292,60 @@ class UnifiedSyncService private constructor(private val context: Context) {
      * Remove a device
      */
     suspend fun removeDevice(deviceId: String) {
-        when (backendConfig.currentBackend.value) {
-            SyncBackend.VPS, SyncBackend.HYBRID -> {
-                vpsSyncService.removeDevice(deviceId)
-            }
-            SyncBackend.FIREBASE -> {
-                // Firebase version
-            }
-        }
+        vpsSyncService.removeDevice(deviceId)
+    }
+
+    // ==================== Pairing ====================
+
+    /**
+     * Complete pairing (called after scanning QR code)
+     */
+    suspend fun completePairing(token: String) {
+        vpsSyncService.completePairing(token)
     }
 
     // ==================== Connection Management ====================
 
     /**
-     * Connect WebSocket (for VPS real-time updates)
+     * Connect WebSocket for real-time updates
      */
     fun connectRealtime() {
-        when (backendConfig.currentBackend.value) {
-            SyncBackend.VPS, SyncBackend.HYBRID -> {
-                vpsSyncService.connectWebSocket()
-            }
-            SyncBackend.FIREBASE -> {
-                // Firebase handles this automatically
-            }
-        }
+        vpsSyncService.connectWebSocket()
     }
 
     /**
      * Disconnect WebSocket
      */
     fun disconnectRealtime() {
-        when (backendConfig.currentBackend.value) {
-            SyncBackend.VPS, SyncBackend.HYBRID -> {
-                vpsSyncService.disconnectWebSocket()
-            }
-            SyncBackend.FIREBASE -> {
-                // Firebase handles this automatically
-            }
-        }
+        vpsSyncService.disconnectWebSocket()
     }
 
     /**
      * Get connection state
      */
     val connectionState: StateFlow<Boolean>
-        get() = when (backendConfig.currentBackend.value) {
-            SyncBackend.VPS, SyncBackend.HYBRID -> vpsSyncService.connectionState
-            SyncBackend.FIREBASE -> MutableStateFlow(true).asStateFlow()
-        }
+        get() = vpsSyncService.connectionState
+
+    /**
+     * Initialize the sync service
+     */
+    suspend fun initialize(): Boolean {
+        return vpsSyncService.initialize()
+    }
+
+    /**
+     * Authenticate anonymously
+     */
+    suspend fun authenticateAnonymous(): VPSUser {
+        return vpsSyncService.authenticateAnonymous()
+    }
+
+    /**
+     * Logout
+     */
+    fun logout() {
+        vpsSyncService.logout()
+    }
 }
 
 // ==================== Data Classes ====================

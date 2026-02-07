@@ -1,5 +1,6 @@
 package com.phoneintegration.app.ui.settings
 
+import android.util.Log
 import androidx.compose.animation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -12,14 +13,16 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import com.google.firebase.functions.FirebaseFunctions
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
 import java.text.SimpleDateFormat
 import java.util.*
+
+private const val TAG = "DeleteAccountScreen"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -27,8 +30,10 @@ fun DeleteAccountScreen(
     onBack: () -> Unit,
     onAccountDeleted: () -> Unit = {}
 ) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
+    val vpsClient = remember { VPSClient.getInstance(context) }
 
     var isLoading by remember { mutableStateOf(true) }
     var isScheduledForDeletion by remember { mutableStateOf(false) }
@@ -52,18 +57,14 @@ fun DeleteAccountScreen(
     // Check deletion status on load
     LaunchedEffect(Unit) {
         try {
-            val functions = FirebaseFunctions.getInstance()
-            val result = functions
-                .getHttpsCallable("getAccountDeletionStatus")
-                .call()
-                .await()
-
-            val data = result.data as? Map<*, *>
-            isScheduledForDeletion = data?.get("isScheduledForDeletion") as? Boolean ?: false
-            scheduledDeletionAt = (data?.get("scheduledDeletionAt") as? Number)?.toLong()
-            daysRemaining = (data?.get("daysRemaining") as? Number)?.toInt() ?: 0
+            val result = vpsClient.getAccountDeletionStatus()
+            isScheduledForDeletion = result.isScheduledForDeletion
+            scheduledDeletionAt = result.scheduledDeletionAt
+            daysRemaining = result.daysRemaining
+            Log.d(TAG, "Deletion status: scheduled=$isScheduledForDeletion, days=$daysRemaining")
         } catch (e: Exception) {
             // Not scheduled or error
+            Log.e(TAG, "Error checking deletion status: ${e.message}")
             isScheduledForDeletion = false
         } finally {
             isLoading = false
@@ -75,23 +76,18 @@ fun DeleteAccountScreen(
         scope.launch {
             isProcessing = true
             try {
-                val functions = FirebaseFunctions.getInstance()
-                val result = functions
-                    .getHttpsCallable("requestAccountDeletion")
-                    .call(mapOf("reason" to selectedReason))
-                    .await()
-
-                val data = result.data as? Map<*, *>
-                val success = data?.get("success") as? Boolean ?: false
-
-                if (success) {
-                    scheduledDeletionAt = (data?.get("scheduledDeletionAt") as? Number)?.toLong()
+                val result = vpsClient.requestAccountDeletion(selectedReason)
+                if (result.success) {
+                    scheduledDeletionAt = result.scheduledDeletionAt
                     daysRemaining = 30
                     isScheduledForDeletion = true
                     showConfirmDialog = false
                     snackbarHostState.showSnackbar("Account scheduled for deletion in 30 days")
+                } else {
+                    snackbarHostState.showSnackbar("Failed to schedule deletion")
                 }
             } catch (e: Exception) {
+                Log.e(TAG, "Error requesting deletion: ${e.message}")
                 snackbarHostState.showSnackbar("Failed to schedule deletion: ${e.message}")
             } finally {
                 isProcessing = false
@@ -104,22 +100,17 @@ fun DeleteAccountScreen(
         scope.launch {
             isProcessing = true
             try {
-                val functions = FirebaseFunctions.getInstance()
-                val result = functions
-                    .getHttpsCallable("cancelAccountDeletion")
-                    .call()
-                    .await()
-
-                val data = result.data as? Map<*, *>
-                val success = data?.get("success") as? Boolean ?: false
-
-                if (success) {
+                val result = vpsClient.cancelAccountDeletion()
+                if (result.success) {
                     isScheduledForDeletion = false
                     scheduledDeletionAt = null
                     showCancelDialog = false
                     snackbarHostState.showSnackbar("Account deletion cancelled")
+                } else {
+                    snackbarHostState.showSnackbar("Failed to cancel deletion")
                 }
             } catch (e: Exception) {
+                Log.e(TAG, "Error cancelling deletion: ${e.message}")
                 snackbarHostState.showSnackbar("Failed to cancel deletion: ${e.message}")
             } finally {
                 isProcessing = false

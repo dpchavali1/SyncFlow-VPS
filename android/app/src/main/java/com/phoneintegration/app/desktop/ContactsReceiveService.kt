@@ -6,30 +6,29 @@ import android.content.Context
 import android.provider.ContactsContract
 import android.util.Base64
 import android.util.Log
-import com.google.firebase.database.*
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.*
-import kotlinx.coroutines.tasks.await
 import com.phoneintegration.app.utils.PhoneNumberNormalizer
 
 /**
- * Service to receive contact changes from Firebase (created on macOS/Web)
+ * Service to receive contact changes from VPS (created on macOS/Web)
  * and sync them to Android device contacts.
  *
+ * VPS Backend Only - Uses VPS API instead of Firebase.
+ *
  * This enables two-way contact sync:
- * - Android → Firebase (existing ContactsSyncService)
- * - Firebase → Android (this service)
+ * - Android → VPS (existing ContactsSyncService)
+ * - VPS → Android (this service)
  */
 class ContactsReceiveService(private val context: Context) {
 
     companion object {
         private const val TAG = "ContactsReceiveService"
-        private const val CONTACTS_PATH = "contacts"
+        private const val POLLING_INTERVAL_MS = 30000L // Poll every 30 seconds for contacts
     }
 
-    private val syncService = DesktopSyncService(context)
-    private var contactsListener: ValueEventListener? = null
-    private var childContactsListener: ChildEventListener? = null  // BANDWIDTH OPTIMIZED
-    private var databaseRef: DatabaseReference? = null
+    private val vpsClient = VPSClient.getInstance(context)
+    private var pollingJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     /**
@@ -101,106 +100,70 @@ class ContactsReceiveService(private val context: Context) {
      * Start listening for desktop-created contacts
      */
     fun startListening() {
-        scope.launch {
-            try {
-                val userId = syncService.getCurrentUserId()
-
-                databaseRef = FirebaseDatabase.getInstance().reference
-                    .child("users")
-                    .child(userId)
-                    .child(CONTACTS_PATH)
-
-                contactsListener = object : ValueEventListener {
-                    override fun onDataChange(snapshot: DataSnapshot) {
-                        scope.launch {
-                            processContactChanges(snapshot)
-                        }
-                    }
-
-                    override fun onCancelled(error: DatabaseError) {
-                        Log.e(TAG, "Firebase listener cancelled: ${error.message}")
-                    }
-                }
-
-                databaseRef?.addValueEventListener(contactsListener!!)
-                Log.d(TAG, "Started listening for universal contacts")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error starting contacts listener", e)
-            }
-        }
+        startPolling()
     }
 
     /**
      * Stop listening for contact changes
      */
     fun stopListening() {
-        contactsListener?.let { listener ->
-            databaseRef?.removeEventListener(listener)
-        }
-        childContactsListener?.let { listener ->
-            databaseRef?.removeEventListener(listener)
-        }
-        contactsListener = null
-        childContactsListener = null
-        databaseRef = null
+        stopPolling()
         scope.cancel()
-        Log.d(TAG, "Stopped listening for universal contacts")
+        Log.d(TAG, "Stopped listening for remote contacts")
     }
 
     /**
-     * BANDWIDTH OPTIMIZED: Start listening with child events instead of value events.
-     * This reduces bandwidth by ~95% - only receives individual contact changes,
-     * not the entire contacts list on every change.
+     * Start polling for remote contacts from VPS
      */
-    fun startListeningOptimized() {
-        scope.launch {
-            try {
-                val userId = syncService.getCurrentUserId()
-
-                databaseRef = FirebaseDatabase.getInstance().reference
-                    .child("users")
-                    .child(userId)
-                    .child(CONTACTS_PATH)
-
-                childContactsListener = object : ChildEventListener {
-                    override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
-                        scope.launch {
-                            processSingleContact(snapshot)
-                        }
+    private fun startPolling() {
+        pollingJob?.cancel()
+        pollingJob = scope.launch {
+            while (isActive) {
+                try {
+                    if (vpsClient.isAuthenticated) {
+                        pollRemoteContacts()
                     }
-
-                    override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
-                        scope.launch {
-                            processSingleContact(snapshot)
-                        }
-                    }
-
-                    override fun onChildRemoved(snapshot: DataSnapshot) {
-                        Log.d(TAG, "Contact removed from Firebase: ${snapshot.key}")
-                    }
-
-                    override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
-
-                    override fun onCancelled(error: DatabaseError) {
-                        Log.e(TAG, "Firebase child listener cancelled: ${error.message}")
-                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error polling remote contacts", e)
                 }
-
-                databaseRef?.addChildEventListener(childContactsListener!!)
-                Log.d(TAG, "Started OPTIMIZED listening for contacts (delta-only)")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error starting optimized contacts listener", e)
+                delay(POLLING_INTERVAL_MS)
             }
         }
+        Log.d(TAG, "Started polling for remote contacts")
+    }
+
+    private fun stopPolling() {
+        pollingJob?.cancel()
+        pollingJob = null
     }
 
     /**
-     * Process a single contact change (for optimized listener)
+     * BANDWIDTH OPTIMIZED: Start listening with polling.
+     * Same as startListening for VPS implementation.
      */
-    private suspend fun processSingleContact(snapshot: DataSnapshot) {
+    fun startListeningOptimized() {
+        startPolling()
+        Log.d(TAG, "Started OPTIMIZED listening for contacts (polling)")
+    }
+
+    /**
+     * Poll for pending remote contacts from VPS
+     */
+    private suspend fun pollRemoteContacts() {
         try {
-            val contactId = snapshot.key ?: return
-            val data = snapshot.value as? Map<String, Any?> ?: return
+            val contacts = vpsClient.getRemoteContacts(pendingOnly = true)
+            processContactChanges(contacts)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error fetching remote contacts", e)
+        }
+    }
+
+    /**
+     * Process a single contact change
+     */
+    private suspend fun processSingleContact(data: Map<String, Any?>) {
+        try {
+            val contactId = data["id"] as? String ?: return
 
             // Use existing fromMap method
             val contact = RemoteContactUpdate.fromMap(contactId, data) ?: return
@@ -216,15 +179,14 @@ class ContactsReceiveService(private val context: Context) {
     }
 
     /**
-     * Process contact changes from Firebase
+     * Process contact changes from VPS
      */
-    private suspend fun processContactChanges(snapshot: DataSnapshot) {
+    private suspend fun processContactChanges(contacts: List<Map<String, Any?>>) {
         try {
             val pendingContacts = mutableListOf<RemoteContactUpdate>()
 
-            for (child in snapshot.children) {
-                val contactId = child.key ?: continue
-                val data = child.value as? Map<String, Any?> ?: continue
+            for (data in contacts) {
+                val contactId = data["id"] as? String ?: continue
 
                 RemoteContactUpdate.fromMap(contactId, data)?.let { contact ->
                     pendingContacts.add(contact)
@@ -604,25 +566,9 @@ class ContactsReceiveService(private val context: Context) {
      */
     private suspend fun markPendingSyncComplete(contactId: String, androidContactId: Long, previousVersion: Long) {
         try {
-            val userId = syncService.getCurrentUserId()
+            if (!vpsClient.isAuthenticated) return
 
-            val updates = mapOf<String, Any?>(
-                "sync/pendingAndroidSync" to false,
-                "sync/desktopOnly" to false,
-                "sync/lastUpdatedBy" to "android",
-                "sync/version" to previousVersion + 1,
-                "sync/lastSyncedAt" to ServerValue.TIMESTAMP,
-                "androidContactId" to androidContactId
-            )
-
-            FirebaseDatabase.getInstance().reference
-                .child("users")
-                .child(userId)
-                .child(CONTACTS_PATH)
-                .child(contactId)
-                .updateChildren(updates)
-                .await()
-
+            vpsClient.markContactSyncComplete(contactId, androidContactId, previousVersion)
         } catch (e: Exception) {
             Log.e(TAG, "Error marking contact as synced", e)
         }
@@ -633,17 +579,9 @@ class ContactsReceiveService(private val context: Context) {
      */
     suspend fun syncContactFromDesktop(contactId: String): Boolean {
         return try {
-            val userId = syncService.getCurrentUserId()
+            if (!vpsClient.isAuthenticated) return false
 
-            val snapshot = FirebaseDatabase.getInstance().reference
-                .child("users")
-                .child(userId)
-                .child(CONTACTS_PATH)
-                .child(contactId)
-                .get()
-                .await()
-
-            val data = snapshot.value as? Map<String, Any?> ?: return false
+            val data = vpsClient.getRemoteContact(contactId) ?: return false
             val contact = RemoteContactUpdate.fromMap(contactId, data, requirePending = false) ?: return false
 
             val androidId = createOrUpdateAndroidContact(contact)

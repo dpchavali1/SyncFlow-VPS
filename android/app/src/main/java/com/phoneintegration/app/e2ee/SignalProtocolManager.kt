@@ -14,9 +14,8 @@ import com.google.crypto.tink.KeysetHandle
 import com.google.crypto.tink.TinkJsonProtoKeysetFormat
 import com.google.crypto.tink.hybrid.HybridConfig
 import com.google.crypto.tink.hybrid.HybridKeyTemplates
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.FirebaseDatabase
-import kotlinx.coroutines.tasks.await
+import com.phoneintegration.app.vps.VPSClient
+import kotlinx.coroutines.runBlocking
 import java.nio.charset.StandardCharsets
 import java.security.AlgorithmParameters
 import java.security.KeyFactory
@@ -65,8 +64,7 @@ class SignalProtocolManager(private val context: Context) {
         private const val GCM_TAG_LENGTH = 128
     }
 
-    private val firebaseDatabase = FirebaseDatabase.getInstance()
-    private val auth = FirebaseAuth.getInstance()
+    private val vpsClient = VPSClient.getInstance(context)
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
     private var privateKeysetHandle: KeysetHandle? = null
@@ -188,8 +186,8 @@ class SignalProtocolManager(private val context: Context) {
             privateKeysetHandle = keysetHandle
             encryptionPrimitive = keysetHandle.getPrimitive(HybridDecrypt::class.java)
 
-            // Publish public key to Firebase
-            publishPublicKeyToFirebase(publicKeysetJson)
+            // Publish public key to VPS
+            publishPublicKeyToVps(publicKeysetJson)
 
             registerUser()
             ensureEcdhKeys()
@@ -350,21 +348,27 @@ class SignalProtocolManager(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     private fun registerUser() {
-        val uid = auth.currentUser?.uid ?: return
+        val uid = vpsClient.userId ?: return
         try {
             val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
             val phoneNumber = telephonyManager.line1Number
             if (!phoneNumber.isNullOrEmpty()) {
-                firebaseDatabase.getReference("users").child(uid).child("phoneNumber").setValue(phoneNumber)
-                firebaseDatabase.getReference("phone_to_uid").child(phoneNumber.replace("+", "")).setValue(uid)
+                runBlocking {
+                    try {
+                        vpsClient.registerPhoneNumber(phoneNumber)
+                        Log.d(TAG, "Phone number registered via VPS")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error registering phone number via VPS", e)
+                    }
+                }
             }
         } catch (e: SecurityException) {
             Log.w(TAG, "Could not get phone number - permission not granted")
         }
     }
 
-    private fun publishPublicKeyToFirebase(publicKeysetJson: String) {
-        val uid = auth.currentUser?.uid ?: return
+    private fun publishPublicKeyToVps(publicKeysetJson: String) {
+        val uid = vpsClient.userId ?: return
 
         val keyData = mapOf(
             "publicKey" to publicKeysetJson,
@@ -373,19 +377,18 @@ class SignalProtocolManager(private val context: Context) {
             "timestamp" to System.currentTimeMillis()
         )
 
-        // IMPORTANT: Use updateChildren() instead of setValue() to preserve per-device keys
-        // setValue() would delete all child nodes including per-device key entries
-        firebaseDatabase.getReference("e2ee_keys").child(uid).updateChildren(keyData)
-            .addOnSuccessListener {
-                Log.d(TAG, "Public key published to Firebase")
+        runBlocking {
+            try {
+                vpsClient.publishE2eePublicKey(keyData)
+                Log.d(TAG, "Public key published to VPS")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error publishing public key to VPS", e)
             }
-            .addOnFailureListener { e ->
-                Log.e(TAG, "Error publishing public key", e)
-            }
+        }
     }
 
     private fun publishDevicePublicKey() {
-        val uid = auth.currentUser?.uid ?: return
+        val uid = vpsClient.userId ?: return
         val deviceId = getDeviceId() ?: return
         val publicKeyX963 = prefs.getString(KEY_ECDH_PUBLIC, null) ?: return
 
@@ -397,23 +400,19 @@ class SignalProtocolManager(private val context: Context) {
             "timestamp" to System.currentTimeMillis()
         )
 
-        firebaseDatabase.getReference("e2ee_keys")
-            .child(uid)
-            .child(deviceId)
-            .setValue(keyData)
-            .addOnSuccessListener {
-                Log.d(TAG, "Device public key published to Firebase")
+        runBlocking {
+            try {
+                vpsClient.publishDeviceE2eeKey(deviceId, keyData)
+                Log.d(TAG, "Device public key published to VPS")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error publishing device public key to VPS", e)
             }
-            .addOnFailureListener { e ->
-                Log.e(TAG, "Error publishing device public key", e)
-            }
+        }
     }
 
     suspend fun getPublicKey(uid: String): String? {
         return try {
-            val dataSnapshot = firebaseDatabase.getReference("e2ee_keys").child(uid).get().await()
-            @Suppress("UNCHECKED_CAST")
-            val keyData = dataSnapshot.value as? Map<String, Any?>
+            val keyData = vpsClient.getE2eePublicKey(uid)
             keyData?.get("publicKey") as? String
         } catch (e: Exception) {
             Log.e(TAG, "Error fetching public key for $uid", e)
@@ -423,11 +422,10 @@ class SignalProtocolManager(private val context: Context) {
 
     suspend fun getDevicePublicKeys(uid: String): Map<String, String> {
         return try {
-            val snapshot = firebaseDatabase.getReference("e2ee_keys").child(uid).get().await()
+            val deviceKeys = vpsClient.getDeviceE2eeKeys(uid)
             val keys = mutableMapOf<String, String>()
-            snapshot.children.forEach { child ->
-                val deviceId = child.key ?: return@forEach
-                val publicKey = child.child("publicKeyX963").getValue(String::class.java)
+            deviceKeys.forEach { (deviceId, keyData) ->
+                val publicKey = keyData["publicKeyX963"] as? String
                 if (!publicKey.isNullOrBlank()) {
                     keys[deviceId] = publicKey
                 }
@@ -709,10 +707,16 @@ class SignalProtocolManager(private val context: Context) {
             Log.e(TAG, "Error clearing Keystore key", e)
         }
 
-        // Clear from Firebase
-        val uid = auth.currentUser?.uid
-        if (uid != null) {
-            firebaseDatabase.getReference("e2ee_keys").child(uid).removeValue()
+        // Clear from VPS
+        if (vpsClient.userId != null) {
+            runBlocking {
+                try {
+                    vpsClient.clearE2eeKeys()
+                    Log.d(TAG, "E2EE keys cleared from VPS")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error clearing E2EE keys from VPS", e)
+                }
+            }
         }
 
         Log.d(TAG, "All E2EE keys cleared")

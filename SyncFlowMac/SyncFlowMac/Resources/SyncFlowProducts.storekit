@@ -1,0 +1,147 @@
+{
+  "identifier" : "DBFC4D62-A7D2-4B4E-9A12-3F8C5E6A1B2D",
+  "nonRenewingSubscriptions" : [
+    {
+      "displayPrice" : "79.99",
+      "familyShareable" : false,
+      "internalID" : "F1E2D3C4-B5A6-7890-1234-567890ABCDEF",
+      "localizations" : [
+        {
+          "description" : "3 years of SyncFlow Pro access - Best Value",
+          "displayName" : "3-Year Plan",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "com.syncflow.3year",
+      "referenceName" : "3-Year Plan",
+      "type" : "NonRenewingSubscription"
+    }
+  ],
+  "products" : [
+
+  ],
+  "settings" : {
+    "_applicationInternalID" : "1234567890",
+    "_developerTeamID" : "XXXXXXXXXX",
+    "_failTransactionsEnabled" : false,
+    "_lastSynchronizedDate" : 745872934.68340194,
+    "_locale" : "en_US",
+    "_storefront" : "USA",
+    "_storeKitErrors" : [
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Load Products"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Purchase"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Verification"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "App Store Sync"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Subscription Status"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "App Transaction"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Manage Subscriptions Sheet"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Refund Request Sheet"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Offer Code Redeem Sheet"
+      }
+    ]
+  },
+  "subscriptionGroups" : [
+    {
+      "id" : "A1B2C3D4-E5F6-7890-ABCD-EF1234567890",
+      "localizations" : [
+        {
+          "description" : "SyncFlow Pro subscription plans",
+          "displayName" : "SyncFlow Pro",
+          "locale" : "en_US"
+        }
+      ],
+      "name" : "SyncFlow Pro",
+      "subscriptions" : [
+        {
+          "adHocOffers" : [
+
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "4.99",
+          "familyShareable" : false,
+          "groupNumber" : 1,
+          "internalID" : "B2C3D4E5-F6A7-8901-2345-678901BCDEFG",
+          "introductoryOffer" : null,
+          "localizations" : [
+            {
+              "description" : "Full access to all SyncFlow Pro features including photo sync",
+              "displayName" : "Monthly",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "com.syncflow.subscription.monthly",
+          "recurringSubscriptionPeriod" : "P1M",
+          "referenceName" : "Monthly Subscription",
+          "subscriptionGroupID" : "A1B2C3D4-E5F6-7890-ABCD-EF1234567890",
+          "type" : "RecurringSubscription"
+        },
+        {
+          "adHocOffers" : [
+
+          ],
+          "codeOffers" : [
+
+          ],
+          "displayPrice" : "39.99",
+          "familyShareable" : false,
+          "groupNumber" : 2,
+          "internalID" : "C3D4E5F6-A7B8-9012-3456-789012CDEFGH",
+          "introductoryOffer" : null,
+          "localizations" : [
+            {
+              "description" : "Full access to all SyncFlow Pro features - Save 33%",
+              "displayName" : "Yearly",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "com.syncflow.subscription.yearly",
+          "recurringSubscriptionPeriod" : "P1Y",
+          "referenceName" : "Yearly Subscription",
+          "subscriptionGroupID" : "A1B2C3D4-E5F6-7890-ABCD-EF1234567890",
+          "type" : "RecurringSubscription"
+        }
+      ]
+    }
+  ],
+  "version" : {
+    "major" : 3,
+    "minor" : 0
+  }
+}

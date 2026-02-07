@@ -390,7 +390,7 @@ fun VpsSettingsScreen(
                     value = customUrl,
                     onValueChange = { customUrl = it },
                     label = { Text("Server URL") },
-                    placeholder = { Text("http://5.78.188.206") },
+                    placeholder = { Text("https://api.sfweb.app") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )

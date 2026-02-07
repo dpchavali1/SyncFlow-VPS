@@ -5,15 +5,14 @@ import android.util.Base64
 import android.util.Log
 import androidx.core.content.FileProvider
 import androidx.work.*
-import com.google.firebase.functions.FirebaseFunctions
 import com.phoneintegration.app.MmsHelper
 import com.phoneintegration.app.SmsRepository
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
 import java.util.concurrent.TimeUnit
 
 /**
@@ -582,19 +581,12 @@ class OutgoingMessageWorker(
     }
 
     /**
-     * Download an attachment file from Cloudflare R2 storage.
+     * Download an attachment file from R2 storage or any HTTP URL.
      *
-     * ## R2 Download Flow
+     * ## Download Flow
      *
-     * 1. Call `getR2DownloadUrl` Cloud Function with r2Key
-     * 2. Receive presigned download URL (typically valid for 1 hour)
-     * 3. Download file via HTTP GET to presigned URL
-     * 4. Return raw bytes for local processing
-     *
-     * ## Firebase Function Interaction
-     *
-     * **Request:** `{ r2Key: "files/userId/..." }`
-     * **Response:** `{ downloadUrl: "https://r2.cloudflarestorage.com/..." }`
+     * 1. Download file directly via HTTP GET (R2 URLs are public or presigned)
+     * 2. Return raw bytes for local processing
      *
      * ## Network Configuration
      *
@@ -602,48 +594,30 @@ class OutgoingMessageWorker(
      * - Read timeout: 60 seconds (accommodates larger files)
      * - Accepts HTTP 2xx responses only
      *
-     * @param r2Key The R2 storage key (path) for the attachment
+     * @param url The download URL for the attachment
      * @return Raw file bytes if successful, null on any error
      */
-    private suspend fun downloadAttachment(r2Key: String): ByteArray? {
-        return try {
-            // Get presigned download URL from R2 via Cloud Function
-            val downloadUrlData = hashMapOf("r2Key" to r2Key)
-            val result = FirebaseFunctions.getInstance()
-                .getHttpsCallable("getR2DownloadUrl")
-                .call(downloadUrlData)
-                .await()
+    private suspend fun downloadAttachment(url: String): ByteArray? = withContext(Dispatchers.IO) {
+        try {
+            val client = OkHttpClient.Builder()
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(60, TimeUnit.SECONDS)
+                .build()
 
-            @Suppress("UNCHECKED_CAST")
-            val response = result.data as? Map<String, Any>
-            val downloadUrl = response?.get("downloadUrl") as? String
-                ?: throw Exception("Failed to get R2 download URL")
+            val request = Request.Builder()
+                .url(url)
+                .build()
 
-            // Download from presigned URL
-            withContext(Dispatchers.IO) {
-                var connection: HttpURLConnection? = null
-                try {
-                    val urlObj = URL(downloadUrl)
-                    connection = urlObj.openConnection() as HttpURLConnection
-                    connection.requestMethod = "GET"
-                    connection.connectTimeout = 30000
-                    connection.readTimeout = 60000
-
-                    if (connection.responseCode in 200..299) {
-                        connection.inputStream.use { it.readBytes() }
-                    } else {
-                        Log.e(TAG, "Download failed with response code: ${connection.responseCode}")
-                        null
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error downloading from URL", e)
-                    null
-                } finally {
-                    connection?.disconnect()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.e(TAG, "Download failed with response code: ${response.code}")
+                    return@withContext null
                 }
+
+                response.body?.bytes()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error downloading attachment from R2", e)
+            Log.e(TAG, "Error downloading attachment", e)
             null
         }
     }

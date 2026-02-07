@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
+import { randomUUID } from 'crypto';
 import {
   createAnonymousUser,
   generateTokenPair,
@@ -11,10 +12,12 @@ import {
   verifyToken,
   generateToken,
   getOrCreateUserByFirebaseUid,
+  migrateUserData,
 } from '../services/auth';
 import { authenticate } from '../middleware/auth';
 import { authRateLimit } from '../middleware/rateLimit';
 import { config } from '../config';
+import { query } from '../services/database';
 
 const router = Router();
 
@@ -32,6 +35,7 @@ const redeemPairingSchema = z.object({
   token: z.string().min(1),
   deviceName: z.string().min(1).max(255).optional(),
   deviceType: z.enum(['android', 'macos', 'web']).optional(),
+  tempUserId: z.string().optional(),
 });
 
 const refreshTokenSchema = z.object({
@@ -51,9 +55,22 @@ router.post('/firebase', authRateLimit, async (req: Request, res: Response) => {
 
     // Get or create user with Firebase UID
     const userId = await getOrCreateUserByFirebaseUid(body.firebaseUid);
-    const deviceId = `${body.deviceType}_${Date.now()}_${Math.random().toString(36).substring(7)}`;
 
-    // Register the device
+    // Reuse existing device of the same type if one exists (prevents device pile-up on reinstall)
+    const existingDevice = await query<{ id: string }>(
+      `SELECT id FROM user_devices WHERE user_id = $1 AND device_type = $2 ORDER BY last_seen DESC LIMIT 1`,
+      [userId, body.deviceType]
+    );
+
+    const deviceId = existingDevice.length > 0
+      ? existingDevice[0].id
+      : `${body.deviceType}_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+
+    if (existingDevice.length > 0) {
+      console.log(`[Auth] Reusing existing ${body.deviceType} device: ${deviceId}`);
+    }
+
+    // Register the device (or update last_seen for existing)
     await registerDevice(userId, deviceId, {
       name: body.deviceName,
       type: body.deviceType,
@@ -101,23 +118,28 @@ router.post('/pair/initiate', authRateLimit, async (req: Request, res: Response)
   try {
     const body = initiatePairingSchema.parse(req.body);
 
-    // Create anonymous user for the new device
-    const { userId, deviceId } = await createAnonymousUser();
+    // Generate temp IDs WITHOUT creating a database user row.
+    // Previously this called createAnonymousUser() which inserted into the users table,
+    // creating orphan rows every time a QR code was displayed but never scanned.
+    // The temp IDs are only used for JWT generation and Redis caching.
+    const tempUserId = randomUUID();
+    const deviceId = randomUUID();
 
-    // Create pairing request
+    // Create pairing request (stored in Redis + pairing_requests table)
     const token = await createPairingRequest(
       deviceId,
       body.deviceName,
-      body.deviceType
+      body.deviceType,
+      tempUserId
     );
 
     // Generate temporary tokens (will be replaced after pairing)
-    const tokens = generateTokenPair(userId, deviceId);
+    const tokens = generateTokenPair(tempUserId, deviceId);
 
     res.json({
       pairingToken: token,
       deviceId,
-      tempUserId: userId,
+      tempUserId,
       ...tokens,
     });
   } catch (error) {
@@ -184,14 +206,14 @@ router.post('/pair/redeem', authRateLimit, async (req: Request, res: Response) =
   try {
     const body = redeemPairingSchema.parse(req.body);
 
-    const result = await redeemPairingToken(body.token);
+    const result = await redeemPairingToken(body.token, body.tempUserId);
 
     if (!result) {
       res.status(400).json({ error: 'Pairing not approved or already redeemed' });
       return;
     }
 
-    // Register the device under the paired user
+    // Register the device under the paired user (Android's user)
     await registerDevice(result.userId, result.deviceId, {
       name: body.deviceName,
       type: body.deviceType || 'web',
@@ -311,6 +333,44 @@ router.get('/admin/token', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Admin token error:', error);
     res.status(500).json({ error: 'Failed to generate token' });
+  }
+});
+
+// POST /auth/admin/migrate - Migrate data from one user to another (admin only)
+const migrateSchema = z.object({
+  fromUserId: z.string().uuid(),
+  toUserId: z.string().uuid(),
+});
+
+router.post('/admin/migrate', authenticate, async (req: Request, res: Response) => {
+  try {
+    // Check admin permission
+    if (!req.user?.admin) {
+      res.status(403).json({ error: 'Admin access required' });
+      return;
+    }
+
+    const body = migrateSchema.parse(req.body);
+
+    console.log(`[Admin] Migrating data from ${body.fromUserId} to ${body.toUserId}`);
+    const result = await migrateUserData(body.fromUserId, body.toUserId);
+
+    if (result.migrated) {
+      res.json({
+        success: true,
+        message: `Migrated data from ${body.fromUserId} to ${body.toUserId}`,
+        counts: result.counts,
+      });
+    } else {
+      res.status(500).json({ error: 'Migration failed' });
+    }
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      res.status(400).json({ error: 'Invalid request', details: error.errors });
+      return;
+    }
+    console.error('Migration error:', error);
+    res.status(500).json({ error: 'Failed to migrate data' });
   }
 });
 
