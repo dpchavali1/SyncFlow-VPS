@@ -128,6 +128,7 @@ class VPSService {
       this.refreshToken = localStorage.getItem(STORAGE_KEYS.refreshToken);
       this.userId = localStorage.getItem(STORAGE_KEYS.userId);
       this.deviceId = localStorage.getItem(STORAGE_KEYS.deviceId);
+      console.log('[VPS] Service init: userId=', this.userId, 'hasToken=', !!this.accessToken);
     }
   }
 
@@ -146,6 +147,7 @@ class VPSService {
   }
 
   private saveTokens(accessToken: string, refreshToken: string, userId: string, deviceId: string) {
+    console.log('[VPS] saveTokens: userId=', userId, 'deviceId=', deviceId);
     this.accessToken = accessToken;
     this.refreshToken = refreshToken;
     this.userId = userId;
@@ -828,8 +830,16 @@ class VPSService {
   }
 }
 
-// Export singleton instance
-export const vpsService = new VPSService();
+// Export true singleton — survives Next.js chunk re-evaluation
+const getVPSService = (): VPSService => {
+  if (typeof window !== 'undefined') {
+    if (!(window as any).__vpsService) {
+      (window as any).__vpsService = new VPSService();
+    }
+    return (window as any).__vpsService;
+  }
+  return new VPSService();
+};
 
-// Export for use in components
+export const vpsService = getVPSService();
 export default vpsService;
