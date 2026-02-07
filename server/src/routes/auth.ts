@@ -206,12 +206,16 @@ router.post('/pair/redeem', authRateLimit, async (req: Request, res: Response) =
   try {
     const body = redeemPairingSchema.parse(req.body);
 
+    console.log(`[Auth] pair/redeem called with token=${body.token}`);
     const result = await redeemPairingToken(body.token, body.tempUserId);
 
     if (!result) {
+      console.log(`[Auth] pair/redeem failed: pairing not approved or already redeemed`);
       res.status(400).json({ error: 'Pairing not approved or already redeemed' });
       return;
     }
+
+    console.log(`[Auth] pair/redeem success: userId=${result.userId}, deviceId=${result.deviceId}`);
 
     // Register the device under the paired user (Android's user)
     await registerDevice(result.userId, result.deviceId, {
