@@ -149,7 +149,7 @@ fun ConversationDetailScreen(
                     return@launch
                 }
                 val result = manager.startCallToUser(
-                    recipientPhoneNumber = effectiveSendAddress,
+                    recipientPhone = effectiveSendAddress,
                     recipientName = contactName,
                     isVideo = true
                 )
@@ -458,7 +458,7 @@ fun ConversationDetailScreen(
                                                 return@launch
                                             }
                                             val result = manager.startCallToUser(
-                                                recipientPhoneNumber = effectiveSendAddress,
+                                                recipientPhone = effectiveSendAddress,
                                                 recipientName = contactName,
                                                 isVideo = true
                                             )

@@ -5,27 +5,26 @@ import android.content.Intent
 import android.net.Uri
 import android.util.Log
 import android.widget.Toast
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.*
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.*
-import kotlinx.coroutines.tasks.await
 
 /**
  * Service that receives shared links from macOS/desktop and opens them
  * in the phone's browser.
+ *
+ * VPS Backend Only - Uses VPS API instead of Firebase.
  */
 class LinkSharingService(context: Context) {
     private val context: Context = context.applicationContext
-    private val auth = FirebaseAuth.getInstance()
-    private val database = FirebaseDatabase.getInstance()
+    private val vpsClient = VPSClient.getInstance(context)
 
-    private var linkListenerHandle: ChildEventListener? = null
+    private var linkPollingJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val processedLinks = mutableSetOf<String>()
 
     companion object {
         private const val TAG = "LinkSharingService"
-        private const val SHARED_LINKS_PATH = "shared_links"
-        private const val USERS_PATH = "users"
+        private const val POLL_INTERVAL_MS = 2000L
     }
 
     /**
@@ -33,7 +32,6 @@ class LinkSharingService(context: Context) {
      */
     fun startListening() {
         Log.d(TAG, "Starting link sharing service")
-        database.goOnline()
         listenForSharedLinks()
     }
 
@@ -42,95 +40,59 @@ class LinkSharingService(context: Context) {
      */
     fun stopListening() {
         Log.d(TAG, "Stopping link sharing service")
-        removeLinkListener()
+        linkPollingJob?.cancel()
+        linkPollingJob = null
         scope.cancel()
     }
 
     /**
-     * Listen for shared links from other devices
+     * Listen for shared links from other devices via polling
      */
     private fun listenForSharedLinks() {
-        scope.launch {
-            try {
-                val currentUser = auth.currentUser ?: return@launch
-                val userId = currentUser.uid
-
-                val linksRef = database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(SHARED_LINKS_PATH)
-
-                linkListenerHandle = object : ChildEventListener {
-                    override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
-                        handleSharedLink(snapshot)
+        linkPollingJob?.cancel()
+        linkPollingJob = scope.launch {
+            while (isActive) {
+                try {
+                    if (!vpsClient.isAuthenticated) {
+                        delay(POLL_INTERVAL_MS)
+                        continue
                     }
 
-                    override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
-                        // Don't re-process changed links
-                    }
+                    val links = vpsClient.getSharedLinks()
+                    for (link in links) {
+                        // Skip if already processed locally
+                        if (processedLinks.contains(link.id)) continue
 
-                    override fun onChildRemoved(snapshot: DataSnapshot) {}
-                    override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
-                    override fun onCancelled(error: DatabaseError) {
-                        Log.e(TAG, "Link listener cancelled: ${error.message}")
+                        // Check if already opened
+                        if (link.status == "opened") {
+                            processedLinks.add(link.id)
+                            continue
+                        }
+
+                        // Check if link is recent (within last 60 seconds)
+                        val now = System.currentTimeMillis()
+                        if (now - link.timestamp > 60000) {
+                            Log.d(TAG, "Ignoring old link: ${link.id}")
+                            processedLinks.add(link.id)
+                            continue
+                        }
+
+                        Log.d(TAG, "Received shared link: ${link.url}")
+
+                        // Open the link in browser
+                        openLinkInBrowser(link.url, link.title)
+
+                        // Mark as opened
+                        updateLinkStatus(link.id, "opened")
+                        processedLinks.add(link.id)
                     }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error polling shared links", e)
                 }
-
-                linksRef.addChildEventListener(linkListenerHandle!!)
-                Log.d(TAG, "Link listener registered")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error starting link listener", e)
+                delay(POLL_INTERVAL_MS)
             }
         }
-    }
-
-    private fun removeLinkListener() {
-        scope.launch {
-            try {
-                val userId = auth.currentUser?.uid ?: return@launch
-                linkListenerHandle?.let { listener ->
-                    database.reference
-                        .child(USERS_PATH)
-                        .child(userId)
-                        .child(SHARED_LINKS_PATH)
-                        .removeEventListener(listener)
-                }
-                linkListenerHandle = null
-            } catch (e: Exception) {
-                Log.e(TAG, "Error removing link listener", e)
-            }
-        }
-    }
-
-    /**
-     * Handle incoming shared link
-     */
-    private fun handleSharedLink(snapshot: DataSnapshot) {
-        val linkId = snapshot.key ?: return
-        val url = snapshot.child("url").value as? String ?: return
-        val title = snapshot.child("title").value as? String
-        val status = snapshot.child("status").value as? String
-        val timestamp = snapshot.child("timestamp").value as? Long ?: 0
-
-        // Check if already processed
-        if (status == "opened") {
-            return
-        }
-
-        // Check if link is recent (within last 60 seconds)
-        val now = System.currentTimeMillis()
-        if (now - timestamp > 60000) {
-            Log.d(TAG, "Ignoring old link: $linkId")
-            return
-        }
-
-        Log.d(TAG, "Received shared link: $url")
-
-        // Open the link in browser
-        openLinkInBrowser(url, title)
-
-        // Mark as opened
-        updateLinkStatus(linkId, "opened")
+        Log.d(TAG, "Link polling started")
     }
 
     /**
@@ -168,22 +130,14 @@ class LinkSharingService(context: Context) {
     }
 
     /**
-     * Update the link status in Firebase
+     * Update the link status in VPS
      */
     private fun updateLinkStatus(linkId: String, status: String) {
         scope.launch {
             try {
-                val userId = auth.currentUser?.uid ?: return@launch
+                if (!vpsClient.isAuthenticated) return@launch
 
-                database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(SHARED_LINKS_PATH)
-                    .child(linkId)
-                    .child("status")
-                    .setValue(status)
-                    .await()
-
+                vpsClient.updateSharedLinkStatus(linkId, status)
                 Log.d(TAG, "Updated link $linkId status to $status")
             } catch (e: Exception) {
                 Log.e(TAG, "Error updating link status", e)

@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { query } from '../services/database';
+import { query, transaction } from '../services/database';
 import { authenticate } from '../middleware/auth';
 import { apiRateLimit } from '../middleware/rateLimit';
 
@@ -250,25 +250,32 @@ router.post('/register', async (req: Request, res: Response) => {
     // Normalize phone number (remove spaces, dashes, keep + and digits)
     const normalizedPhone = body.phoneNumber.replace(/[\s\-()]/g, '');
 
-    // First, remove any existing registration for this phone number (from any user)
-    // This allows a phone to be re-registered to a different account
-    await query(
-      `DELETE FROM user_phone_registry WHERE phone_number = $1`,
-      [normalizedPhone]
-    );
+    await transaction(async (client) => {
+      // Prevent concurrent register calls from tripping the unique constraint.
+      await client.query('LOCK TABLE user_phone_registry IN EXCLUSIVE MODE');
 
-    // Also remove any existing registration for this user (if they had a different phone)
-    await query(
-      `DELETE FROM user_phone_registry WHERE user_id = $1`,
-      [userId]
-    );
+      // Remove any existing registration for this phone number (from any user).
+      await client.query(
+        `DELETE FROM user_phone_registry WHERE phone_number = $1 AND user_id <> $2`,
+        [normalizedPhone, userId]
+      );
 
-    // Now insert the new registration
-    await query(
-      `INSERT INTO user_phone_registry (user_id, phone_number, registered_at)
-       VALUES ($1, $2, $3)`,
-      [userId, normalizedPhone, Date.now()]
-    );
+      // Insert or update the user's registration.
+      await client.query(
+        `INSERT INTO user_phone_registry (user_id, phone_number, registered_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (user_id) DO UPDATE SET
+           phone_number = EXCLUDED.phone_number,
+           registered_at = EXCLUDED.registered_at`,
+        [userId, normalizedPhone, Date.now()]
+      );
+
+      // Also update the users table phone column for admin visibility
+      await client.query(
+        `UPDATE users SET phone = $1 WHERE uid = $2`,
+        [normalizedPhone, userId]
+      );
+    });
 
     console.log(`Phone number registered: ${normalizedPhone} for user: ${userId}`);
 
@@ -284,6 +291,27 @@ router.post('/register', async (req: Request, res: Response) => {
     }
     console.error('Register phone error:', error);
     res.status(500).json({ error: 'Failed to register phone number' });
+  }
+});
+
+// GET /calls/my-phone - Get current user's registered phone number
+router.get('/my-phone', async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId!;
+    const result = await query<{ phone_number: string }>(
+      `SELECT phone_number FROM user_phone_registry WHERE user_id = $1`,
+      [userId]
+    );
+
+    if (result.length === 0) {
+      res.json({ phoneNumber: null });
+      return;
+    }
+
+    res.json({ phoneNumber: result[0].phone_number });
+  } catch (error) {
+    console.error('Get my phone error:', error);
+    res.status(500).json({ error: 'Failed to get phone number' });
   }
 });
 

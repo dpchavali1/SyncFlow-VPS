@@ -24,11 +24,9 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
 import androidx.core.content.ContextCompat
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.*
-import com.google.firebase.messaging.FirebaseMessaging
 import com.phoneintegration.app.models.SyncFlowCall
 import com.phoneintegration.app.models.SyncFlowDevice
+import com.phoneintegration.app.vps.VPSClient
 import com.phoneintegration.app.webrtc.SyncFlowCallManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.collectLatest
@@ -83,7 +81,7 @@ class SyncFlowCallService : Service() {
         }
 
         /**
-         * Start the service. This now only starts the Firebase listener for incoming calls
+         * Start the service. This starts the VPS call listener for incoming calls
          * instead of running a permanent foreground service. The service will stop itself
          * when idle to save battery.
          */
@@ -127,27 +125,20 @@ class SyncFlowCallService : Service() {
         }
     }
 
-    private val database = FirebaseDatabase.getInstance()
-    private val auth = FirebaseAuth.getInstance()
+    private lateinit var vpsClient: VPSClient
 
-    private var incomingCallsListener: ChildEventListener? = null
-    private var incomingUserCallsListener: ChildEventListener? = null
-    private var incomingUserCallsDebugListener: ValueEventListener? = null
-    private var deviceStatusRef: DatabaseReference? = null
+    private var incomingCallsPollingJob: Job? = null
+    private var callStatusPollingJob: Job? = null
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     private var pendingIncomingCall: SyncFlowCall? = null
-    private var pendingIncomingCallStatusRef: DatabaseReference? = null
-    private var pendingIncomingCallStatusListener: ValueEventListener? = null
     private var pendingPermissionCallId: String? = null
     private var pendingPermissionWithVideo: Boolean = false
     private var pendingPermissionIsUserCall: Boolean = false
     private var pendingPermissionCallerName: String? = null
     private var idleTimeoutJob: Job? = null
     private var isCallActive = false
-    private var authStateListener: FirebaseAuth.AuthStateListener? = null
-    private var lastAuthUid: String? = null
 
     // Ringtone for incoming calls
     private var ringtonePlayer: MediaPlayer? = null
@@ -156,6 +147,8 @@ class SyncFlowCallService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "SyncFlowCallService created")
+
+        vpsClient = VPSClient.getInstance(applicationContext)
 
         createNotificationChannel()
 
@@ -166,17 +159,11 @@ class SyncFlowCallService : Service() {
         // Start listening for call state changes
         observeCallState()
 
-        // Ensure listeners start once auth is available
-        authStateListener = FirebaseAuth.AuthStateListener { auth ->
-            val uid = auth.currentUser?.uid
-            if (uid != null && uid != lastAuthUid) {
-                lastAuthUid = uid
-                Log.d(TAG, "Auth ready in service, starting call listeners for userId=$uid")
-                startListeningForCalls()
-                registerFcmToken()
-            }
+        // Start polling for calls if authenticated
+        if (vpsClient.isAuthenticated) {
+            Log.d(TAG, "VPS authenticated in service, starting call polling")
+            startListeningForCalls()
         }
-        authStateListener?.let { auth.addAuthStateListener(it) }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -185,9 +172,8 @@ class SyncFlowCallService : Service() {
                 startForegroundNotification()
                 startListeningForCalls()
                 updateDeviceOnlineStatus(true)
-                registerFcmToken()
                 startIdleTimeout() // Start idle timeout to auto-stop when no calls
-                Log.d(TAG, "Service started (on-demand via FCM), listening for incoming calls")
+                Log.d(TAG, "Service started (on-demand), listening for incoming calls")
             }
             ACTION_STOP_SERVICE -> {
                 updateDeviceOnlineStatus(false)
@@ -227,17 +213,17 @@ class SyncFlowCallService : Service() {
                 }
             }
             ACTION_INCOMING_USER_CALL -> {
-                // Handle incoming user call directly from FCM (bypasses Firebase listeners which are offline)
+                // Handle incoming user call directly from push notification
                 val callId = intent.getStringExtra(EXTRA_CALL_ID) ?: return START_NOT_STICKY
                 val callerName = intent.getStringExtra(EXTRA_CALLER_NAME) ?: "Unknown"
                 val callerPhone = intent.getStringExtra(EXTRA_CALLER_PHONE) ?: ""
                 val isVideo = intent.getBooleanExtra(EXTRA_IS_VIDEO, false)
 
-                Log.d(TAG, "Incoming user call from FCM: callId=$callId, caller=$callerName")
+                Log.d(TAG, "Incoming user call: callId=$callId, caller=$callerName")
 
-                val userId = auth.currentUser?.uid ?: return START_NOT_STICKY
+                val userId = vpsClient.userId ?: return START_NOT_STICKY
 
-                // Create the pending incoming call directly from FCM data
+                // Create the pending incoming call
                 val call = com.phoneintegration.app.models.SyncFlowCall(
                     id = callId,
                     callerId = "", // Will be populated when answering
@@ -298,8 +284,6 @@ class SyncFlowCallService : Service() {
         cancelIdleTimeout()
         updateDeviceOnlineStatus(false)
         stopListeningForCalls()
-        authStateListener?.let { auth.removeAuthStateListener(it) }
-        authStateListener = null
         _callManager?.release()
         _callManager = null
         serviceScope.cancel()
@@ -428,322 +412,109 @@ class SyncFlowCallService : Service() {
     }
 
     private fun startListeningForCalls() {
-        val userId = auth.currentUser?.uid ?: run {
-            Log.w(TAG, "Cannot start call listeners - user not authenticated yet")
+        if (!vpsClient.isAuthenticated) {
+            Log.w(TAG, "Cannot start call polling - not authenticated yet")
             return
         }
-        Log.d(TAG, "Starting to listen for incoming SyncFlow calls")
+        Log.d(TAG, "Starting to poll for incoming SyncFlow calls")
         stopListeningForCalls()
 
-        // Listen for device-to-device calls (existing path)
-        val callsRef = database.reference
-            .child("users")
-            .child(userId)
-            .child("syncflow_calls")
+        // Start polling for incoming calls
+        incomingCallsPollingJob = serviceScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                try {
+                    val commands = vpsClient.getCallCommands()
+                    for (command in commands.filter { !it.processed }) {
+                        if (command.command == "incoming_call" && command.phoneNumber != null) {
+                            // Handle incoming call
+                            val call = SyncFlowCall(
+                                id = command.id,
+                                callerId = "",
+                                callerName = command.phoneNumber ?: "Unknown",
+                                callerPlatform = "unknown",
+                                calleeId = vpsClient.userId ?: "",
+                                calleeName = "",
+                                calleePlatform = "android",
+                                callType = SyncFlowCall.CallType.AUDIO,
+                                status = SyncFlowCall.CallStatus.RINGING,
+                                startedAt = command.timestamp,
+                                isUserCall = true,
+                                callerPhone = command.phoneNumber ?: ""
+                            )
 
-        incomingCallsListener = callsRef.orderByChild("status").equalTo("ringing")
-            .addChildEventListener(object : ChildEventListener {
-                override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
-                    val callData = snapshot.value as? Map<String, Any?> ?: return
-                    val call = SyncFlowCall.fromMap(snapshot.key ?: "", callData)
+                            withContext(Dispatchers.Main) {
+                                cancelIdleTimeout()
+                                pendingIncomingCall = call
+                                _pendingIncomingCallFlow.value = call
+                                startCallStatusPolling(call)
+                                showIncomingCallNotification(call)
+                                launchIncomingCallActivity(call)
+                            }
 
-                    // Only handle incoming calls (where we are the callee on Android)
-                    if (call.calleePlatform == "android" && call.isRinging) {
-                        Log.d(TAG, "Incoming SyncFlow call from ${call.callerName}")
-                        cancelIdleTimeout() // Keep service alive while call is ringing
-                        pendingIncomingCall = call
-                        startPendingCallStatusListener(call)
-                        showIncomingCallNotification(call)
-                        launchIncomingCallActivity(call)
+                            vpsClient.markCallCommandProcessed(command.id)
+                        }
                     }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error polling for calls", e)
                 }
-
-                override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
-                    val callData = snapshot.value as? Map<String, Any?> ?: return
-                    val call = SyncFlowCall.fromMap(snapshot.key ?: "", callData)
-
-                    // If call is no longer ringing, dismiss notification
-                    if (!call.isRinging) {
-                        dismissIncomingCallNotification()
-                        pendingIncomingCall = null
-                        stopPendingCallStatusListener()
-                        updateNotificationForIdle()
-                    }
-                }
-
-                override fun onChildRemoved(snapshot: DataSnapshot) {
-                    val callId = snapshot.key
-                    if (pendingIncomingCall == null || callId == pendingIncomingCall?.id) {
-                        dismissIncomingCallNotification()
-                        pendingIncomingCall = null
-                        stopPendingCallStatusListener()
-                        updateNotificationForIdle()
-                    }
-                }
-
-                override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
-                override fun onCancelled(error: DatabaseError) {
-                    Log.e(TAG, "Incoming calls listener cancelled: ${error.message}")
-                }
-            })
-
-        // Listen for user-to-user calls (new path for cross-user video calling)
-        startListeningForUserCalls(userId)
-    }
-
-    private fun startListeningForUserCalls(userId: String) {
-        Log.d(TAG, "Starting to listen for incoming user-to-user calls for userId: $userId")
-
-        val userCallsRef = database.reference
-            .child("users")
-            .child(userId)
-            .child("incoming_syncflow_calls")
-
-        // Also add a simple value listener to see if any data exists
-        val debugListener = object : ValueEventListener {
-            override fun onDataChange(snapshot: DataSnapshot) {
-                Log.d(TAG, "incoming_syncflow_calls snapshot: exists=${snapshot.exists()}, childrenCount=${snapshot.childrenCount}")
-                var hasRingingCall = false
-                snapshot.children.forEach { child ->
-                    val status = (child.value as? Map<*, *>)?.get("status")
-                    Log.d(TAG, "  - Call ${child.key}: status=$status")
-                    if ((status as? String) == "ringing") {
-                        hasRingingCall = true
-                    }
-                }
-                if (!hasRingingCall) {
-                    Log.d(TAG, "No ringing user calls remain; dismissing any lingering notifications")
-                    dismissIncomingCallNotification()
-                    pendingIncomingCall = null
-                    stopPendingCallStatusListener()
-                    updateNotificationForIdle()
-                }
-            }
-            override fun onCancelled(error: DatabaseError) {
-                Log.e(TAG, "incoming_syncflow_calls listener error: ${error.message}")
+                delay(2000) // Poll every 2 seconds for calls
             }
         }
-        incomingUserCallsDebugListener = debugListener
-        userCallsRef.addValueEventListener(debugListener)
+    }
 
-        incomingUserCallsListener = userCallsRef.orderByChild("status").equalTo("ringing")
-            .addChildEventListener(object : ChildEventListener {
-                override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
-                    Log.d(TAG, "ChildEventListener onChildAdded: key=${snapshot.key}")
-                    val callData = snapshot.value as? Map<String, Any?> ?: run {
-                        Log.w(TAG, "Call data is null or not a Map")
-                        return
+    private fun startCallStatusPolling(call: SyncFlowCall) {
+        callStatusPollingJob?.cancel()
+        callStatusPollingJob = serviceScope.launch(Dispatchers.IO) {
+            while (isActive) {
+                try {
+                    // Check if call is still ringing via VPS API
+                    val commands = vpsClient.getCallCommands()
+                    val currentCall = commands.find { it.id == call.id }
+
+                    if (currentCall == null || currentCall.processed) {
+                        // Call ended or was answered elsewhere
+                        withContext(Dispatchers.Main) {
+                            Log.d(TAG, "Pending call no longer active, dismissing notification")
+                            dismissIncomingCallNotification()
+                            pendingIncomingCall = null
+                            updateNotificationForIdle()
+                        }
+                        break
                     }
-                    val callId = snapshot.key ?: return
-
-                    val callerUid = callData["callerUid"] as? String ?: ""
-                    val callerName = callData["callerName"] as? String ?: "Unknown"
-                    val callerPhone = callData["callerPhone"] as? String ?: ""
-                    val callerPlatform = callData["callerPlatform"] as? String ?: "unknown"
-                    val callType = callData["callType"] as? String ?: "audio"
-                    val status = callData["status"] as? String ?: ""
-
-                    Log.d(TAG, "Parsed call data: callerName=$callerName, status=$status, callType=$callType")
-
-                    if (status == "ringing") {
-                        Log.d(TAG, "Incoming user call from $callerName ($callerPhone)")
-
-                        // Create a SyncFlowCall object for compatibility with existing UI
-                        val call = SyncFlowCall(
-                            id = callId,
-                            callerId = callerUid,
-                            callerName = callerName,
-                            callerPlatform = callerPlatform,
-                            calleeId = userId,
-                            calleeName = "",
-                            calleePlatform = "android",
-                            callType = SyncFlowCall.CallType.fromString(callType),
-                            status = SyncFlowCall.CallStatus.RINGING,
-                            startedAt = System.currentTimeMillis(),
-                            isUserCall = true,  // Mark as user call
-                            callerPhone = callerPhone
-                        )
-
-                        cancelIdleTimeout() // Keep service alive while call is ringing
-                        pendingIncomingCall = call
-                        startPendingCallStatusListener(call)
-                        showIncomingCallNotification(call)
-                        launchIncomingCallActivity(call)
-                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error polling call status", e)
                 }
-
-                override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
-                    val callData = snapshot.value as? Map<String, Any?> ?: return
-                    val callId = snapshot.key ?: return
-                    val status = callData["status"] as? String ?: ""
-
-                    // If call is no longer ringing, dismiss notification
-                    if (status != "ringing") {
-                        Log.d(TAG, "User call status changed to: $status")
-                        dismissIncomingCallNotification()
-                        pendingIncomingCall = null
-                        stopPendingCallStatusListener()
-                        updateNotificationForIdle()
-                    }
-                }
-
-                override fun onChildRemoved(snapshot: DataSnapshot) {
-                    val callId = snapshot.key
-                    if (pendingIncomingCall == null || callId == pendingIncomingCall?.id) {
-                        dismissIncomingCallNotification()
-                        pendingIncomingCall = null
-                        stopPendingCallStatusListener()
-                        updateNotificationForIdle()
-                    }
-                }
-
-                override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {}
-                override fun onCancelled(error: DatabaseError) {
-                    Log.e(TAG, "Incoming user calls listener cancelled: ${error.message}")
-                }
-            })
+                delay(1000) // Check every second
+            }
+        }
     }
 
     private fun stopListeningForCalls() {
-        val userId = auth.currentUser?.uid ?: return
-
-        incomingCallsListener?.let {
-            database.reference
-                .child("users")
-                .child(userId)
-                .child("syncflow_calls")
-                .removeEventListener(it)
-        }
-        incomingCallsListener = null
-
-        // Also stop listening for user calls
-        incomingUserCallsListener?.let {
-            database.reference
-                .child("users")
-                .child(userId)
-                .child("incoming_syncflow_calls")
-                .removeEventListener(it)
-        }
-        incomingUserCallsListener = null
-
-        incomingUserCallsDebugListener?.let {
-            database.reference
-                .child("users")
-                .child(userId)
-                .child("incoming_syncflow_calls")
-                .removeEventListener(it)
-        }
-        incomingUserCallsDebugListener = null
-
-        stopPendingCallStatusListener()
-    }
-
-    private fun startPendingCallStatusListener(call: SyncFlowCall) {
-        val userId = auth.currentUser?.uid ?: return
-
-        stopPendingCallStatusListener()
-
-        val callRef = database.reference
-            .child("users")
-            .child(userId)
-            .child(if (call.isUserCall) "incoming_syncflow_calls" else "syncflow_calls")
-            .child(call.id)
-
-        val listener = object : ValueEventListener {
-            override fun onDataChange(snapshot: DataSnapshot) {
-                if (pendingIncomingCall?.id != call.id) return
-
-                if (!snapshot.exists()) {
-                    Log.d(TAG, "Pending call removed from Firebase, dismissing notification")
-                    dismissIncomingCallNotification()
-                    pendingIncomingCall = null
-                    updateNotificationForIdle()
-                    return
-                }
-
-                val status = snapshot.child("status").getValue(String::class.java) ?: return
-                if (status != "ringing") {
-                    Log.d(TAG, "Pending call status updated to $status, dismissing notification")
-                    dismissIncomingCallNotification()
-                    pendingIncomingCall = null
-                    updateNotificationForIdle()
-                }
-            }
-
-            override fun onCancelled(error: DatabaseError) {
-                Log.e(TAG, "Pending call status listener cancelled: ${error.message}")
-            }
-        }
-
-        pendingIncomingCallStatusRef = callRef
-        pendingIncomingCallStatusListener = listener
-        callRef.addValueEventListener(listener)
+        incomingCallsPollingJob?.cancel()
+        incomingCallsPollingJob = null
+        callStatusPollingJob?.cancel()
+        callStatusPollingJob = null
     }
 
     private fun stopPendingCallStatusListener() {
-        val ref = pendingIncomingCallStatusRef
-        val listener = pendingIncomingCallStatusListener
-        if (ref != null && listener != null) {
-            ref.removeEventListener(listener)
-        }
-        pendingIncomingCallStatusRef = null
-        pendingIncomingCallStatusListener = null
-    }
-
-    /**
-     * Register/update FCM token in Firebase.
-     * This ensures push notifications can be received even when the app is closed.
-     */
-    private fun registerFcmToken() {
-        val userId = auth.currentUser?.uid ?: return
-
-        FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
-            if (!task.isSuccessful) {
-                Log.e(TAG, "Failed to get FCM token", task.exception)
-                return@addOnCompleteListener
-            }
-
-            val token = task.result
-            Log.d(TAG, "Registering FCM token for user $userId")
-
-            // Save token to Firebase
-            database.reference
-                .child("fcm_tokens")
-                .child(userId)
-                .setValue(token)
-                .addOnSuccessListener {
-                    Log.d(TAG, "FCM token registered successfully")
-                }
-                .addOnFailureListener { e ->
-                    Log.e(TAG, "Failed to register FCM token", e)
-                }
-        }
+        callStatusPollingJob?.cancel()
+        callStatusPollingJob = null
     }
 
     private fun updateDeviceOnlineStatus(online: Boolean) {
-        val userId = auth.currentUser?.uid ?: return
+        if (!vpsClient.isAuthenticated) return
         val deviceId = getAndroidDeviceId()
 
-        deviceStatusRef = database.reference
-            .child("users")
-            .child(userId)
-            .child("devices")
-            .child(deviceId)
-
-        val deviceData = SyncFlowDevice(
-            id = deviceId,
-            name = getAndroidDeviceName(),
-            platform = "android",
-            online = online,
-            lastSeen = System.currentTimeMillis()
-        )
-
-        deviceStatusRef?.setValue(deviceData.toMap())
-
-        // Set up disconnect handler
-        if (online) {
-            deviceStatusRef?.child("online")?.onDisconnect()?.setValue(false)
-            deviceStatusRef?.child("lastSeen")?.onDisconnect()?.setValue(ServerValue.TIMESTAMP)
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                vpsClient.updateDevice(
+                    id = deviceId,
+                    name = getAndroidDeviceName()
+                )
+                Log.d(TAG, "Device status updated: online=$online")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error updating device status", e)
+            }
         }
     }
 
@@ -1142,7 +913,7 @@ class SyncFlowCallService : Service() {
     }
 
     private fun answerCall(callId: String, withVideo: Boolean) {
-        val userId = auth.currentUser?.uid ?: return
+        val userId = vpsClient.userId ?: return
 
         val incomingCall = pendingIncomingCall
         val isUserCall = incomingCall?.isUserCall ?: false
@@ -1248,7 +1019,7 @@ class SyncFlowCallService : Service() {
     }
 
     private fun rejectCall(callId: String) {
-        val userId = auth.currentUser?.uid ?: return
+        val userId = vpsClient.userId ?: return
         val isUserCall = pendingIncomingCall?.isUserCall ?: false
 
         dismissIncomingCallNotification()

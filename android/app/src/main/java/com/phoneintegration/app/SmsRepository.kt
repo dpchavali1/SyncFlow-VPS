@@ -2057,6 +2057,130 @@ class SmsRepository(private val context: Context) {
         }
 
     /**
+     * Get messages since a specific timestamp (for incremental sync)
+     */
+    suspend fun getMessagesSince(sinceTimestamp: Long): List<SmsMessage> =
+        withContext(Dispatchers.IO) {
+            val list = mutableListOf<SmsMessage>()
+            val uniqueAddresses = mutableSetOf<String>()
+
+            Log.d("SmsRepository", "Loading messages since ${java.util.Date(sinceTimestamp)}")
+
+            // Load SMS messages since timestamp
+            val smsCursor = resolver.query(
+                Telephony.Sms.CONTENT_URI,
+                arrayOf(
+                    Telephony.Sms._ID,
+                    Telephony.Sms.ADDRESS,
+                    Telephony.Sms.BODY,
+                    Telephony.Sms.DATE,
+                    Telephony.Sms.TYPE,
+                    Telephony.Sms.READ
+                ),
+                "${Telephony.Sms.DATE} > ?",
+                arrayOf(sinceTimestamp.toString()),
+                "${Telephony.Sms.DATE} DESC"
+            )
+
+            smsCursor?.use { c ->
+                while (c.moveToNext()) {
+                    val address = c.getString(1) ?: continue
+                    if (isRcsAddress(address)) continue
+                    uniqueAddresses.add(address)
+
+                    val sms = SmsMessage(
+                        id = c.getLong(0),
+                        address = address,
+                        body = c.getString(2) ?: "",
+                        date = c.getLong(3),
+                        type = c.getInt(4),
+                        contactName = null,
+                        isRead = c.getInt(5) == 1
+                    )
+
+                    sms.category = MessageCategorizer.categorizeMessage(sms)
+                    sms.otpInfo = MessageCategorizer.extractOtp(sms.body)
+
+                    list.add(sms)
+                }
+            }
+
+            Log.d("SmsRepository", "Loaded ${list.size} SMS messages since timestamp")
+
+            // Load MMS messages since timestamp
+            val sinceTimestampSec = sinceTimestamp / 1000
+            val mmsCursor = resolver.query(
+                Uri.parse("content://mms"),
+                arrayOf("_id", "date", "sub", "sub_cs", "m_type", "msg_box"),
+                "date > ?",
+                arrayOf(sinceTimestampSec.toString()),
+                "date DESC"
+            )
+
+            mmsCursor?.use { c ->
+                while (c.moveToNext()) {
+                    val mmsId = c.getLong(0)
+                    val dateSec = c.getLong(1)
+                    val subjectBytes = c.getBlob(2)
+                    val subjectRaw = c.getString(2)
+                    val subjectCharset = c.getInt(3)
+                    val subject = MmsHelper.decodeMmsSubject(subjectBytes, subjectRaw, subjectCharset)
+                    val msgBox = c.getInt(5)
+
+                    val timestamp = dateSec * 1000L
+
+                    var address = MmsHelper.getMmsAddress(resolver, mmsId)
+                    if (msgBox == 2 && (address.isNullOrBlank() || address.contains("insert-address-token", ignoreCase = true))) {
+                        val recipients = MmsHelper.getMmsAllRecipients(resolver, mmsId)
+                            .filter { it.isNotBlank() && !it.contains("insert-address-token", ignoreCase = true) }
+                        address = recipients.firstOrNull() ?: address
+                    }
+
+                    if (address.isNullOrBlank()) continue
+                    if (isRcsAddress(address)) continue
+
+                    uniqueAddresses.add(address)
+
+                    val text = MmsHelper.getMmsText(resolver, mmsId)
+                        ?: mmsCache.loadBody(mmsId)
+                    val attachments = loadMmsPartsMetadata(mmsId)
+
+                    list.add(
+                        SmsMessage(
+                            id = mmsId,
+                            address = address,
+                            body = text ?: "",
+                            date = timestamp,
+                            type = if (msgBox != 1) 2 else 1,
+                            contactName = null,
+                            isMms = true,
+                            mmsAttachments = attachments,
+                            mmsSubject = subject
+                        )
+                    )
+                }
+            }
+
+            Log.d("SmsRepository", "Total: ${list.size} messages since timestamp")
+
+            // Sort by date descending
+            list.sortByDescending { it.date }
+
+            // Resolve contact names
+            uniqueAddresses.forEach { address ->
+                if (!contactCache.containsKey(address)) {
+                    resolveContactName(address)
+                }
+            }
+
+            list.forEach { sms ->
+                sms.contactName = contactCache[sms.address]
+            }
+
+            list
+        }
+
+    /**
      * Search by date range
      */
     suspend fun searchByDateRange(

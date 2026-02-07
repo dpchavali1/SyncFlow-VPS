@@ -16,20 +16,18 @@ import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.annotation.RequiresApi
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.FirebaseDatabase
-import com.google.firebase.database.ServerValue
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.*
-import kotlinx.coroutines.tasks.await
 
 /**
- * Service that monitors and syncs phone status (battery, signal, WiFi) to Firebase
+ * Service that monitors and syncs phone status (battery, signal, WiFi) to VPS
  * for display on macOS/desktop clients.
+ *
+ * VPS Backend Only - Uses VPS API instead of Firebase.
  */
 class PhoneStatusService(context: Context) {
     private val context: Context = context.applicationContext
-    private val auth = FirebaseAuth.getInstance()
-    private val database = FirebaseDatabase.getInstance()
+    private val vpsClient = VPSClient.getInstance(context)
 
     private val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
     private val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
@@ -42,7 +40,7 @@ class PhoneStatusService(context: Context) {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    // Debounce sync to avoid flooding Firebase
+    // Debounce sync to avoid flooding server
     private var syncJob: Job? = null
     private var lastSyncedStatus: PhoneStatus? = null
 
@@ -58,8 +56,6 @@ class PhoneStatusService(context: Context) {
 
     companion object {
         private const val TAG = "PhoneStatusService"
-        private const val STATUS_PATH = "phone_status"
-        private const val USERS_PATH = "users"
         private const val SYNC_DEBOUNCE_MS = 2000L // Debounce sync by 2 seconds
     }
 
@@ -83,7 +79,6 @@ class PhoneStatusService(context: Context) {
      */
     fun startMonitoring() {
         Log.d(TAG, "Starting phone status monitoring")
-        database.goOnline()
         registerBatteryReceiver()
         registerSignalStrengthListener()
         registerNetworkCallback()
@@ -371,7 +366,7 @@ class PhoneStatusService(context: Context) {
     }
 
     /**
-     * Debounced sync - prevents flooding Firebase with updates
+     * Debounced sync - prevents flooding server with updates
      */
     private fun debouncedSync() {
         syncJob?.cancel()
@@ -382,12 +377,11 @@ class PhoneStatusService(context: Context) {
     }
 
     /**
-     * Sync current status to Firebase
+     * Sync current status to VPS
      */
     private suspend fun syncStatus() {
         try {
-            val currentUser = auth.currentUser ?: return
-            val userId = currentUser.uid
+            if (!vpsClient.isAuthenticated) return
 
             val status = getCurrentStatus()
 
@@ -403,11 +397,6 @@ class PhoneStatusService(context: Context) {
                 }
             }
 
-            val statusRef = database.reference
-                .child(USERS_PATH)
-                .child(userId)
-                .child(STATUS_PATH)
-
             val statusData = mapOf(
                 "batteryLevel" to status.batteryLevel,
                 "isCharging" to status.isCharging,
@@ -417,17 +406,17 @@ class PhoneStatusService(context: Context) {
                 "wifiStrength" to status.wifiStrength,
                 "wifiSsid" to (status.wifiSsid ?: ""),
                 "cellularConnected" to status.cellularConnected,
-                "timestamp" to ServerValue.TIMESTAMP,
+                "timestamp" to System.currentTimeMillis(),
                 "deviceModel" to Build.MODEL,
                 "deviceName" to (Build.MODEL ?: "Android Device")
             )
 
-            // Use NonCancellable to ensure Firebase operation completes even if scope is cancelled
+            // Use NonCancellable to ensure operation completes even if scope is cancelled
             withContext(NonCancellable) {
-                statusRef.setValue(statusData).await()
+                vpsClient.syncPhoneStatus(statusData)
             }
             lastSyncedStatus = status
-            Log.d(TAG, "Phone status synced to Firebase")
+            Log.d(TAG, "Phone status synced to VPS")
         } catch (e: kotlinx.coroutines.CancellationException) {
             // Ignore cancellation - this is expected during shutdown
             Log.d(TAG, "Phone status sync cancelled (expected during shutdown)")

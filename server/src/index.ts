@@ -1,10 +1,16 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import http from 'http';
 import { config } from './config';
 import { pool, checkDatabaseHealth } from './services/database';
 import { redis, checkRedisHealth } from './services/redis';
 import { createWebSocketServer } from './services/websocket';
+import { initLogger } from './services/logger';
+import { maintenanceMiddleware } from './middleware/maintenance';
+
+// Initialize log capture before anything else
+initLogger();
 
 // Import routes
 import authRoutes from './routes/auth';
@@ -45,8 +51,14 @@ app.use(cors({
   credentials: true,
 }));
 
-// Body parsing
-app.use(express.json({ limit: '10mb' }));
+// Body parsing (skip JSON parsing for Stripe webhook which needs raw body)
+app.use((req, res, next) => {
+  if (req.path === '/api/usage/subscription/webhook') {
+    next();
+  } else {
+    express.json({ limit: '10mb' })(req, res, next);
+  }
+});
 app.use(express.urlencoded({ extended: true }));
 
 // Request logging (simple)
@@ -77,6 +89,9 @@ app.get('/health', async (req, res) => {
     },
   });
 });
+
+// Maintenance mode check (after health check, before API routes)
+app.use(maintenanceMiddleware);
 
 // API routes
 app.use('/api/auth', authRoutes);
@@ -128,18 +143,16 @@ async function start() {
     await checkRedisHealth();
     console.log('Redis connected');
 
-    // Start HTTP server
-    app.listen(config.port, () => {
-      console.log(`HTTP server listening on port ${config.port}`);
+    // Start HTTP server and attach WebSocket to it
+    const server = http.createServer(app);
+    createWebSocketServer(server);
+
+    server.listen(config.port, () => {
+      console.log(`HTTP + WebSocket server listening on port ${config.port}`);
     });
 
-    // Start WebSocket server
-    createWebSocketServer(config.wsPort);
-    console.log(`WebSocket server listening on port ${config.wsPort}`);
-
     console.log(`\nSyncFlow API Server started in ${config.nodeEnv} mode`);
-    console.log(`- HTTP:      http://localhost:${config.port}`);
-    console.log(`- WebSocket: ws://localhost:${config.wsPort}`);
+    console.log(`- HTTP + WS: http://localhost:${config.port}`);
     console.log(`- Health:    http://localhost:${config.port}/health`);
 
   } catch (error) {

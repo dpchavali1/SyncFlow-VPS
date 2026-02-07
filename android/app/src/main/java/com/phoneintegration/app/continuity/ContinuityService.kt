@@ -4,15 +4,26 @@ import android.content.Context
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.DataSnapshot
-import com.google.firebase.database.DatabaseError
-import com.google.firebase.database.DatabaseReference
-import com.google.firebase.database.FirebaseDatabase
-import com.google.firebase.database.ServerValue
-import com.google.firebase.database.ValueEventListener
+import com.phoneintegration.app.vps.VPSClient
+import com.phoneintegration.app.vps.VPSContinuityState
+import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
+/**
+ * Continuity Service - VPS Backend Only
+ *
+ * Syncs conversation state across devices using VPS API and WebSocket
+ * instead of Firebase Realtime Database.
+ */
 class ContinuityService(context: Context) {
+
+    companion object {
+        private const val TAG = "ContinuityService"
+        private const val POLL_INTERVAL_MS = 5000L
+        private const val STATE_TIMEOUT_MS = 5 * 60 * 1000L // 5 minutes
+    }
 
     data class ContinuityState(
         val deviceId: String,
@@ -27,8 +38,7 @@ class ContinuityService(context: Context) {
     )
 
     private val appContext = context.applicationContext
-    private val auth = FirebaseAuth.getInstance()
-    private val database = FirebaseDatabase.getInstance()
+    private val vpsClient = VPSClient.getInstance(appContext)
 
     private val deviceId = Settings.Secure.getString(
         appContext.contentResolver,
@@ -36,8 +46,12 @@ class ContinuityService(context: Context) {
     ) ?: "android_unknown"
     private val deviceName = "${Build.MANUFACTURER} ${Build.MODEL}".trim().ifBlank { "Android" }
 
-    private var listener: ValueEventListener? = null
-    private var continuityRef: DatabaseReference? = null
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var pollingJob: Job? = null
+
+    private val _continuityState = MutableStateFlow<ContinuityState?>(null)
+    val continuityState: StateFlow<ContinuityState?> = _continuityState.asStateFlow()
+
     private var lastSeenDeviceId: String? = null
     private var lastSeenTimestamp: Long = 0L
     private var lastPublishAt: Long = 0L
@@ -49,7 +63,7 @@ class ContinuityService(context: Context) {
         threadId: Long,
         draft: String?
     ) {
-        val userId = auth.currentUser?.uid ?: return
+        if (vpsClient.userId == null) return
         val now = System.currentTimeMillis()
         val payloadHash = listOf(address, contactName ?: "", threadId.toString(), draft ?: "").hashCode()
 
@@ -60,122 +74,86 @@ class ContinuityService(context: Context) {
         lastPublishAt = now
         lastPayloadHash = payloadHash
 
-        database.goOnline()
-
-        val ref = database.reference
-            .child("users")
-            .child(userId)
-            .child("continuity_state")
-            .child(deviceId)
-
         val trimmedDraft = draft?.take(1000)
 
-        val data = mapOf(
-            "deviceId" to deviceId,
-            "deviceName" to deviceName,
-            "platform" to "android",
-            "type" to "conversation",
-            "address" to address,
-            "contactName" to (contactName ?: ""),
-            "threadId" to threadId,
-            "draft" to (trimmedDraft ?: ""),
-            "timestamp" to ServerValue.TIMESTAMP
-        )
-
-        ref.setValue(data).addOnFailureListener { e ->
-            Log.e("ContinuityService", "Failed to update continuity state", e)
+        scope.launch {
+            try {
+                vpsClient.updateContinuityState(
+                    deviceId = deviceId,
+                    deviceName = deviceName,
+                    platform = "android",
+                    type = "conversation",
+                    address = address,
+                    contactName = contactName ?: "",
+                    threadId = threadId,
+                    draft = trimmedDraft ?: ""
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to update continuity state", e)
+            }
         }
     }
 
     fun startListening(onUpdate: (ContinuityState?) -> Unit) {
-        val userId = auth.currentUser?.uid ?: return
+        if (vpsClient.userId == null) return
 
-        database.goOnline()
+        // Start polling for continuity state updates
+        pollingJob = scope.launch {
+            while (isActive) {
+                try {
+                    val states = vpsClient.getContinuityStates().map { it.toContinuityState() }
+                    val latest = states
+                        .filter { it.deviceId != deviceId }
+                        .filter { it.timestamp > 0 }
+                        .maxByOrNull { it.timestamp }
 
-        val ref = database.reference
-            .child("users")
-            .child(userId)
-            .child("continuity_state")
-
-        continuityRef = ref
-
-        val valueListener = object : ValueEventListener {
-            override fun onDataChange(snapshot: DataSnapshot) {
-                val latest = snapshot.children
-                    .mapNotNull { parseState(it) }
-                    .filter { it.deviceId != deviceId }
-                    .filter { it.timestamp > 0 }
-                    .maxByOrNull { it.timestamp }
-
-                if (latest == null) {
-                    onUpdate(null)
-                    return
+                    if (latest == null) {
+                        if (_continuityState.value != null) {
+                            _continuityState.value = null
+                            onUpdate(null)
+                        }
+                    } else {
+                        if (latest.deviceId == lastSeenDeviceId && latest.timestamp <= lastSeenTimestamp) {
+                            // No change
+                        } else if (System.currentTimeMillis() - latest.timestamp > STATE_TIMEOUT_MS) {
+                            // State is stale
+                        } else {
+                            lastSeenDeviceId = latest.deviceId
+                            lastSeenTimestamp = latest.timestamp
+                            _continuityState.value = latest
+                            onUpdate(latest)
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error polling continuity state", e)
                 }
 
-                if (latest.deviceId == lastSeenDeviceId && latest.timestamp <= lastSeenTimestamp) {
-                    return
-                }
-
-                if (System.currentTimeMillis() - latest.timestamp > 5 * 60 * 1000) {
-                    return
-                }
-
-                lastSeenDeviceId = latest.deviceId
-                lastSeenTimestamp = latest.timestamp
-                onUpdate(latest)
-            }
-
-            override fun onCancelled(error: DatabaseError) {
-                Log.e("ContinuityService", "Continuity listener cancelled: ${error.message}")
+                delay(POLL_INTERVAL_MS)
             }
         }
-
-        listener = valueListener
-        ref.addValueEventListener(valueListener)
     }
 
     fun stopListening() {
-        val ref = continuityRef ?: return
-        val valueListener = listener ?: return
-        ref.removeEventListener(valueListener)
-        listener = null
-        continuityRef = null
+        pollingJob?.cancel()
+        pollingJob = null
     }
 
-    private fun parseState(snapshot: DataSnapshot): ContinuityState? {
-        val deviceId = snapshot.key ?: return null
-        val data = snapshot.value as? Map<*, *> ?: return null
-        val timestamp = parseTimestamp(data["timestamp"])
-        val address = data["address"] as? String ?: return null
+    fun cleanup() {
+        stopListening()
+        scope.cancel()
+    }
 
+    private fun VPSContinuityState.toContinuityState(): ContinuityState {
         return ContinuityState(
             deviceId = deviceId,
-            deviceName = data["deviceName"] as? String ?: "Device",
-            platform = data["platform"] as? String ?: "unknown",
-            type = data["type"] as? String ?: "conversation",
+            deviceName = deviceName,
+            platform = platform,
+            type = type,
             address = address,
-            contactName = (data["contactName"] as? String)?.ifBlank { null },
-            threadId = parseLong(data["threadId"]),
-            draft = (data["draft"] as? String)?.ifBlank { null },
+            contactName = contactName,
+            threadId = threadId,
+            draft = draft,
             timestamp = timestamp
         )
-    }
-
-    private fun parseTimestamp(value: Any?): Long {
-        return when (value) {
-            is Long -> value
-            is Double -> value.toLong()
-            is Int -> value.toLong()
-            else -> 0L
-        }
-    }
-
-    private fun parseLong(value: Any?): Long? {
-        return when (value) {
-            is Long -> value
-            is Double -> value.toLong()
-            is Int -> value.toLong()
-            else -> null
-        }
     }
 }

@@ -191,6 +191,29 @@ class VPSAuthManager private constructor(private val context: Context) {
     }
 
     /**
+     * Sign in with Firebase UID.
+     * This ensures the VPS user ID matches the Firebase user ID, which is required
+     * for cross-device pairing to work correctly (macOS/web see the same messages).
+     */
+    suspend fun signInWithFirebaseUid(firebaseUid: String, deviceName: String): Result<String> {
+        return try {
+            val user = vpsClient.authenticateWithFirebaseUid(firebaseUid, deviceName, "android")
+            _authState.value = VPSAuthState.Authenticated(user)
+            updateActivity()
+            startSessionMonitoring()
+            startTokenRefreshMonitoring()
+            authListenerStarted = true
+
+            Log.i(TAG, "Firebase UID sign in successful: ${user.userId}")
+            Result.success(user.userId)
+        } catch (e: Exception) {
+            Log.e(TAG, "Firebase UID sign in failed", e)
+            _authState.value = VPSAuthState.Error(e.message ?: "Unknown error")
+            Result.failure(e)
+        }
+    }
+
+    /**
      * Get current user ID
      */
     fun getCurrentUserId(): String? {

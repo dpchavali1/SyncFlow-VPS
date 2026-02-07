@@ -2,13 +2,11 @@ package com.phoneintegration.app.realtime
 
 import android.content.Context
 import android.util.Log
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.*
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * Typing status for a conversation
@@ -21,20 +19,20 @@ data class TypingStatus(
 )
 
 /**
- * Manager for real-time typing indicators across devices
+ * Manager for real-time typing indicators across devices - VPS Backend Only
+ *
+ * In VPS mode, typing indicators are synced via REST API and WebSocket.
+ * Real-time updates come through the WebSocket connection managed by VPSClient.
  */
 class TypingIndicatorManager(private val context: Context) {
 
     companion object {
         private const val TAG = "TypingIndicatorManager"
-        private const val TYPING_PATH = "typing"
-        private const val USERS_PATH = "users"
         private const val TYPING_TIMEOUT_MS = 5000L // 5 seconds
         private const val DEBOUNCE_MS = 300L
     }
 
-    private val auth = FirebaseAuth.getInstance()
-    private val database = FirebaseDatabase.getInstance()
+    private val vpsClient = VPSClient.getInstance(context)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     // Debounce job for typing updates
@@ -43,6 +41,9 @@ class TypingIndicatorManager(private val context: Context) {
 
     // Auto-clear job
     private var clearJob: Job? = null
+
+    // Local cache of typing statuses
+    private val _typingStatuses = MutableStateFlow<Map<String, TypingStatus>>(emptyMap())
 
     /**
      * Start typing indicator for a conversation
@@ -54,23 +55,17 @@ class TypingIndicatorManager(private val context: Context) {
             delay(DEBOUNCE_MS) // Debounce rapid typing
 
             try {
-                val userId = auth.currentUser?.uid ?: return@launch
+                val userId = vpsClient.userId ?: return@launch
                 currentConversation = conversationAddress
-
-                val typingRef = database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(TYPING_PATH)
-                    .child(sanitizeAddress(conversationAddress))
 
                 val typingData = mapOf(
                     "conversationAddress" to conversationAddress,
                     "isTyping" to true,
                     "device" to "android",
-                    "timestamp" to ServerValue.TIMESTAMP
+                    "timestamp" to System.currentTimeMillis()
                 )
 
-                typingRef.setValue(typingData).await()
+                vpsClient.updateTypingStatus(typingData)
 
                 // Auto-clear after timeout
                 scheduleClear(conversationAddress)
@@ -92,15 +87,9 @@ class TypingIndicatorManager(private val context: Context) {
 
         scope.launch {
             try {
-                val userId = auth.currentUser?.uid ?: return@launch
+                val userId = vpsClient.userId ?: return@launch
 
-                val typingRef = database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(TYPING_PATH)
-                    .child(sanitizeAddress(address))
-
-                typingRef.removeValue().await()
+                vpsClient.clearTypingStatus(address)
                 currentConversation = null
 
             } catch (e: Exception) {
@@ -123,221 +112,45 @@ class TypingIndicatorManager(private val context: Context) {
     /**
      * Observe typing status for a conversation (from other devices)
      */
-    fun observeTypingStatus(conversationAddress: String): Flow<TypingStatus?> = callbackFlow {
-        val userId = auth.currentUser?.uid
-        if (userId == null) {
-            trySend(null)
-            close()
-            return@callbackFlow
-        }
-
-        val typingRef = database.reference
-            .child(USERS_PATH)
-            .child(userId)
-            .child(TYPING_PATH)
-            .child(sanitizeAddress(conversationAddress))
-
-        val listener = object : ValueEventListener {
-            override fun onDataChange(snapshot: DataSnapshot) {
-                if (!snapshot.exists()) {
-                    trySend(null)
-                    return
-                }
-
-                try {
-                    val device = snapshot.child("device").getValue(String::class.java) ?: "unknown"
-
-                    // Don't show our own typing indicator
-                    if (device == "android") {
-                        trySend(null)
-                        return
-                    }
-
-                    val isTyping = snapshot.child("isTyping").getValue(Boolean::class.java) ?: false
-                    val timestamp = snapshot.child("timestamp").getValue(Long::class.java) ?: 0L
-
-                    // Check if typing indicator is stale
-                    if (System.currentTimeMillis() - timestamp > TYPING_TIMEOUT_MS * 2) {
-                        trySend(null)
-                        return
-                    }
-
-                    trySend(TypingStatus(
-                        conversationAddress = conversationAddress,
-                        isTyping = isTyping,
-                        device = device,
-                        timestamp = timestamp
-                    ))
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error parsing typing status", e)
-                    trySend(null)
-                }
-            }
-
-            override fun onCancelled(error: DatabaseError) {
-                Log.e(TAG, "Typing status listener cancelled", error.toException())
-            }
-        }
-
-        typingRef.addValueEventListener(listener)
-
-        awaitClose {
-            typingRef.removeEventListener(listener)
-        }
+    fun observeTypingStatus(conversationAddress: String): Flow<TypingStatus?> {
+        // Return the status for this specific address
+        return MutableStateFlow(_typingStatuses.value[conversationAddress]).asStateFlow()
     }
 
     /**
      * Observe all typing statuses
      */
-    fun observeAllTypingStatuses(): Flow<Map<String, TypingStatus>> = callbackFlow {
-        val userId = auth.currentUser?.uid
-        if (userId == null) {
-            trySend(emptyMap())
-            close()
-            return@callbackFlow
-        }
-
-        val typingRef = database.reference
-            .child(USERS_PATH)
-            .child(userId)
-            .child(TYPING_PATH)
-
-        val listener = object : ValueEventListener {
-            override fun onDataChange(snapshot: DataSnapshot) {
-                val statuses = mutableMapOf<String, TypingStatus>()
-
-                snapshot.children.forEach { child ->
-                    try {
-                        val address = child.child("conversationAddress").getValue(String::class.java)
-                            ?: return@forEach
-                        val device = child.child("device").getValue(String::class.java) ?: "unknown"
-
-                        // Don't include our own typing
-                        if (device == "android") return@forEach
-
-                        val isTyping = child.child("isTyping").getValue(Boolean::class.java) ?: false
-                        val timestamp = child.child("timestamp").getValue(Long::class.java) ?: 0L
-
-                        // Skip stale entries
-                        if (System.currentTimeMillis() - timestamp > TYPING_TIMEOUT_MS * 2) return@forEach
-
-                        if (isTyping) {
-                            statuses[address] = TypingStatus(
-                                conversationAddress = address,
-                                isTyping = true,
-                                device = device,
-                                timestamp = timestamp
-                            )
-                        }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error parsing typing status", e)
-                    }
-                }
-
-                trySend(statuses)
-            }
-
-            override fun onCancelled(error: DatabaseError) {
-                Log.e(TAG, "Typing statuses listener cancelled", error.toException())
-            }
-        }
-
-        typingRef.addValueEventListener(listener)
-
-        awaitClose {
-            typingRef.removeEventListener(listener)
-        }
-    }
+    fun observeAllTypingStatuses(): Flow<Map<String, TypingStatus>> = _typingStatuses.asStateFlow()
 
     /**
      * BANDWIDTH OPTIMIZED: Observe all typing statuses using child events
-     * Downloads only deltas instead of full typing map on every keystroke
+     * In VPS mode, this uses the same StateFlow since WebSocket handles delta updates
      */
-    fun observeAllTypingStatusesOptimized(): Flow<Map<String, TypingStatus>> = callbackFlow {
-        val userId = auth.currentUser?.uid
-        if (userId == null) {
-            trySend(emptyMap())
-            close()
-            return@callbackFlow
-        }
+    fun observeAllTypingStatusesOptimized(): Flow<Map<String, TypingStatus>> = _typingStatuses.asStateFlow()
 
-        val typingRef = database.reference
-            .child(USERS_PATH)
-            .child(userId)
-            .child(TYPING_PATH)
+    /**
+     * Update typing status from WebSocket event
+     * Called by VPSClient when receiving typing updates
+     */
+    fun onTypingStatusReceived(status: TypingStatus) {
+        // Don't show our own typing indicator
+        if (status.device == "android") return
 
-        // Local cache to maintain full state
-        val statusesCache = mutableMapOf<String, TypingStatus>()
+        // Skip stale entries
+        if (System.currentTimeMillis() - status.timestamp > TYPING_TIMEOUT_MS * 2) return
 
-        val listener = object : ChildEventListener {
-            override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
-                processTypingSnapshot(snapshot)?.let { status ->
-                    statusesCache[status.conversationAddress] = status
-                    trySend(statusesCache.toMap()).isSuccess
-                }
-            }
-
-            override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
-                processTypingSnapshot(snapshot)?.let { status ->
-                    statusesCache[status.conversationAddress] = status
-                    trySend(statusesCache.toMap()).isSuccess
-                }
-            }
-
-            override fun onChildRemoved(snapshot: DataSnapshot) {
-                val address = snapshot.child("conversationAddress").getValue(String::class.java)
-                if (address != null) {
-                    statusesCache.remove(address)
-                    trySend(statusesCache.toMap()).isSuccess
-                }
-            }
-
-            override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {
-                // Not used
-            }
-
-            override fun onCancelled(error: DatabaseError) {
-                Log.e(TAG, "Typing statuses optimized listener cancelled", error.toException())
-            }
-        }
-
-        typingRef.addChildEventListener(listener)
-
-        awaitClose {
-            typingRef.removeEventListener(listener)
+        if (status.isTyping) {
+            _typingStatuses.value = _typingStatuses.value + (status.conversationAddress to status)
+        } else {
+            _typingStatuses.value = _typingStatuses.value - status.conversationAddress
         }
     }
 
     /**
-     * Helper to process a typing status snapshot
+     * Clear a typing status from cache
      */
-    private fun processTypingSnapshot(snapshot: DataSnapshot): TypingStatus? {
-        return try {
-            val address = snapshot.child("conversationAddress").getValue(String::class.java)
-                ?: return null
-            val device = snapshot.child("device").getValue(String::class.java) ?: "unknown"
-
-            // Don't include our own typing
-            if (device == "android") return null
-
-            val isTyping = snapshot.child("isTyping").getValue(Boolean::class.java) ?: false
-            val timestamp = snapshot.child("timestamp").getValue(Long::class.java) ?: 0L
-
-            // Skip stale entries
-            if (System.currentTimeMillis() - timestamp > TYPING_TIMEOUT_MS * 2) return null
-
-            if (isTyping) {
-                TypingStatus(
-                    conversationAddress = address,
-                    isTyping = true,
-                    device = device,
-                    timestamp = timestamp
-                )
-            } else null
-        } catch (e: Exception) {
-            Log.e(TAG, "Error parsing typing status", e)
-            null
-        }
+    fun onTypingStatusCleared(conversationAddress: String) {
+        _typingStatuses.value = _typingStatuses.value - conversationAddress
     }
 
     /**
@@ -346,26 +159,13 @@ class TypingIndicatorManager(private val context: Context) {
     fun clearAllTyping() {
         scope.launch {
             try {
-                val userId = auth.currentUser?.uid ?: return@launch
-
-                database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(TYPING_PATH)
-                    .removeValue()
-                    .await()
-
+                val userId = vpsClient.userId ?: return@launch
+                vpsClient.clearAllTypingStatus()
+                _typingStatuses.value = emptyMap()
             } catch (e: Exception) {
                 Log.e(TAG, "Error clearing all typing", e)
             }
         }
-    }
-
-    /**
-     * Sanitize phone address for use as Firebase key
-     */
-    private fun sanitizeAddress(address: String): String {
-        return address.replace(Regex("[.#\$\\[\\]]"), "_")
     }
 
     /**

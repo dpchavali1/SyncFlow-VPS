@@ -3,7 +3,6 @@ package com.phoneintegration.app.auth
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.google.firebase.FirebaseApp
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
 import org.junit.Before
@@ -22,12 +21,6 @@ class AuthManagerTest {
     @Before
     fun setup() {
         context = ApplicationProvider.getApplicationContext()
-
-        // Initialize Firebase if not already done
-        if (FirebaseApp.getApps(context).isEmpty()) {
-            // Skip Firebase tests if not configured
-            return
-        }
 
         authManager = AuthManager.getInstance(context)
     }

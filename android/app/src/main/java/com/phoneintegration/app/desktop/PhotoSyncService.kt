@@ -10,17 +10,16 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
 import android.util.Log
-import com.google.firebase.database.FirebaseDatabase
-import com.google.firebase.database.ServerValue
-import com.google.firebase.functions.FirebaseFunctions
 import com.phoneintegration.app.auth.UnifiedIdentityManager
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.*
-import kotlinx.coroutines.tasks.await
-import org.json.JSONObject
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.ByteArrayOutputStream
-import java.net.HttpURLConnection
-import java.net.URL
 import java.util.*
+import java.util.concurrent.TimeUnit
 
 /**
  * PhotoSyncService.kt - Photo Thumbnail Synchronization Service for SyncFlow
@@ -41,8 +40,8 @@ import java.util.*
  *
  * 1. **ContentObserver** - Monitors MediaStore for new photos
  * 2. **Thumbnail Generator** - Creates compressed JPEG thumbnails (max 800px)
- * 3. **R2 Upload Pipeline** - Uploads via presigned URLs from Cloud Functions
- * 4. **Firebase Metadata** - Stores photo metadata for desktop client consumption
+ * 3. **R2 Upload Pipeline** - Uploads via presigned URLs from VPS API
+ * 4. **VPS Metadata** - Stores photo metadata for desktop client consumption
  *
  * ## Sync Flow
  *
@@ -52,34 +51,19 @@ import java.util.*
  * 4. For each new photo not in [syncedPhotoIds]:
  *    a. Create thumbnail via [createThumbnail]
  *    b. Compress to JPEG at [THUMBNAIL_QUALITY]
- *    c. Get presigned upload URL from `getR2UploadUrl`
- *    d. Upload to R2 via [uploadToR2]
- *    e. Confirm upload via `confirmR2Upload`
- * 5. Old photos beyond limit are cleaned up from R2 and Firebase
+ *    c. Get presigned upload URL from VPS API
+ *    d. Upload to R2 via OkHttp
+ *    e. Confirm upload via VPS API
+ * 5. Old photos beyond limit are cleaned up from R2 and VPS
  *
- * ## Firebase Interaction Patterns
+ * ## VPS Interaction Patterns
  *
- * **Photo Metadata Path:**
- * `users/{userId}/photos/{photoId}`
- *
- * **Metadata Structure:**
- * ```
- * {
- *   originalId: 12345,          // Android MediaStore ID
- *   dateTaken: 1704067200000,   // Unix timestamp
- *   width: 800,                  // Thumbnail width
- *   height: 600,                 // Thumbnail height
- *   size: 45678,                 // Original file size
- *   mimeType: "image/jpeg",
- *   r2Key: "photos/userId/...",
- *   syncedAt: 1704067300000
- * }
- * ```
- *
- * **Cloud Functions Used:**
- * - `getR2UploadUrl` - Get presigned PUT URL for thumbnail upload
- * - `confirmR2Upload` - Confirm upload and store metadata
- * - `deleteR2File` - Clean up old thumbnails from R2
+ * **VPS API Endpoints Used:**
+ * - `GET /api/photos/synced-ids` - Get already synced photo IDs
+ * - `GET /api/photos` - Get list of photos
+ * - `POST /api/file-transfers/upload-url` - Get presigned PUT URL for upload
+ * - `POST /api/photos/confirm-upload` - Confirm upload and store metadata
+ * - `POST /api/photos/delete` - Clean up old thumbnails from R2
  *
  * ## Battery Optimization Considerations
  *
@@ -92,7 +76,7 @@ import java.util.*
  * ## Duplicate Prevention
  *
  * - [syncedPhotoIds] tracks already-synced photo IDs (MediaStore _ID)
- * - IDs are loaded from Firebase on startup via [loadSyncedPhotoIds]
+ * - IDs are loaded from VPS on startup via [loadSyncedPhotoIds]
  * - Prevents re-uploading photos on app restart or reconnection
  * - [cleanupDuplicates] handles race conditions that create duplicates
  *
@@ -112,7 +96,7 @@ import java.util.*
 // =============================================================================
 
 /**
- * Service that syncs recent photos from Android to Firebase for display on macOS.
+ * Service that syncs recent photos from Android to VPS/R2 for display on macOS.
  *
  * Photos are uploaded as compressed thumbnails (max 800px dimension, 80% JPEG quality)
  * to minimize bandwidth and storage costs while maintaining visual quality for preview.
@@ -148,11 +132,15 @@ class PhotoSyncService(context: Context) {
     /** Application context for ContentResolver and system services */
     private val context: Context = context.applicationContext
 
-    /** Firebase Realtime Database for photo metadata storage */
-    private val database = FirebaseDatabase.getInstance()
+    /** VPS Client for API calls */
+    private val vpsClient = VPSClient.getInstance(this.context)
 
-    /** Firebase Cloud Functions for R2 presigned URL generation */
-    private val functions = FirebaseFunctions.getInstance()
+    /** HTTP client for uploads */
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(120, TimeUnit.SECONDS)
+        .readTimeout(60, TimeUnit.SECONDS)
+        .build()
 
     /** Unified identity manager for cross-platform user identification */
     private val unifiedIdentityManager = UnifiedIdentityManager.getInstance(context)
@@ -169,12 +157,12 @@ class PhotoSyncService(context: Context) {
 
     /**
      * Set of MediaStore photo IDs that have already been synced.
-     * Loaded from Firebase on startup and updated as photos are synced.
+     * Loaded from VPS on startup and updated as photos are synced.
      * Prevents re-uploading the same photos on app restart.
      */
     private val syncedPhotoIds = mutableSetOf<Long>()
 
-    /** Flag indicating whether [syncedPhotoIds] has been loaded from Firebase */
+    /** Flag indicating whether [syncedPhotoIds] has been loaded from VPS */
     private var syncedIdsLoaded = false
 
     /** Timestamp of last sync operation (for debugging and future use) */
@@ -186,15 +174,6 @@ class PhotoSyncService(context: Context) {
 
     companion object {
         private const val TAG = "PhotoSyncService"
-
-        /** Firebase Database path for photo metadata */
-        private const val PHOTOS_PATH = "photos"
-
-        /** Firebase Database root path for user data */
-        private const val USERS_PATH = "users"
-
-        /** Firebase Database path for usage/subscription data */
-        private const val USAGE_PATH = "usage"
 
         /**
          * Maximum dimension (width or height) for generated thumbnails.
@@ -209,7 +188,7 @@ class PhotoSyncService(context: Context) {
         private const val THUMBNAIL_QUALITY = 80
 
         /**
-         * Maximum number of recent photos to sync and keep in Firebase.
+         * Maximum number of recent photos to sync and keep in VPS.
          * Older photos beyond this limit are cleaned up.
          */
         private const val MAX_PHOTOS_TO_SYNC = 20
@@ -228,7 +207,7 @@ class PhotoSyncService(context: Context) {
     /**
      * Check if the current user has a paid subscription (required for photo sync).
      *
-     * Queries the user's usage/subscription data in Firebase to determine
+     * Queries the user's subscription data from VPS to determine
      * access level. Photo sync is only available to paying subscribers.
      *
      * ## Subscription Tiers with Access
@@ -244,26 +223,15 @@ class PhotoSyncService(context: Context) {
      * - **free** - No photo sync
      * - **trial** - No photo sync (trial is for core features only)
      *
-     * ## Firebase Path
-     *
-     * `users/{userId}/usage`
-     * - `plan`: Subscription tier name
-     * - `planExpiresAt`: Expiration timestamp (for monthly/yearly)
-     *
      * @return true if user has premium access, false otherwise
      */
     private suspend fun hasPremiumAccess(): Boolean {
-        val userId = unifiedIdentityManager.getUnifiedUserIdSync() ?: return false
+        if (!vpsClient.isAuthenticated) return false
 
         return try {
-            val usageRef = database.reference
-                .child(USERS_PATH)
-                .child(userId)
-                .child(USAGE_PATH)
-
-            val snapshot = usageRef.get().await()
-            val planRaw = snapshot.child("plan").getValue(String::class.java)?.lowercase()
-            val planExpiresAt = snapshot.child("planExpiresAt").getValue(Long::class.java)
+            val subscription = vpsClient.getUserSubscription()
+            val planRaw = (subscription["plan"] as? String)?.lowercase()
+            val planExpiresAt = subscription["planExpiresAt"] as? Long
             val now = System.currentTimeMillis()
 
             when (planRaw) {
@@ -282,11 +250,11 @@ class PhotoSyncService(context: Context) {
     // -------------------------------------------------------------------------
 
     /**
-     * Data class for photo metadata stored in Firebase.
+     * Data class for photo metadata stored in VPS.
      *
      * Represents the synchronized photo information available to desktop clients.
      *
-     * @property id Firebase document ID (UUID)
+     * @property id VPS document ID (UUID)
      * @property originalId Android MediaStore _ID (for duplicate detection)
      * @property fileName Generated filename (typically UUID.jpg)
      * @property dateTaken Timestamp when photo was taken/added
@@ -295,7 +263,7 @@ class PhotoSyncService(context: Context) {
      * @property height Original photo height
      * @property size Original file size in bytes
      * @property mimeType Original MIME type (e.g., "image/jpeg")
-     * @property syncedAt Timestamp when photo was synced to Firebase
+     * @property syncedAt Timestamp when photo was synced to VPS
      */
     data class PhotoMetadata(
         val id: String,
@@ -319,11 +287,10 @@ class PhotoSyncService(context: Context) {
      *
      * ## Startup Sequence
      *
-     * 1. Go online with Firebase
-     * 2. Wait 3 seconds for app initialization
-     * 3. Check premium subscription status
-     * 4. If premium: register ContentObserver, cleanup duplicates, sync photos
-     * 5. If not premium: log warning and return (no-op)
+     * 1. Wait 3 seconds for app initialization
+     * 2. Check premium subscription status
+     * 3. If premium: register ContentObserver, cleanup duplicates, sync photos
+     * 4. If not premium: log warning and return (no-op)
      *
      * ## Premium Requirement
      *
@@ -337,7 +304,6 @@ class PhotoSyncService(context: Context) {
      */
     fun startSync() {
         Log.d(TAG, "Starting photo sync")
-        database.goOnline()
 
         // Sync recent photos on startup (with premium check)
         scope.launch {
@@ -430,41 +396,23 @@ class PhotoSyncService(context: Context) {
     // -------------------------------------------------------------------------
 
     /**
-     * Load already synced photo IDs from Firebase to prevent duplicate uploads.
+     * Load already synced photo IDs from VPS to prevent duplicate uploads.
      *
      * Called at the start of each sync operation to ensure [syncedPhotoIds]
-     * contains all photos already in Firebase. This prevents re-uploading
+     * contains all photos already synced. This prevents re-uploading
      * photos that were synced in a previous session.
-     *
-     * ## Firebase Path
-     *
-     * Reads all children from `users/{userId}/photos` and extracts `originalId`
-     * (the MediaStore _ID) from each photo document.
-     *
-     * @param userId Current user's Firebase UID
      */
-    private suspend fun loadSyncedPhotoIds(userId: String) {
+    private suspend fun loadSyncedPhotoIds() {
         if (syncedIdsLoaded) return
 
         try {
-            Log.d(TAG, "Loading synced photo IDs from Firebase...")
+            Log.d(TAG, "Loading synced photo IDs from VPS...")
 
-            val photosRef = database.reference
-                .child(USERS_PATH)
-                .child(userId)
-                .child(PHOTOS_PATH)
-
-            val snapshot = photosRef.get().await()
-
-            for (child in snapshot.children) {
-                val originalId = child.child("originalId").getValue(Long::class.java)
-                if (originalId != null) {
-                    syncedPhotoIds.add(originalId)
-                }
-            }
+            val ids = vpsClient.getSyncedPhotoIds()
+            syncedPhotoIds.addAll(ids)
 
             syncedIdsLoaded = true
-            Log.d(TAG, "Loaded ${syncedPhotoIds.size} synced photo IDs from Firebase")
+            Log.d(TAG, "Loaded ${syncedPhotoIds.size} synced photo IDs from VPS")
 
         } catch (e: Exception) {
             Log.e(TAG, "Error loading synced photo IDs", e)
@@ -476,7 +424,7 @@ class PhotoSyncService(context: Context) {
     // -------------------------------------------------------------------------
 
     /**
-     * Sync recent photos to Firebase/R2.
+     * Sync recent photos to VPS/R2.
      *
      * Main sync entry point. Validates premium access, loads existing synced IDs,
      * queries recent photos, uploads new ones, and cleans up old photos.
@@ -484,12 +432,12 @@ class PhotoSyncService(context: Context) {
      * ## Sync Flow
      *
      * 1. Verify premium subscription
-     * 2. Load synced IDs from Firebase (if not already loaded)
+     * 2. Load synced IDs from VPS (if not already loaded)
      * 3. Query [MAX_PHOTOS_TO_SYNC] most recent photos from MediaStore
      * 4. For each photo not in [syncedPhotoIds]:
      *    - Create thumbnail
      *    - Upload to R2
-     *    - Update Firebase metadata
+     *    - Update VPS metadata
      * 5. Clean up photos beyond limit
      *
      * ## Return Values
@@ -511,26 +459,28 @@ class PhotoSyncService(context: Context) {
                 return Result.failure(Exception("Photo sync requires a premium subscription. Please upgrade to Pro to sync photos."))
             }
 
-            val userId = unifiedIdentityManager.getUnifiedUserIdSync() ?: return Result.failure(Exception("User authentication required"))
+            if (!vpsClient.isAuthenticated) {
+                return Result.failure(Exception("User authentication required"))
+            }
 
             Log.d(TAG, "Syncing recent photos...")
 
-            // Load already synced IDs from Firebase first to prevent duplicates
-            loadSyncedPhotoIds(userId)
+            // Load already synced IDs from VPS first to prevent duplicates
+            loadSyncedPhotoIds()
 
             val photos = getRecentPhotos(MAX_PHOTOS_TO_SYNC)
             Log.d(TAG, "Found ${photos.size} recent photos")
 
             for (photo in photos) {
                 if (!syncedPhotoIds.contains(photo.id)) {
-                    uploadPhoto(userId, photo)
+                    uploadPhoto(photo)
                     syncedPhotoIds.add(photo.id)
                     syncedCount++
                 }
             }
 
-            // Clean up old photos from Firebase
-            cleanupOldPhotos(userId)
+            // Clean up old photos from VPS
+            cleanupOldPhotos()
 
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing photos", e)
@@ -651,50 +601,13 @@ class PhotoSyncService(context: Context) {
      *
      * 1. Create thumbnail from photo URI via [createThumbnail]
      * 2. Compress to JPEG bytes via [compressThumbnail]
-     * 3. Get presigned upload URL from `getR2UploadUrl` Cloud Function
+     * 3. Get presigned upload URL from VPS API
      * 4. Upload directly to R2 via HTTP PUT
-     * 5. Confirm upload via `confirmR2Upload` (stores metadata in Firebase)
+     * 5. Confirm upload via VPS API (stores metadata)
      *
-     * ## Cloud Function: getR2UploadUrl
-     *
-     * **Request:**
-     * ```
-     * {
-     *   fileName: "uuid.jpg",
-     *   contentType: "image/jpeg",
-     *   fileSize: 45678,
-     *   transferType: "photo"
-     * }
-     * ```
-     *
-     * **Response:**
-     * ```
-     * {
-     *   uploadUrl: "https://r2.cloudflarestorage.com/...",
-     *   r2Key: "photos/userId/uuid.jpg",
-     *   fileId: "uuid"
-     * }
-     * ```
-     *
-     * ## Cloud Function: confirmR2Upload
-     *
-     * **Request:**
-     * ```
-     * {
-     *   fileId: "uuid",
-     *   r2Key: "photos/userId/...",
-     *   fileName: "uuid.jpg",
-     *   fileSize: 45678,
-     *   contentType: "image/jpeg",
-     *   transferType: "photo",
-     *   photoMetadata: { originalId, dateTaken, width, height, size, mimeType }
-     * }
-     * ```
-     *
-     * @param userId Current user's Firebase UID
      * @param photo Local photo metadata with content URI
      */
-    private suspend fun uploadPhoto(userId: String, photo: LocalPhoto) {
+    private suspend fun uploadPhoto(photo: LocalPhoto) {
         try {
             Log.d(TAG, "Uploading photo: ${photo.name}")
 
@@ -705,33 +618,20 @@ class PhotoSyncService(context: Context) {
             val photoId = UUID.randomUUID().toString()
             val fileName = "$photoId.jpg"
 
-            // Step 1: Get presigned upload URL from R2
-            val uploadUrlData = hashMapOf(
-                "fileName" to fileName,
-                "contentType" to "image/jpeg",
-                "fileSize" to thumbnailBytes.size,
-                "transferType" to "photo"
+            // Step 1: Get presigned upload URL from VPS
+            val uploadUrlResponse = vpsClient.getUploadUrl(
+                fileName = fileName,
+                contentType = "image/jpeg",
+                fileSize = thumbnailBytes.size.toLong(),
+                transferType = "photo"
             )
 
-            val uploadUrlResult = functions
-                .getHttpsCallable("getR2UploadUrl")
-                .call(uploadUrlData)
-                .await()
+            val uploadUrl = uploadUrlResponse.uploadUrl
+            val r2Key = uploadUrlResponse.fileKey
 
-            @Suppress("UNCHECKED_CAST")
-            val uploadResponse = uploadUrlResult.data as? Map<String, Any>
-            val uploadUrl = uploadResponse?.get("uploadUrl") as? String
-            val r2Key = uploadResponse?.get("fileKey") as? String  // Cloud Function returns "fileKey"
-            val fileId = uploadResponse?.get("fileId") as? String
-
-            if (uploadUrl == null || r2Key == null || fileId == null) {
-                Log.e(TAG, "Failed to get R2 upload URL for photo: ${photo.name}")
-                return
-            }
-
-            // Step 2: Upload directly to R2 via presigned URL
+            // Step 2: Upload directly to R2 via presigned URL using OkHttp
             val uploaded = withContext(Dispatchers.IO) {
-                uploadToR2(uploadUrl, thumbnailBytes, "image/jpeg")
+                uploadToR2WithOkHttp(uploadUrl, thumbnailBytes, "image/jpeg")
             }
 
             if (!uploaded) {
@@ -739,28 +639,23 @@ class PhotoSyncService(context: Context) {
                 return
             }
 
-            // Step 3: Confirm upload with Cloud Function (this also stores metadata)
-            val confirmData = hashMapOf(
-                "fileId" to fileId,
-                "r2Key" to r2Key,
-                "fileName" to fileName,
-                "fileSize" to thumbnailBytes.size,
-                "contentType" to "image/jpeg",
-                "transferType" to "photo",
-                "photoMetadata" to hashMapOf(
-                    "originalId" to photo.id,
-                    "dateTaken" to photo.dateTaken,
-                    "width" to photo.width,
-                    "height" to photo.height,
-                    "size" to photo.size,
-                    "mimeType" to photo.mimeType
-                )
+            // Step 3: Confirm upload via VPS API (this also stores metadata)
+            val photoMetadata = mapOf(
+                "originalId" to photo.id,
+                "dateTaken" to photo.dateTaken,
+                "width" to photo.width,
+                "height" to photo.height,
+                "size" to photo.size,
+                "mimeType" to photo.mimeType
             )
 
-            functions
-                .getHttpsCallable("confirmR2Upload")
-                .call(confirmData)
-                .await()
+            vpsClient.confirmPhotoUpload(
+                fileId = photoId,
+                r2Key = r2Key,
+                fileName = fileName,
+                fileSize = thumbnailBytes.size,
+                photoMetadata = photoMetadata
+            )
 
             Log.d(TAG, "Photo uploaded successfully to R2: ${photo.name} (key: $r2Key)")
 
@@ -770,46 +665,30 @@ class PhotoSyncService(context: Context) {
     }
 
     /**
-     * Upload raw bytes directly to Cloudflare R2 via presigned URL.
+     * Upload raw bytes directly to Cloudflare R2 via presigned URL using OkHttp.
      *
      * Performs a simple HTTP PUT request to the presigned URL with the
      * provided content type and data.
      *
-     * ## Network Configuration
-     *
-     * - Connect timeout: 30 seconds
-     * - Read timeout: 60 seconds
-     * - Accepts HTTP 2xx responses only
-     *
-     * @param uploadUrl Presigned PUT URL from getR2UploadUrl Cloud Function
+     * @param uploadUrl Presigned PUT URL from VPS API
      * @param data Raw bytes to upload (thumbnail JPEG data)
      * @param contentType MIME type for Content-Type header
      * @return true if upload succeeded (2xx response), false otherwise
      */
-    private fun uploadToR2(uploadUrl: String, data: ByteArray, contentType: String): Boolean {
-        var connection: HttpURLConnection? = null
-        try {
-            val url = URL(uploadUrl)
-            connection = url.openConnection() as HttpURLConnection
-            connection.requestMethod = "PUT"
-            connection.doOutput = true
-            connection.setRequestProperty("Content-Type", contentType)
-            connection.setRequestProperty("Content-Length", data.size.toString())
-            connection.connectTimeout = 30000
-            connection.readTimeout = 60000
+    private fun uploadToR2WithOkHttp(uploadUrl: String, data: ByteArray, contentType: String): Boolean {
+        return try {
+            val requestBody = data.toRequestBody(contentType.toMediaType())
+            val request = Request.Builder()
+                .url(uploadUrl)
+                .put(requestBody)
+                .build()
 
-            connection.outputStream.use { outputStream ->
-                outputStream.write(data)
-                outputStream.flush()
+            httpClient.newCall(request).execute().use { response ->
+                response.isSuccessful
             }
-
-            val responseCode = connection.responseCode
-            return responseCode in 200..299
         } catch (e: Exception) {
             Log.e(TAG, "Error uploading to R2", e)
-            return false
-        } finally {
-            connection?.disconnect()
+            false
         }
     }
 
@@ -897,11 +776,11 @@ class PhotoSyncService(context: Context) {
     // -------------------------------------------------------------------------
 
     /**
-     * Clean up old photos from R2 and Firebase, keeping only the most recent.
+     * Clean up old photos from R2 and VPS, keeping only the most recent.
      *
      * When the number of synced photos exceeds [MAX_PHOTOS_TO_SYNC], this
      * method deletes the oldest photos (by syncedAt timestamp) from both
-     * R2 storage and Firebase Database.
+     * R2 storage and VPS database.
      *
      * ## Deletion Order
      *
@@ -913,47 +792,36 @@ class PhotoSyncService(context: Context) {
      * 1. Query all photos ordered by syncedAt
      * 2. Calculate how many to delete (count - MAX_PHOTOS_TO_SYNC)
      * 3. For each photo to delete:
-     *    a. Delete from R2 via `deleteR2File` Cloud Function
-     *    b. Delete metadata from Firebase Database
-     *
-     * @param userId Current user's Firebase UID
+     *    a. Delete from R2 via VPS API
+     *    b. Delete metadata from VPS
      */
-    private suspend fun cleanupOldPhotos(userId: String) {
+    private suspend fun cleanupOldPhotos() {
         try {
-            val photosRef = database.reference
-                .child(USERS_PATH)
-                .child(userId)
-                .child(PHOTOS_PATH)
-
-            val snapshot = photosRef.orderByChild("syncedAt").get().await()
-            val photoCount = snapshot.childrenCount
+            val photos = vpsClient.getPhotos()
+            val photoCount = photos.size
 
             if (photoCount > MAX_PHOTOS_TO_SYNC) {
-                val photosToDelete = (photoCount - MAX_PHOTOS_TO_SYNC).toInt()
+                // Sort by syncedAt ascending (oldest first)
+                val sortedPhotos = photos.sortedBy {
+                    (it["syncedAt"] as? Number)?.toLong() ?: 0L
+                }
+
+                val photosToDelete = photoCount - MAX_PHOTOS_TO_SYNC
                 var deleted = 0
 
-                for (child in snapshot.children) {
+                for (photo in sortedPhotos) {
                     if (deleted >= photosToDelete) break
 
-                    val photoId = child.key ?: continue
-                    val r2Key = child.child("r2Key").getValue(String::class.java)
+                    val photoId = photo["id"] as? String ?: continue
+                    val r2Key = photo["r2Key"] as? String
 
-                    // Delete from R2 if r2Key exists
-                    if (r2Key != null) {
-                        try {
-                            val deleteData = hashMapOf("r2Key" to r2Key)
-                            functions
-                                .getHttpsCallable("deleteR2File")
-                                .call(deleteData)
-                                .await()
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Error deleting photo from R2: $r2Key", e)
-                        }
+                    // Delete from R2 and VPS database
+                    try {
+                        vpsClient.deletePhoto(photoId, r2Key)
+                        deleted++
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Error deleting photo: $photoId", e)
                     }
-
-                    // Delete from Database
-                    child.ref.removeValue().await()
-                    deleted++
                 }
 
                 Log.d(TAG, "Cleaned up $deleted old photos")
@@ -970,20 +838,20 @@ class PhotoSyncService(context: Context) {
     /**
      * Force a complete re-sync of recent photos.
      *
-     * Clears the local [syncedPhotoIds] cache and reloads from Firebase,
+     * Clears the local [syncedPhotoIds] cache and reloads from VPS,
      * then performs a full sync. Use this when:
      * - User manually requests a refresh
      * - Suspected data inconsistency
-     * - After clearing Firebase data
+     * - After clearing synced data
      */
     suspend fun forceSync() {
         syncedPhotoIds.clear()
-        syncedIdsLoaded = false  // Force reload from Firebase
+        syncedIdsLoaded = false  // Force reload from VPS
         syncRecentPhotos().getOrNull() // Internal call - result ignored
     }
 
     /**
-     * Clean up duplicate photos in R2 and Firebase Database.
+     * Clean up duplicate photos in R2 and VPS database.
      *
      * Finds photos with the same originalId (MediaStore _ID) and keeps only
      * the most recently synced one, deleting older duplicates.
@@ -997,12 +865,12 @@ class PhotoSyncService(context: Context) {
      *
      * ## Cleanup Algorithm
      *
-     * 1. Query all photos from Firebase
+     * 1. Query all photos from VPS
      * 2. Group by originalId
      * 3. For groups with >1 photo:
      *    a. Sort by syncedAt descending
      *    b. Keep the first (most recent)
-     *    c. Delete all others from R2 and Firebase
+     *    c. Delete all others from R2 and VPS
      *
      * ## Idempotency
      *
@@ -1010,26 +878,19 @@ class PhotoSyncService(context: Context) {
      */
     suspend fun cleanupDuplicates() {
         try {
-            val userId = unifiedIdentityManager.getUnifiedUserIdSync() ?: return
-
             Log.d(TAG, "Cleaning up duplicate photos...")
 
-            val photosRef = database.reference
-                .child(USERS_PATH)
-                .child(userId)
-                .child(PHOTOS_PATH)
-
-            val snapshot = photosRef.get().await()
+            val photos = vpsClient.getPhotos()
 
             // Group photos by originalId, including r2Key for deletion
             data class PhotoInfo(val photoId: String, val syncedAt: Long, val r2Key: String?)
             val photosByOriginalId = mutableMapOf<Long, MutableList<PhotoInfo>>()
 
-            for (child in snapshot.children) {
-                val photoId = child.key ?: continue
-                val originalId = child.child("originalId").getValue(Long::class.java) ?: continue
-                val syncedAt = child.child("syncedAt").getValue(Long::class.java) ?: 0L
-                val r2Key = child.child("r2Key").getValue(String::class.java)
+            for (photo in photos) {
+                val photoId = photo["id"] as? String ?: continue
+                val originalId = (photo["originalId"] as? Number)?.toLong() ?: continue
+                val syncedAt = (photo["syncedAt"] as? Number)?.toLong() ?: 0L
+                val r2Key = photo["r2Key"] as? String
 
                 photosByOriginalId.getOrPut(originalId) { mutableListOf() }
                     .add(PhotoInfo(photoId, syncedAt, r2Key))
@@ -1038,33 +899,22 @@ class PhotoSyncService(context: Context) {
             var deletedCount = 0
 
             // For each originalId with duplicates, keep only the most recent one
-            for ((originalId, photos) in photosByOriginalId) {
-                if (photos.size > 1) {
+            for ((originalId, photosList) in photosByOriginalId) {
+                if (photosList.size > 1) {
                     // Sort by syncedAt descending (most recent first)
-                    val sorted = photos.sortedByDescending { it.syncedAt }
+                    val sorted = photosList.sortedByDescending { it.syncedAt }
 
                     // Delete all but the first (most recent)
                     for (i in 1 until sorted.size) {
                         val photoToDelete = sorted[i]
 
-                        // Delete from R2 if r2Key exists
-                        if (photoToDelete.r2Key != null) {
-                            try {
-                                val deleteData = hashMapOf("r2Key" to photoToDelete.r2Key)
-                                functions
-                                    .getHttpsCallable("deleteR2File")
-                                    .call(deleteData)
-                                    .await()
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Error deleting duplicate photo from R2: ${photoToDelete.r2Key}", e)
-                            }
+                        try {
+                            vpsClient.deletePhoto(photoToDelete.photoId, photoToDelete.r2Key)
+                            deletedCount++
+                            Log.d(TAG, "Deleted duplicate photo: ${photoToDelete.photoId} (originalId: $originalId)")
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Error deleting duplicate photo: ${photoToDelete.photoId}", e)
                         }
-
-                        // Delete from Database
-                        photosRef.child(photoToDelete.photoId).removeValue().await()
-                        deletedCount++
-
-                        Log.d(TAG, "Deleted duplicate photo: ${photoToDelete.photoId} (originalId: $originalId)")
                     }
                 }
             }

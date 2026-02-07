@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { query, queryOne } from '../services/database';
 import { authenticate } from '../middleware/auth';
 import { apiRateLimit } from '../middleware/rateLimit';
+import { broadcastToUser } from '../services/websocket';
 
 const router = Router();
 
@@ -30,6 +31,9 @@ const createMessageSchema = z.object({
   isMms: z.boolean().default(false),
   mmsParts: z.any().optional(),
   encrypted: z.boolean().default(false),
+  encryptedBody: z.string().optional(),
+  encryptedNonce: z.string().optional(),
+  keyMap: z.record(z.string()).optional(),
 });
 
 const syncMessagesSchema = z.object({
@@ -50,7 +54,7 @@ router.get('/', async (req: Request, res: Response) => {
 
     let queryText = `
       SELECT id, thread_id, address, contact_name, body, date, type, read,
-             is_mms, mms_parts, encrypted, created_at
+             is_mms, mms_parts, encrypted, encrypted_body, encrypted_nonce, key_map, created_at
       FROM user_messages
       WHERE user_id = $1
     `;
@@ -90,6 +94,9 @@ router.get('/', async (req: Request, res: Response) => {
         isMms: m.is_mms,
         mmsParts: m.mms_parts,
         encrypted: m.encrypted,
+        encryptedBody: m.encrypted_body,
+        encryptedNonce: m.encrypted_nonce,
+        keyMap: m.key_map,
       })),
       hasMore: messages.length === params.limit,
     });
@@ -111,15 +118,28 @@ router.post('/sync', async (req: Request, res: Response) => {
 
     let synced = 0;
     let skipped = 0;
+    const syncedMessages: any[] = [];
 
     for (const msg of body.messages) {
       try {
         await query(
           `INSERT INTO user_messages
-           (id, user_id, thread_id, address, contact_name, body, date, type, read, is_mms, mms_parts, encrypted)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           (id, user_id, thread_id, address, contact_name, body, date, type, read, is_mms, mms_parts, encrypted, encrypted_body, encrypted_nonce, key_map)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
            ON CONFLICT (id) DO UPDATE SET
+             thread_id = EXCLUDED.thread_id,
+             address = EXCLUDED.address,
+             contact_name = EXCLUDED.contact_name,
+             body = EXCLUDED.body,
+             date = EXCLUDED.date,
+             type = EXCLUDED.type,
              read = EXCLUDED.read,
+             is_mms = EXCLUDED.is_mms,
+             mms_parts = EXCLUDED.mms_parts,
+             encrypted = EXCLUDED.encrypted,
+             encrypted_body = EXCLUDED.encrypted_body,
+             encrypted_nonce = EXCLUDED.encrypted_nonce,
+             key_map = EXCLUDED.key_map,
              updated_at = NOW()`,
           [
             msg.id,
@@ -134,11 +154,46 @@ router.post('/sync', async (req: Request, res: Response) => {
             msg.isMms,
             msg.mmsParts ? JSON.stringify(msg.mmsParts) : null,
             msg.encrypted,
+            msg.encryptedBody ?? null,
+            msg.encryptedNonce ?? null,
+            msg.keyMap ? JSON.stringify(msg.keyMap) : null,
           ]
         );
         synced++;
+        syncedMessages.push(msg);
       } catch (e) {
         skipped++;
+      }
+    }
+
+    // Broadcast synced messages to other connected devices via WebSocket
+    if (syncedMessages.length > 0) {
+      // Send in batches to avoid overwhelming the WebSocket
+      const batchSize = 50;
+      for (let i = 0; i < syncedMessages.length; i += batchSize) {
+        const batch = syncedMessages.slice(i, i + batchSize);
+        broadcastToUser(userId, 'messages', {
+          type: 'messages_synced',
+          data: {
+            messages: batch.map((m) => ({
+              id: m.id,
+              threadId: m.threadId,
+              address: m.address,
+              contactName: m.contactName,
+              body: m.body,
+              date: m.date,
+              type: m.type,
+              read: m.read,
+              isMms: m.isMms,
+              mmsParts: m.mmsParts,
+              encrypted: m.encrypted,
+              encryptedBody: m.encryptedBody,
+              encryptedNonce: m.encryptedNonce,
+              keyMap: m.keyMap,
+            })),
+            total: batch.length,
+          },
+        });
       }
     }
 

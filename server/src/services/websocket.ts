@@ -1,5 +1,5 @@
 import { WebSocketServer, WebSocket } from 'ws';
-import { IncomingMessage } from 'http';
+import { IncomingMessage, Server as HttpServer } from 'http';
 import { verifyToken, TokenPayload } from './auth';
 import { pool } from './database';
 import { PoolClient } from 'pg';
@@ -13,7 +13,8 @@ interface AuthenticatedWebSocket extends WebSocket {
 
 interface SubscriptionMessage {
   type: 'subscribe' | 'unsubscribe';
-  channel: string; // e.g., 'messages', 'contacts', 'calls'
+  channel?: string; // e.g., 'messages', 'contacts', 'calls', or 'all'
+  channels?: string[]; // bulk subscribe: ['messages', 'contacts', 'calls']
 }
 
 interface BroadcastMessage {
@@ -27,10 +28,10 @@ const userConnections = new Map<string, Set<AuthenticatedWebSocket>>();
 // PostgreSQL LISTEN clients
 const listenClients: PoolClient[] = [];
 
-export function createWebSocketServer(port: number): WebSocketServer {
-  const wss = new WebSocketServer({ port });
+export function createWebSocketServer(server: HttpServer): WebSocketServer {
+  const wss = new WebSocketServer({ server });
 
-  console.log(`WebSocket server started on port ${port}`);
+  console.log(`WebSocket server attached to HTTP server`);
 
   // Heartbeat interval
   const heartbeatInterval = setInterval(() => {
@@ -130,20 +131,65 @@ export function createWebSocketServer(port: number): WebSocketServer {
   return wss;
 }
 
-function handleClientMessage(client: AuthenticatedWebSocket, message: SubscriptionMessage): void {
-  const validChannels = ['messages', 'contacts', 'calls', 'devices', 'outgoing', 'call_requests'];
+const VALID_CHANNELS = [
+  'messages', 'contacts', 'calls', 'devices', 'outgoing', 'call_requests',
+  'clipboard', 'dnd', 'media', 'hotspot', 'phone_status', 'typing',
+  'notifications', 'voicemails', 'e2ee', 'photos', 'file_transfers',
+  'continuity', 'scheduled_messages', 'find_phone', 'subscription',
+];
 
-  if (!validChannels.includes(message.channel)) {
-    client.send(JSON.stringify({ type: 'error', message: 'Invalid channel' }));
+function handleClientMessage(client: AuthenticatedWebSocket, message: SubscriptionMessage): void {
+  // Determine which channels to operate on
+  let channelsToProcess: string[];
+
+  if (message.channels && Array.isArray(message.channels)) {
+    // Bulk subscribe/unsubscribe: { type: "subscribe", channels: ["messages", "contacts"] }
+    channelsToProcess = message.channels;
+  } else if (message.channel === 'all') {
+    // Subscribe-all shortcut: { type: "subscribe", channel: "all" }
+    channelsToProcess = [...VALID_CHANNELS];
+  } else if (message.channel) {
+    // Single channel (original format): { type: "subscribe", channel: "messages" }
+    channelsToProcess = [message.channel];
+  } else {
+    client.send(JSON.stringify({ type: 'error', message: 'Missing channel or channels field' }));
+    return;
+  }
+
+  // Validate all channels first
+  const invalidChannels = channelsToProcess.filter((ch) => !VALID_CHANNELS.includes(ch));
+  if (invalidChannels.length > 0) {
+    client.send(JSON.stringify({
+      type: 'error',
+      message: `Invalid channel(s): ${invalidChannels.join(', ')}`,
+    }));
     return;
   }
 
   if (message.type === 'subscribe') {
-    client.subscriptions.add(message.channel);
-    client.send(JSON.stringify({ type: 'subscribed', channel: message.channel }));
+    const subscribed: string[] = [];
+    for (const ch of channelsToProcess) {
+      client.subscriptions.add(ch);
+      subscribed.push(ch);
+    }
+    // For single channel, send the original response format for backward compatibility
+    if (!message.channels && message.channel !== 'all' && subscribed.length === 1) {
+      client.send(JSON.stringify({ type: 'subscribed', channel: subscribed[0] }));
+    } else {
+      client.send(JSON.stringify({ type: 'subscribed', channels: subscribed }));
+    }
   } else if (message.type === 'unsubscribe') {
-    client.subscriptions.delete(message.channel);
-    client.send(JSON.stringify({ type: 'unsubscribed', channel: message.channel }));
+    const unsubscribed: string[] = [];
+    for (const ch of channelsToProcess) {
+      client.subscriptions.delete(ch);
+      unsubscribed.push(ch);
+    }
+    // For single channel, send the original response format for backward compatibility
+    if (!message.channels && message.channel !== 'all' && unsubscribed.length === 1) {
+      client.send(JSON.stringify({ type: 'unsubscribed', channel: unsubscribed[0] }));
+    } else {
+      client.send(JSON.stringify({ type: 'unsubscribed', channels: unsubscribed }));
+    }
   }
 }
 
@@ -263,4 +309,50 @@ export function getConnectedDeviceCount(userId: string): number {
 // Check if user has any connected devices
 export function isUserOnline(userId: string): boolean {
   return userConnections.has(userId) && userConnections.get(userId)!.size > 0;
+}
+
+// Broadcast to all of a user's devices except the sender device
+export function broadcastToAllDevicesExcept(
+  userId: string,
+  excludeDeviceId: string,
+  channel: string,
+  message: BroadcastMessage
+): void {
+  const connections = userConnections.get(userId);
+  if (!connections) return;
+
+  const messageStr = JSON.stringify(message);
+
+  connections.forEach((client) => {
+    if (
+      client.readyState === WebSocket.OPEN &&
+      client.deviceId !== excludeDeviceId &&
+      client.subscriptions.has(channel)
+    ) {
+      client.send(messageStr);
+    }
+  });
+}
+
+// Get all online users with their device info (for admin use)
+export function getOnlineUsers(): { userId: string; deviceCount: number; devices: string[] }[] {
+  const result: { userId: string; deviceCount: number; devices: string[] }[] = [];
+
+  userConnections.forEach((connections, userId) => {
+    const devices: string[] = [];
+    connections.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN && client.deviceId) {
+        devices.push(client.deviceId);
+      }
+    });
+    if (devices.length > 0) {
+      result.push({
+        userId,
+        deviceCount: devices.length,
+        devices,
+      });
+    }
+  });
+
+  return result;
 }

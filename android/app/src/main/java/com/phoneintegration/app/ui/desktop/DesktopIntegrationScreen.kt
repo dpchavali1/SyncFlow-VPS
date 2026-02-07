@@ -54,10 +54,13 @@ import com.phoneintegration.app.desktop.DesktopSyncService
 import com.phoneintegration.app.desktop.CompletePairingResult
 import com.phoneintegration.app.desktop.PairedDevice
 import com.phoneintegration.app.data.PreferencesManager
+import com.phoneintegration.app.e2ee.SignalProtocolManager
 import com.phoneintegration.app.desktop.NotificationMirrorService
 import com.phoneintegration.app.desktop.PhotoSyncService
 import com.phoneintegration.app.SmsRepository
 import com.phoneintegration.app.CallMonitorService
+import com.phoneintegration.app.vps.VPSClient
+import com.phoneintegration.app.vps.VPSSyncService
 import com.phoneintegration.app.ui.components.getRegisteredPhoneNumber
 import com.phoneintegration.app.ui.components.PhoneNumberRegistrationDialog
 import kotlinx.coroutines.Dispatchers
@@ -94,7 +97,7 @@ private object PairedDevicesCache {
     var isLoading by mutableStateOf(false)
     var lastError by mutableStateOf<String?>(null)
     var deviceCount by mutableStateOf(0)
-    var deviceLimit by mutableStateOf(3)
+    var deviceLimit by mutableStateOf(2)
     var userPlan by mutableStateOf("free")
     var canAddDevice by mutableStateOf(true)
 
@@ -303,12 +306,20 @@ fun DesktopIntegrationScreen(
                     val devices = desktopSyncService.getPairedDevices()
                     withContext(Dispatchers.Main) {
                         PairedDevicesCache.updateDevices(devices)
+                        // Reset count/limit to sane defaults since getDeviceInfo failed
+                        PairedDevicesCache.deviceCount = devices.size
+                        PairedDevicesCache.deviceLimit = 2
+                        PairedDevicesCache.canAddDevice = devices.size < 2
                     }
                 }
             } catch (e: Exception) {
                 android.util.Log.e("DesktopIntegrationScreen", "Error loading devices", e)
                 withContext(Dispatchers.Main) {
                     PairedDevicesCache.setError(e.message ?: "Failed to load devices")
+                    // Reset to allow pairing on error - don't block user
+                    PairedDevicesCache.deviceCount = 0
+                    PairedDevicesCache.deviceLimit = 2
+                    PairedDevicesCache.canAddDevice = true
                 }
             } finally {
                 withContext(Dispatchers.Main) {
@@ -318,20 +329,37 @@ fun DesktopIntegrationScreen(
         }
     }
 
-    // Sync initial messages after successful pairing (last 30 days)
+    // Sync messages after successful pairing
+    // First pairing: Sync last 30 days
+    // Subsequent pairings: Only sync new messages since last sync
     suspend fun syncInitialMessages() {
         try {
-            android.util.Log.d("DesktopIntegrationScreen", "Starting initial message sync (last 30 days)")
+            val prefs = appContext.getSharedPreferences("vps_sync_prefs", Context.MODE_PRIVATE)
+            val lastSyncTime = prefs.getLong("last_message_sync_time", 0L)
             val smsRepository = SmsRepository(appContext)
-            val messages = smsRepository.getMessagesFromLastDays(days = 30)
-            android.util.Log.d("DesktopIntegrationScreen", "Retrieved ${messages.size} messages from last 30 days for sync")
+
+            val messages = if (lastSyncTime == 0L) {
+                // First sync: Get last 30 days
+                android.util.Log.d("DesktopIntegrationScreen", "First sync - syncing last 30 days of messages")
+                smsRepository.getMessagesFromLastDays(days = 30)
+            } else {
+                // Subsequent sync: Get messages since last sync
+                android.util.Log.d("DesktopIntegrationScreen", "Incremental sync - syncing messages since $lastSyncTime")
+                smsRepository.getMessagesSince(lastSyncTime)
+            }
+
+            android.util.Log.d("DesktopIntegrationScreen", "Retrieved ${messages.size} messages for sync")
 
             if (messages.isNotEmpty()) {
                 desktopSyncService.syncMessages(messages)
-                android.util.Log.d("DesktopIntegrationScreen", "Initial message sync completed: ${messages.size} messages")
+                android.util.Log.d("DesktopIntegrationScreen", "Message sync completed: ${messages.size} messages")
             }
+
+            // Update last sync time
+            prefs.edit().putLong("last_message_sync_time", System.currentTimeMillis()).apply()
+            android.util.Log.d("DesktopIntegrationScreen", "Updated last sync time")
         } catch (e: Exception) {
-            android.util.Log.e("DesktopIntegrationScreen", "Error during initial message sync", e)
+            android.util.Log.e("DesktopIntegrationScreen", "Error during message sync", e)
         }
     }
 
@@ -341,7 +369,8 @@ fun DesktopIntegrationScreen(
             try {
                 android.util.Log.d("DesktopIntegrationScreen", "Starting initial contact sync")
 
-                val userId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
+                val vpsClient = com.phoneintegration.app.vps.VPSClient.getInstance(appContext)
+                val userId = vpsClient.userId
                 if (userId == null) {
                     android.util.Log.e("DesktopIntegrationScreen", "Cannot sync contacts - no authenticated user")
                     return@withContext
@@ -363,7 +392,8 @@ fun DesktopIntegrationScreen(
             try {
                 android.util.Log.d("DesktopIntegrationScreen", "Starting initial call history sync")
 
-                val userId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
+                val vpsClient = com.phoneintegration.app.vps.VPSClient.getInstance(appContext)
+                val userId = vpsClient.userId
                 if (userId == null) {
                     android.util.Log.e("DesktopIntegrationScreen", "Cannot sync - no authenticated user")
                     return@withContext
@@ -379,11 +409,46 @@ fun DesktopIntegrationScreen(
         }
     }
 
-    // Load devices when screen appears
+    // Load devices when screen appears + validate device is still registered
     LaunchedEffect(Unit) {
         android.util.Log.d("DesktopIntegrationScreen", "Screen appeared, loading devices...")
         refreshSettings()
         loadDevices(forceRefresh = false)
+
+        // Check if this device is still registered on the server
+        val vpsSyncService = VPSSyncService.getInstance(appContext)
+        val stillRegistered = vpsSyncService.validateDeviceRegistration()
+        if (!stillRegistered) {
+            android.util.Log.w("DesktopIntegrationScreen", "Device no longer registered, clearing state")
+            PairedDevicesCache.clear()
+        }
+    }
+
+    // Observe remote unpairing events
+    LaunchedEffect(Unit) {
+        val vpsSyncService = VPSSyncService.getInstance(appContext)
+        vpsSyncService.deviceUnpaired.collect {
+            android.util.Log.w("DesktopIntegrationScreen", "Remote unpairing detected, clearing devices")
+            PairedDevicesCache.clear()
+        }
+    }
+
+    // Observe device_added events from WebSocket → refresh device list instantly
+    LaunchedEffect(Unit) {
+        val vpsSyncService = VPSSyncService.getInstance(appContext)
+        vpsSyncService.deviceAdded.collect { addedDeviceId ->
+            android.util.Log.d("DesktopIntegrationScreen", "Device added via WebSocket: $addedDeviceId, refreshing list")
+            loadDevices(forceRefresh = true)
+        }
+    }
+
+    // Observe other device removed events from WebSocket → refresh device list instantly
+    LaunchedEffect(Unit) {
+        val vpsSyncService = VPSSyncService.getInstance(appContext)
+        vpsSyncService.otherDeviceRemoved.collect { removedDeviceId ->
+            android.util.Log.d("DesktopIntegrationScreen", "Device removed via WebSocket: $removedDeviceId, refreshing list")
+            loadDevices(forceRefresh = true)
+        }
     }
 
     // Log when device list changes for debugging
@@ -426,11 +491,29 @@ fun DesktopIntegrationScreen(
                                 val joinResult = result.getOrNull()
                                 android.util.Log.d("DesktopIntegrationScreen", "Join result details: success=${joinResult?.success}, message='${joinResult?.message}'")
                                 if (joinResult?.success == true) {
+                                    // Immediately mark as having devices so sync UI appears
+                                    withContext(Dispatchers.Main) {
+                                        if (PairedDevicesCache.devices.isEmpty()) {
+                                            PairedDevicesCache.updateDevices(listOf(
+                                                PairedDevice(
+                                                    id = "sync-group",
+                                                    name = "Synced Device",
+                                                    platform = "unknown",
+                                                    lastSeen = System.currentTimeMillis()
+                                                )
+                                            ))
+                                        }
+                                    }
                                     successMessage = "Successfully joined sync group! (${joinResult.deviceCount}/${joinResult.deviceLimit} devices)"
                                     showSuccessDialog = true
                                     // Trigger initial data sync for newly joined group
                                     scope.launch(Dispatchers.IO) {
                                         try {
+                                            // Ensure full sync on new pairing
+                                            appContext.getSharedPreferences("vps_sync_prefs", Context.MODE_PRIVATE)
+                                                .edit()
+                                                .remove("last_message_sync_time")
+                                                .apply()
                                             android.util.Log.d("DesktopIntegrationScreen", "Starting initial data sync after sync group join")
                                             syncInitialMessages()
                                             syncInitialContacts()
@@ -439,6 +522,7 @@ fun DesktopIntegrationScreen(
                                             android.util.Log.e("DesktopIntegrationScreen", "Error syncing data after sync group join", e)
                                         }
                                     }
+                                    // Refresh device list immediately (server already registered the device)
                                     loadDevices(forceRefresh = true)
                                 } else {
                                     errorMessage = joinResult?.message ?: "Failed to join sync group"
@@ -459,12 +543,170 @@ fun DesktopIntegrationScreen(
                         android.util.Log.d("DesktopIntegrationScreen", "Parsed token data: $tokenData")
 
                         if (tokenData != null) {
-                            android.util.Log.d("DesktopIntegrationScreen", "Using new pending pairing format")
+                            android.util.Log.d("DesktopIntegrationScreen", "Using new pending pairing format, version=${tokenData.version}, isVPS=${tokenData.isVPS}")
 
+                            // VPS Pairing - use VPSClient instead of Firebase
+                            if (tokenData.isVPS) {
+                                android.util.Log.d("DesktopIntegrationScreen", "Processing VPS pairing request")
+                                try {
+                                    val vpsClient = VPSClient.getInstance(context)
+
+                                    // CRITICAL: Authenticate with VPS before pairing
+                                    // On fresh install, Android has no VPS token - must auth first
+                                    if (!vpsClient.isAuthenticated) {
+                                        android.util.Log.d("DesktopIntegrationScreen", "Not authenticated with VPS, authenticating first...")
+                                        val userId = try {
+                                            withTimeout(10000) {
+                                                unifiedIdentityManager.getUnifiedUserId()
+                                            }
+                                        } catch (e: Exception) {
+                                            android.util.Log.e("DesktopIntegrationScreen", "VPS authentication failed: ${e.message}", e)
+                                            null
+                                        }
+                                        if (userId == null || !vpsClient.isAuthenticated) {
+                                            errorMessage = "Failed to authenticate with VPS server. Please try again."
+                                            isLoading = false
+                                            isScanButtonBusy = false
+                                            return@launch
+                                        }
+                                        android.util.Log.d("DesktopIntegrationScreen", "VPS authenticated as: $userId")
+                                    }
+
+                                    // Complete the VPS pairing (approve the request)
+                                    android.util.Log.d("DesktopIntegrationScreen", "Completing VPS pairing with token: ${tokenData.token.take(8)}...")
+                                    vpsClient.completePairing(tokenData.token)
+                                    android.util.Log.d("DesktopIntegrationScreen", "VPS pairing completed successfully")
+
+                                    // Immediately add device to cache so sync UI appears without re-navigation
+                                    withContext(Dispatchers.Main) {
+                                        val newDevice = PairedDevice(
+                                            id = tokenData.deviceId ?: "pending",
+                                            name = tokenData.name,
+                                            platform = tokenData.platform,
+                                            lastSeen = System.currentTimeMillis()
+                                        )
+                                        PairedDevicesCache.updateDevices(
+                                            PairedDevicesCache.devices + newDevice
+                                        )
+                                    }
+
+                                    // CRITICAL: Push E2EE keys IMMEDIATELY after pairing
+                                    // This ensures macOS can decrypt messages synced below
+                                    val vpsDeviceId = tokenData.deviceId
+                                    if (tokenData.hasE2EEPublicKey && vpsDeviceId != null) {
+                                        android.util.Log.d("DesktopIntegrationScreen", "Pushing E2EE keys to VPS device: $vpsDeviceId")
+                                        // Do not block UI; retry in background until the key is visible on VPS.
+                                        scope.launch(Dispatchers.IO) {
+                                            try {
+                                                // Ensure E2EE keys are initialized (may not be on fresh install)
+                                                val signalProtocolManager = SignalProtocolManager(context)
+                                                signalProtocolManager.initializeKeys()
+                                                android.util.Log.d("DesktopIntegrationScreen", "E2EE keys initialized for VPS pairing")
+
+                                                val targetPublicKey = tokenData.macPublicKeyX963!!
+                                                val vpsClientRetry = VPSClient.getInstance(context)
+                                                val userIdRetry = vpsClientRetry.userId
+
+                                                android.util.Log.d("DesktopIntegrationScreen", "E2EE push context: userId=$userIdRetry, targetDeviceId=$vpsDeviceId, targetKeyLength=${targetPublicKey.length}, isAuthenticated=${vpsClientRetry.isAuthenticated}")
+
+                                                val maxAttempts = 10
+                                                val delayMs = 2000L
+
+                                                repeat(maxAttempts) { attempt ->
+                                                    // Push the key first
+                                                    try {
+                                                        desktopSyncService.pushE2EEKeysToDevice(
+                                                            targetDeviceId = vpsDeviceId,
+                                                            targetPublicKeyX963 = targetPublicKey
+                                                        )
+                                                        android.util.Log.d("DesktopIntegrationScreen", "E2EE keys pushed successfully (attempt ${attempt + 1})")
+                                                    } catch (e: Exception) {
+                                                        android.util.Log.e("DesktopIntegrationScreen", "Failed to push E2EE keys (attempt ${attempt + 1}): ${e.message}", e)
+                                                    }
+
+                                                    // Verify the key was stored by reading it back
+                                                    try {
+                                                        if (userIdRetry != null) {
+                                                            val existing = vpsClientRetry.getDeviceE2eeKeys(userIdRetry)
+                                                            android.util.Log.d("DesktopIntegrationScreen", "E2EE verify (attempt ${attempt + 1}): found ${existing.size} keys for userId=$userIdRetry, deviceIds=${existing.keys}")
+                                                            val encrypted = existing[vpsDeviceId]?.get("encryptedKey") as? String
+                                                            if (!encrypted.isNullOrBlank()) {
+                                                                android.util.Log.d("DesktopIntegrationScreen", "✅ E2EE key VERIFIED on server for device $vpsDeviceId (keyLength=${encrypted.length})")
+                                                                return@launch
+                                                            } else {
+                                                                android.util.Log.w("DesktopIntegrationScreen", "⚠️ E2EE key NOT found for deviceId=$vpsDeviceId in keys: ${existing.keys}")
+                                                            }
+                                                        } else {
+                                                            android.util.Log.e("DesktopIntegrationScreen", "⚠️ userId is null, cannot verify E2EE key")
+                                                        }
+                                                    } catch (e: Exception) {
+                                                        android.util.Log.w("DesktopIntegrationScreen", "Failed to verify E2EE key (attempt ${attempt + 1})", e)
+                                                    }
+
+                                                    kotlinx.coroutines.delay(delayMs)
+                                                }
+                                                android.util.Log.e("DesktopIntegrationScreen", "❌ E2EE key push failed after $maxAttempts attempts")
+                                            } catch (e: Exception) {
+                                                android.util.Log.e("DesktopIntegrationScreen", "Failed to initialize/push E2EE keys to VPS device: ${e.message}", e)
+                                            }
+                                        }
+                                    } else {
+                                        android.util.Log.w("DesktopIntegrationScreen", "No E2EE public key in VPS QR (hasKey=${tokenData.hasE2EEPublicKey}, deviceId=$vpsDeviceId)")
+                                    }
+
+                                    successMessage = "Successfully paired with ${tokenData.name}!"
+                                    showSuccessDialog = true
+
+                                    // Start CallMonitorService for phone call sync
+                                    android.util.Log.d("DesktopIntegrationScreen", "Starting CallMonitorService for VPS phone call sync")
+                                    CallMonitorService.start(context)
+
+                                    // CRITICAL: Start IntelligentSyncManager's heavy polling
+                                    // Without this, ongoing message/call sync never starts after pairing
+                                    try {
+                                        com.phoneintegration.app.services.IntelligentSyncManager
+                                            .getInstance(context).startAfterPairing()
+                                        android.util.Log.d("DesktopIntegrationScreen", "IntelligentSyncManager started after VPS pairing")
+                                    } catch (e: Exception) {
+                                        android.util.Log.e("DesktopIntegrationScreen", "Failed to start IntelligentSyncManager", e)
+                                    }
+
+                                    // Trigger initial VPS data sync
+                                    scope.launch(Dispatchers.IO) {
+                                        try {
+                                            android.util.Log.d("DesktopIntegrationScreen", "Starting initial VPS data sync after pairing")
+                                            val vpsSyncService = VPSSyncService.getInstance(context)
+                                            val smsRepository = SmsRepository(context)
+
+                                            // Sync messages (last 30 days)
+                                            val messages = smsRepository.getMessagesFromLastDays(days = 30)
+                                            android.util.Log.d("DesktopIntegrationScreen", "Syncing ${messages.size} messages to VPS")
+                                            vpsSyncService.syncMessages(messages)
+
+                                            // Contacts and call history sync handled by VPSSyncService
+                                            android.util.Log.d("DesktopIntegrationScreen", "Initial VPS data sync completed")
+                                        } catch (e: Exception) {
+                                            android.util.Log.e("DesktopIntegrationScreen", "Error syncing VPS data", e)
+                                        }
+                                    }
+
+                                    // Refresh device list immediately (server already registered the device)
+                                    loadDevices(forceRefresh = true)
+                                } catch (e: Exception) {
+                                    android.util.Log.e("DesktopIntegrationScreen", "VPS pairing failed", e)
+                                    errorMessage = e.message ?: "Failed to complete VPS pairing"
+                                }
+
+                                isLoading = false
+                                isScanButtonBusy = false
+                                return@launch
+                            }
+
+                            // Firebase Pairing - existing flow
                             // CRITICAL: Ensure Android is authenticated before pairing
                             // This ensures the Cloud Function receives the correct user ID
                             android.util.Log.d("DesktopIntegrationScreen", "Getting unified user ID...")
-                            val userId = try {
+                            var userId = try {
                                 withTimeout(10000) { // 10 second timeout
                                     unifiedIdentityManager.getUnifiedUserId()
                                 }
@@ -491,19 +733,27 @@ fun DesktopIntegrationScreen(
                             }
                             android.util.Log.d("DesktopIntegrationScreen", "Authenticated as user: $userId")
 
-                            // CRITICAL: If authenticated as a device user, sign out first
-                            // This ensures completePairing runs as the real/anonymous user
+                            // CRITICAL: If authenticated as a device user, re-auth via fingerprint
+                            // Do NOT use authenticateAnonymous() - it creates orphan users
                             if (userId?.startsWith("device_") == true) {
-                                android.util.Log.d("DesktopIntegrationScreen", "WARNING: Android authenticated as device user, signing out to reset")
+                                android.util.Log.d("DesktopIntegrationScreen", "WARNING: Android authenticated as device user, re-authenticating via fingerprint")
                                 try {
-                                    com.google.firebase.auth.FirebaseAuth.getInstance().signOut()
-                                    // Sign in anonymously to get a fresh anonymous user
-                                    com.google.android.gms.tasks.Tasks.await(
-                                        com.google.firebase.auth.FirebaseAuth.getInstance().signInAnonymously()
-                                    )
-                                    android.util.Log.d("DesktopIntegrationScreen", "Reset to anonymous user for pairing")
+                                    val vpsClient = com.phoneintegration.app.vps.VPSClient.getInstance(appContext)
+                                    vpsClient.logout()
+                                    // Re-authenticate via unified fingerprint flow (no orphan creation)
+                                    val unifiedId = com.phoneintegration.app.auth.UnifiedIdentityManager.getInstance(appContext).getUnifiedUserId()
+                                    if (unifiedId != null) {
+                                        userId = unifiedId
+                                        android.util.Log.d("DesktopIntegrationScreen", "Re-authenticated via fingerprint: $unifiedId")
+                                    } else {
+                                        android.util.Log.e("DesktopIntegrationScreen", "Fingerprint re-auth failed")
+                                        errorMessage = "Authentication failed. Please try again."
+                                        isLoading = false
+                                        isScanButtonBusy = false
+                                        return@launch
+                                    }
                                 } catch (e: Exception) {
-                                    android.util.Log.w("DesktopIntegrationScreen", "Failed to reset auth", e)
+                                    android.util.Log.w("DesktopIntegrationScreen", "Failed to re-auth via fingerprint", e)
                                 }
                             }
 
@@ -517,6 +767,28 @@ fun DesktopIntegrationScreen(
                                 when (pairingResult) {
                                     is CompletePairingResult.Approved -> {
                                         android.util.Log.d("DesktopIntegrationScreen", "Pairing approved! Device ID: ${pairingResult.deviceId}")
+
+                                        // Immediately add device to cache so sync UI appears without re-navigation
+                                        withContext(Dispatchers.Main) {
+                                            val newDevice = PairedDevice(
+                                                id = pairingResult.deviceId ?: tokenData.deviceId ?: "pending",
+                                                name = tokenData.name,
+                                                platform = tokenData.platform,
+                                                lastSeen = System.currentTimeMillis()
+                                            )
+                                            PairedDevicesCache.updateDevices(
+                                                PairedDevicesCache.devices + newDevice
+                                            )
+                                        }
+
+                                        // Ensure E2EE keys are initialized before pushing to macOS/web and syncing messages.
+                                        try {
+                                            val signalProtocolManager = SignalProtocolManager(appContext)
+                                            signalProtocolManager.initializeKeys()
+                                            android.util.Log.d("DesktopIntegrationScreen", "E2EE keys initialized before VPS sync")
+                                        } catch (e: Exception) {
+                                            android.util.Log.e("DesktopIntegrationScreen", "Failed to initialize E2EE keys", e)
+                                        }
 
                                         // CRITICAL: Push E2EE keys IMMEDIATELY after approval (synchronously!)
                                         // This ensures keys are in Firebase before macOS finishes its retry loop
@@ -547,9 +819,22 @@ fun DesktopIntegrationScreen(
                                         android.util.Log.d("DesktopIntegrationScreen", "Starting CallMonitorService for phone call sync")
                                         CallMonitorService.start(context)
 
+                                        // Start IntelligentSyncManager for ongoing sync
+                                        try {
+                                            com.phoneintegration.app.services.IntelligentSyncManager
+                                                .getInstance(context).startAfterPairing()
+                                        } catch (e: Exception) {
+                                            android.util.Log.e("DesktopIntegrationScreen", "Failed to start IntelligentSyncManager", e)
+                                        }
+
                                         // Trigger initial data sync immediately
                                         scope.launch(Dispatchers.IO) {
                                             try {
+                                                // Ensure full sync on new pairing
+                                                appContext.getSharedPreferences("vps_sync_prefs", Context.MODE_PRIVATE)
+                                                    .edit()
+                                                    .remove("last_message_sync_time")
+                                                    .apply()
                                                 android.util.Log.d("DesktopIntegrationScreen", "Starting initial data sync after pairing")
                                                 syncInitialMessages()
                                                 syncInitialContacts()
@@ -559,7 +844,7 @@ fun DesktopIntegrationScreen(
                                             }
                                         }
 
-                                        // Refresh device list
+                                        // Refresh device list immediately (server already registered the device)
                                         loadDevices(forceRefresh = true)
                                     }
                                     is CompletePairingResult.Rejected -> {
@@ -582,12 +867,29 @@ fun DesktopIntegrationScreen(
                                 val pairingResult = desktopSyncService.completePairing(tokenData.token, true)
                                 when (pairingResult) {
                                     is CompletePairingResult.Approved -> {
+                                        // Immediately add device to cache so sync UI appears
+                                        withContext(Dispatchers.Main) {
+                                            val newDevice = PairedDevice(
+                                                id = tokenData.deviceId ?: "pending",
+                                                name = tokenData.name,
+                                                platform = tokenData.platform,
+                                                lastSeen = System.currentTimeMillis()
+                                            )
+                                            PairedDevicesCache.updateDevices(
+                                                PairedDevicesCache.devices + newDevice
+                                            )
+                                        }
                                         successMessage = "Successfully paired with desktop device!"
                                         showSuccessDialog = true
                                         // Start CallMonitorService for phone call sync
                                         CallMonitorService.start(context)
                                         scope.launch(Dispatchers.IO) {
                                             try {
+                                                // Ensure full sync on new pairing
+                                                appContext.getSharedPreferences("vps_sync_prefs", Context.MODE_PRIVATE)
+                                                    .edit()
+                                                    .remove("last_message_sync_time")
+                                                    .apply()
                                                 syncInitialMessages()
                                                 syncInitialContacts()
                                                 syncInitialCallHistory()
@@ -595,6 +897,7 @@ fun DesktopIntegrationScreen(
                                                 android.util.Log.e("DesktopIntegrationScreen", "Error syncing messages", e)
                                             }
                                         }
+                                        // Refresh device list immediately (server already registered the device)
                                         loadDevices(forceRefresh = true)
                                     }
                                     is CompletePairingResult.Rejected -> {
@@ -657,11 +960,29 @@ fun DesktopIntegrationScreen(
 
             // Device limit info card with User ID and Phone Number
             item {
-                val currentUser = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser
-                val currentUserId = currentUser?.uid ?: "Not signed in"
+                val vpsClient = com.phoneintegration.app.vps.VPSClient.getInstance(context)
+                var currentUserId by remember { mutableStateOf(vpsClient.userId ?: "Not signed in") }
                 var registeredPhone by remember { mutableStateOf("Loading...") }
                 val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
                 var showPhoneRegistrationDialog by remember { mutableStateOf(false) }
+
+                // Auto-authenticate if not signed in
+                LaunchedEffect(Unit) {
+                    if (vpsClient.userId == null) {
+                        android.util.Log.d("DesktopIntegrationScreen", "User not signed in, triggering VPS auth...")
+                        try {
+                            val userId = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                unifiedIdentityManager.getUnifiedUserId()
+                            }
+                            if (userId != null) {
+                                currentUserId = userId
+                                android.util.Log.d("DesktopIntegrationScreen", "VPS auth succeeded: $userId")
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.e("DesktopIntegrationScreen", "VPS auth failed: ${e.message}")
+                        }
+                    }
+                }
 
                 // Phone registration dialog
                 if (showPhoneRegistrationDialog) {
@@ -678,10 +999,10 @@ fun DesktopIntegrationScreen(
                     )
                 }
 
-                // Fetch phone number - check local storage first, then Firebase
+                // Fetch phone number - check local storage and VPS
                 LaunchedEffect(currentUserId) {
                     if (currentUserId != "Not signed in") {
-                        // First, try local SharedPreferences (most reliable)
+                        // Try local SharedPreferences
                         val localPhone = getRegisteredPhoneNumber(context)
                         android.util.Log.d("DesktopIntegrationScreen", "Local registered phone: $localPhone")
 
@@ -689,29 +1010,22 @@ fun DesktopIntegrationScreen(
                             registeredPhone = localPhone
                             android.util.Log.d("DesktopIntegrationScreen", "Using local phone: $localPhone")
                         } else {
-                            // Fall back to Firebase at correct path: users/{userId}/phoneNumber
+                            // Try fetching from VPS server (after reinstall)
                             try {
-                                val database = com.google.firebase.database.FirebaseDatabase.getInstance()
-                                database.goOnline()
-
-                                android.util.Log.d("DesktopIntegrationScreen", "Fetching phone from Firebase for user: $currentUserId")
-
-                                // Correct path: users/{userId}/phoneNumber (NOT devices/phoneNumber)
-                                val phoneSnapshot = database.reference
-                                    .child("users")
-                                    .child(currentUserId)
-                                    .child("phoneNumber")
-                                    .get()
-                                    .await()
-
-                                val phone = phoneSnapshot.getValue(String::class.java)
-                                android.util.Log.d("DesktopIntegrationScreen", "Phone from users/{uid}/phoneNumber: $phone")
-
-                                registeredPhone = phone ?: "Not registered"
-                                android.util.Log.d("DesktopIntegrationScreen", "Final registeredPhone: $registeredPhone")
+                                val vpsPhone = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                                    vpsClient.getMyPhoneNumber()
+                                }
+                                if (!vpsPhone.isNullOrEmpty()) {
+                                    registeredPhone = vpsPhone
+                                    // Save locally for future use
+                                    com.phoneintegration.app.ui.components.saveRegistrationState(context, vpsPhone)
+                                    android.util.Log.d("DesktopIntegrationScreen", "Restored phone from VPS: $vpsPhone")
+                                } else {
+                                    registeredPhone = "Not registered"
+                                }
                             } catch (e: Exception) {
-                                android.util.Log.e("DesktopIntegrationScreen", "Error fetching phone: ${e.message}", e)
                                 registeredPhone = "Not registered"
+                                android.util.Log.e("DesktopIntegrationScreen", "Failed to fetch phone from VPS: ${e.message}")
                             }
                         }
                     } else {
@@ -1019,6 +1333,11 @@ fun DesktopIntegrationScreen(
                                         showSuccessDialog = true
                                         // Update cache when device is unpaired
                                         DesktopSyncService.updatePairedDevicesCache(appContext, false, 0)
+                                        // Clear sync timestamps so re-pairing triggers full sync
+                                        appContext.getSharedPreferences("vps_sync_prefs", Context.MODE_PRIVATE)
+                                            .edit()
+                                            .remove("last_message_sync_time")
+                                            .apply()
                                         loadDevices(forceRefresh = true)
                                     }.onFailure { error ->
                                         errorMessage = error.message ?: "Failed to unpair device"
@@ -1067,7 +1386,8 @@ fun DesktopIntegrationScreen(
                             )
 
                             // Debug info
-                            val currentUserId = com.google.firebase.auth.FirebaseAuth.getInstance().currentUser?.uid
+                            val vpsClientDebug = com.phoneintegration.app.vps.VPSClient.getInstance(context)
+                            val currentUserId = vpsClientDebug.userId
                             val lastError = PairedDevicesCache.lastError
                             Spacer(modifier = Modifier.height(16.dp))
                             Text(
@@ -1901,6 +2221,13 @@ fun DesktopIntegrationScreen(
  */
 private fun parsePairingQrCode(qrData: String): PairingQrData? {
     android.util.Log.d("QRParser", "Parsing QR code, total length: ${qrData.length}")
+
+    // Check for VPS QR format first: syncflow://pair?token=<token>&server=<server>
+    if (qrData.startsWith("syncflow://pair")) {
+        android.util.Log.d("QRParser", "Detected VPS QR code format")
+        return parseVpsPairingQrCode(qrData)
+    }
+
     return try {
         // Check for E2EE public key appended after pipe separator
         // Format: {json}|macPublicKeyX963Base64
@@ -2005,6 +2332,50 @@ private fun isLegacyPairingCode(qrData: String): Boolean {
     }
 }
 
+/**
+ * Parses a VPS pairing QR code.
+ *
+ * VPS QR format: syncflow://pair?token=<token>&server=<server>&deviceId=<deviceId>&e2eeKey=<base64Key>
+ *
+ * @param qrData Raw QR code content string
+ * @return PairingQrData if parsing succeeds, null otherwise
+ */
+private fun parseVpsPairingQrCode(qrData: String): PairingQrData? {
+    return try {
+        val uri = android.net.Uri.parse(qrData)
+        val token = uri.getQueryParameter("token")
+        val server = uri.getQueryParameter("server")
+        val deviceId = uri.getQueryParameter("deviceId")
+        val e2eeKey = uri.getQueryParameter("e2eeKey")
+        // Android Uri decoding converts '+' to space; restore it for Base64 keys.
+        val normalizedE2eeKey = e2eeKey?.replace(" ", "+")
+
+        if (token.isNullOrBlank()) {
+            android.util.Log.w("QRParser", "VPS QR code has empty token")
+            return null
+        }
+
+        android.util.Log.d("QRParser", "Parsed VPS QR: token=${token.take(8)}..., server=$server, deviceId=$deviceId, hasE2eeKey=${!normalizedE2eeKey.isNullOrBlank()}")
+
+        // Return PairingQrData with VPS-specific fields
+        // Use version = 3 to indicate VPS pairing
+        PairingQrData(
+            token = token,
+            name = "VPS Device",
+            platform = "vps",
+            syncGroupId = null,
+            version = 3, // VPS version
+            deviceId = deviceId,
+            expiresAt = 0,
+            macPublicKeyX963 = normalizedE2eeKey, // E2EE public key from macOS
+            vpsServer = server // New field for VPS server URL
+        )
+    } catch (e: Exception) {
+        android.util.Log.e("QRParser", "Failed to parse VPS QR code", e)
+        null
+    }
+}
+
 // =============================================================================
 // endregion
 // =============================================================================
@@ -2016,28 +2387,32 @@ private fun isLegacyPairingCode(qrData: String): Boolean {
 /**
  * Represents parsed pairing QR code data.
  *
- * Supports both V1 (legacy) and V2 (with device limits) formats.
+ * Supports V1 (legacy), V2 (with device limits), and V3 (VPS) formats.
  *
  * @property token The pairing token to exchange with the server
  * @property name Display name for the device being paired
- * @property platform Platform type ("macos", "web", etc.)
+ * @property platform Platform type ("macos", "web", "vps", etc.)
  * @property syncGroupId Optional sync group ID for V1 format
- * @property version QR format version (1 or 2)
+ * @property version QR format version (1 = legacy, 2 = Firebase V2, 3 = VPS)
  * @property deviceId Persistent device ID (V2 only)
  * @property expiresAt Token expiration timestamp (V2 only)
+ * @property vpsServer VPS server URL (V3/VPS only)
  */
 data class PairingQrData(
     val token: String,
     val name: String,
     val platform: String,
     val syncGroupId: String?,
-    val version: Int = 1,        // 1 = legacy, 2 = new V2 with device limits
+    val version: Int = 1,        // 1 = legacy, 2 = Firebase V2, 3 = VPS
     val deviceId: String? = null, // Persistent device ID (V2 only)
     val expiresAt: Long = 0,      // Token expiration timestamp (V2 only)
-    val macPublicKeyX963: String? = null  // macOS/Web public key for direct E2EE key exchange
+    val macPublicKeyX963: String? = null,  // macOS/Web public key for direct E2EE key exchange
+    val vpsServer: String? = null  // VPS server URL (V3/VPS only)
 ) {
     /** Whether this is a V2 format QR code with device limit support */
-    val isV2: Boolean get() = version >= 2
+    val isV2: Boolean get() = version == 2
+    /** Whether this is a VPS (V3) format QR code */
+    val isVPS: Boolean get() = version == 3
     /** Whether this QR code includes a public key for direct E2EE key exchange */
     val hasE2EEPublicKey: Boolean get() = !macPublicKeyX963.isNullOrBlank()
 }

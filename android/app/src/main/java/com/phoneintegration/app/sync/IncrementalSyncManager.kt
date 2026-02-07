@@ -3,26 +3,23 @@ package com.phoneintegration.app.sync
 import android.content.Context
 import android.content.SharedPreferences
 import android.util.Log
-import com.google.firebase.database.*
 import com.phoneintegration.app.SmsMessage
-import kotlinx.coroutines.channels.awaitClose
+import com.phoneintegration.app.vps.VPSClient
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.isActive
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.coroutines.coroutineContext
 
 /**
- * IncrementalSyncManager - Bandwidth Optimization for Firebase RTDB
+ * IncrementalSyncManager - Bandwidth Optimization for VPS
  *
- * CRITICAL FIX: Reduces Firebase bandwidth by 95% to make app financially viable.
- *
- * PROBLEM:
- * - Old implementation used addValueEventListener which re-downloads ALL messages on every change
- * - One user's uninstall/reinstall consumed 10GB (entire free tier)
- * - Would cost $60/month for 1000 users
+ * CRITICAL FIX: Reduces bandwidth by 95% to make app financially viable.
  *
  * SOLUTION:
- * - Uses addChildEventListener (delta-only sync)
+ * - Uses VPS API with pagination
  * - Caches messages in SharedPreferences
  * - Only fetches new messages since last sync timestamp
  * - Bandwidth reduction: 99.8%
@@ -35,12 +32,13 @@ class IncrementalSyncManager(context: Context) {
         "incremental_sync_cache",
         Context.MODE_PRIVATE
     )
-    private val database = FirebaseDatabase.getInstance()
+    private val vpsClient = VPSClient.getInstance(context)
 
     companion object {
         private const val TAG = "IncrementalSync"
         private const val SYNC_STATE_PREFIX = "sync_state_"
         private const val CACHE_PREFIX = "cache_"
+        private const val POLL_INTERVAL_MS = 5000L // 5 seconds
     }
 
     /**
@@ -63,56 +61,97 @@ class IncrementalSyncManager(context: Context) {
     }
 
     /**
-     * Listen to messages using child events (delta-only sync)
+     * Listen to messages using VPS API polling (delta-only sync)
      *
-     * This replaces addValueEventListener which downloads all messages on every change.
-     * Child events only download the specific message that was added/changed/removed.
+     * This uses VPS API to fetch only new messages since last sync.
      *
      * BANDWIDTH COMPARISON:
      * - Old: 500 messages × 2KB = 1MB per sync (on ANY change)
-     * - New: 1 message × 2KB = 2KB per change
+     * - New: Only fetch messages since last timestamp
      * - Savings: 99.6% per sync event
      *
-     * @param userId User ID to sync for
+     * @param userId User ID to sync for (kept for compatibility but not used - VPS handles auth)
      * @param lastSyncTimestamp Timestamp to start sync from (0 for initial sync)
      * @return Flow of message deltas (added/changed/removed)
      */
     fun listenToMessagesIncremental(
         userId: String,
         lastSyncTimestamp: Long = 0
-    ): Flow<MessageDelta> = callbackFlow {
-        Log.d(TAG, "Starting incremental sync for user $userId (since: $lastSyncTimestamp)")
+    ): Flow<MessageDelta> = flow {
+        Log.d(TAG, "Starting incremental sync (since: $lastSyncTimestamp)")
 
-        val messagesRef = database.reference
-            .child("users")
-            .child(userId)
-            .child("messages")
-
-        // Build query: fetch only messages since last sync timestamp
-        val query: Query = if (lastSyncTimestamp > 0) {
-            messagesRef.orderByChild("date").startAt(lastSyncTimestamp.toDouble())
-        } else {
-            // Initial sync: fetch last 50 messages only (not all)
-            messagesRef.orderByChild("date").limitToLast(50)
-        }
-
+        var syncTimestamp = lastSyncTimestamp
         var initialSyncCount = 0
         val processedKeys = mutableSetOf<String>()
 
-        // Listen for ADDED messages (new messages only)
-        val childAddedListener = object : ChildEventListener {
-            override fun onChildAdded(snapshot: DataSnapshot, previousChildName: String?) {
-                val key = snapshot.key ?: return
+        // Initial sync
+        try {
+            val limit = if (syncTimestamp > 0) 100 else 50
+            val response = vpsClient.getMessages(
+                limit = limit,
+                after = if (syncTimestamp > 0) syncTimestamp else null
+            )
 
-                // Prevent duplicates during initial sync
-                if (processedKeys.contains(key)) {
-                    return
-                }
+            for (vpsMessage in response.messages) {
+                val key = vpsMessage.id
+
+                // Prevent duplicates
+                if (processedKeys.contains(key)) continue
                 processedKeys.add(key)
 
-                val message = parseMessage(snapshot)
-                if (message != null) {
-                    initialSyncCount++
+                val message = SmsMessage(
+                    id = key.toLongOrNull() ?: key.hashCode().toLong(),
+                    address = vpsMessage.address,
+                    body = vpsMessage.body,
+                    date = vpsMessage.date,
+                    type = vpsMessage.type
+                )
+
+                initialSyncCount++
+
+                // Cache the message
+                cacheMessage(userId, message)
+
+                // Update sync state
+                updateSyncState(userId, "messages", message.date)
+
+                // Emit delta event
+                emit(MessageDelta.Added(message))
+
+                // Update timestamp for next poll
+                if (message.date > syncTimestamp) {
+                    syncTimestamp = message.date
+                }
+
+                Log.d(TAG, "Message added: ${message.id} (total: $initialSyncCount)")
+            }
+
+            Log.d(TAG, "Initial sync complete: $initialSyncCount messages synced")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during initial sync", e)
+        }
+
+        // Continue polling for new messages
+        while (coroutineContext.isActive) {
+            delay(POLL_INTERVAL_MS)
+
+            try {
+                val response = vpsClient.getMessages(limit = 50, after = syncTimestamp)
+
+                for (vpsMessage in response.messages) {
+                    val key = vpsMessage.id
+
+                    // Skip already processed messages
+                    if (processedKeys.contains(key)) continue
+                    processedKeys.add(key)
+
+                    val message = SmsMessage(
+                        id = key.toLongOrNull() ?: key.hashCode().toLong(),
+                        address = vpsMessage.address,
+                        body = vpsMessage.body,
+                        date = vpsMessage.date,
+                        type = vpsMessage.type
+                    )
 
                     // Cache the message
                     cacheMessage(userId, message)
@@ -121,56 +160,18 @@ class IncrementalSyncManager(context: Context) {
                     updateSyncState(userId, "messages", message.date)
 
                     // Emit delta event
-                    trySend(MessageDelta.Added(message))
+                    emit(MessageDelta.Added(message))
 
-                    Log.d(TAG, "Message added: ${message.id} (total: $initialSyncCount)")
+                    // Update timestamp for next poll
+                    if (message.date > syncTimestamp) {
+                        syncTimestamp = message.date
+                    }
+
+                    Log.d(TAG, "New message: ${message.id}")
                 }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error polling for new messages", e)
             }
-
-            override fun onChildChanged(snapshot: DataSnapshot, previousChildName: String?) {
-                val message = parseMessage(snapshot)
-                if (message != null) {
-                    // Update cache
-                    cacheMessage(userId, message)
-
-                    // Emit delta event
-                    trySend(MessageDelta.Changed(message))
-
-                    Log.d(TAG, "Message changed: ${message.id}")
-                }
-            }
-
-            override fun onChildRemoved(snapshot: DataSnapshot) {
-                val messageId = snapshot.key ?: return
-
-                // Remove from cache
-                removeCachedMessage(userId, messageId)
-
-                // Emit delta event
-                trySend(MessageDelta.Removed(messageId))
-
-                Log.d(TAG, "Message removed: $messageId")
-            }
-
-            override fun onChildMoved(snapshot: DataSnapshot, previousChildName: String?) {
-                // Not used for messages
-            }
-
-            override fun onCancelled(error: DatabaseError) {
-                Log.e(TAG, "Firebase listener cancelled: ${error.message}", error.toException())
-                close(error.toException())
-            }
-        }
-
-        query.addChildEventListener(childAddedListener)
-
-        // Log initial sync complete after short delay
-        kotlinx.coroutines.delay(2000)
-        Log.d(TAG, "Initial sync complete: $initialSyncCount messages synced")
-
-        awaitClose {
-            Log.d(TAG, "Cleaning up incremental message listener for user: $userId")
-            query.removeEventListener(childAddedListener)
         }
     }
 
@@ -273,27 +274,6 @@ class IncrementalSyncManager(context: Context) {
     }
 
     // ===== PRIVATE METHODS =====
-
-    /**
-     * Parse message from Firebase snapshot
-     */
-    private fun parseMessage(snapshot: DataSnapshot): SmsMessage? {
-        return try {
-            val id = snapshot.key?.toLongOrNull() ?: return null
-            val data = snapshot.value as? Map<*, *> ?: return null
-
-            SmsMessage(
-                id = id,
-                address = data["address"] as? String ?: "",
-                body = data["body"] as? String ?: "",
-                date = (data["date"] as? Long) ?: 0L,
-                type = ((data["type"] as? Long) ?: 1L).toInt()
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Error parsing message from snapshot", e)
-            null
-        }
-    }
 
     /**
      * Cache a message in SharedPreferences

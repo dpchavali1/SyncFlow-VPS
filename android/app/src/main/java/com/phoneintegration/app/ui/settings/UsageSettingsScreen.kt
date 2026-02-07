@@ -1,5 +1,6 @@
 package com.phoneintegration.app.ui.settings
 
+import android.util.Log
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -43,11 +44,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
-import com.google.firebase.auth.FirebaseAuth
+import com.phoneintegration.app.vps.VPSAuthManager
+import com.phoneintegration.app.vps.VPSClient
+import com.phoneintegration.app.vps.VPSUsageData
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -88,13 +91,16 @@ private sealed class UsageUiState {
     data class Error(val message: String) : UsageUiState()
 }
 
+private const val TAG = "UsageSettingsScreen"
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UsageSettingsScreen(onBack: () -> Unit) {
-    val auth = remember { FirebaseAuth.getInstance() }
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val currentUserId = auth.currentUser?.uid
+    val authManager = remember { VPSAuthManager.getInstance(context) }
+    val vpsClient = remember { VPSClient.getInstance(context) }
+    val currentUserId = vpsClient.userId
 
     var state by remember { mutableStateOf<UsageUiState>(UsageUiState.Loading) }
     var showClearDialog by remember { mutableStateOf(false) }
@@ -103,8 +109,7 @@ fun UsageSettingsScreen(onBack: () -> Unit) {
 
     val loadUsage: () -> Unit = {
         scope.launch {
-            val currentUser = auth.currentUser
-            val userId = currentUser?.uid
+            val userId = vpsClient.userId
 
             if (userId.isNullOrBlank()) {
                 state = UsageUiState.Error("Not signed in")
@@ -113,25 +118,15 @@ fun UsageSettingsScreen(onBack: () -> Unit) {
 
             state = UsageUiState.Loading
             try {
-                // Use Cloud Function for fast loading (avoids Firebase offline mode issues)
-                val functions = com.google.firebase.functions.FirebaseFunctions.getInstance()
-                val result = functions
-                    .getHttpsCallable("getUserUsage")
-                    .call(mapOf("userId" to userId))
-                    .await()
-
-                val data = result.data as? Map<*, *>
-                val success = data?.get("success") as? Boolean ?: false
-                val usageData = data?.get("usage") as? Map<*, *>
-
-                if (success && usageData != null) {
-                    state = UsageUiState.Loaded(parseUsageFromCloud(usageData))
+                val result = vpsClient.getUserUsage()
+                if (result.success && result.usage != null) {
+                    state = UsageUiState.Loaded(parseUsageFromVPS(result.usage))
                 } else {
                     // No data - show default trial state
                     state = UsageUiState.Loaded(defaultUsageSummary())
                 }
             } catch (e: Exception) {
-                android.util.Log.e("UsageSettingsScreen", "Error loading usage: ${e.message}", e)
+                Log.e(TAG, "Error loading usage: ${e.message}", e)
                 state = UsageUiState.Error(e.message ?: "Failed to load usage")
             }
         }
@@ -144,23 +139,15 @@ fun UsageSettingsScreen(onBack: () -> Unit) {
     // Clear MMS Data function
     val clearMmsData: () -> Unit = {
         scope.launch {
-            val userId = auth.currentUser?.uid ?: return@launch
+            val userId = vpsClient.userId ?: return@launch
             isClearing = true
             clearResult = null
 
             try {
-                val functions = com.google.firebase.functions.FirebaseFunctions.getInstance()
-                val result = functions
-                    .getHttpsCallable("clearMmsData")
-                    .call(mapOf("syncGroupUserId" to userId))
-                    .await()
-
-                val data = result.data as? Map<*, *>
-                val success = data?.get("success") as? Boolean ?: false
-
-                if (success) {
-                    val deletedFiles = (data?.get("deletedFiles") as? Number)?.toInt() ?: 0
-                    val freedBytes = (data?.get("freedBytes") as? Number)?.toLong() ?: 0L
+                val result = vpsClient.clearMmsData()
+                if (result.success) {
+                    val deletedFiles = result.deletedFiles
+                    val freedBytes = result.freedBytes
                     val freedMB = freedBytes / (1024.0 * 1024.0)
                     clearResult = "Cleared $deletedFiles files (${String.format(Locale.US, "%.1f", freedMB)} MB freed)"
                     loadUsage() // Refresh usage stats
@@ -169,7 +156,7 @@ fun UsageSettingsScreen(onBack: () -> Unit) {
                     loadUsage()
                 }
             } catch (e: Exception) {
-                android.util.Log.e("UsageSettingsScreen", "Error clearing MMS data: ${e.message}", e)
+                Log.e(TAG, "Error clearing MMS data: ${e.message}", e)
                 clearResult = "Error: ${e.message}"
             }
 
@@ -458,19 +445,15 @@ private fun UsageBar(label: String, progress: Float) {
     }
 }
 
-private fun parseUsageFromCloud(data: Map<*, *>): UsageSummary {
-    val plan = data["plan"] as? String
-    val planExpiresAt = (data["planExpiresAt"] as? Number)?.toLong()
-    val trialStartedAt = (data["trialStartedAt"] as? Number)?.toLong()
-    val storageBytes = (data["storageBytes"] as? Number)?.toLong() ?: 0L
-    val lastUpdatedAt = (data["lastUpdatedAt"] as? Number)?.toLong()
-
-    val monthly = data["monthly"] as? Map<*, *>
-    val periodKey = currentPeriodKey()
-    val monthlyData = monthly?.get(periodKey) as? Map<*, *>
-    val monthlyUploadBytes = (monthlyData?.get("uploadBytes") as? Number)?.toLong() ?: 0L
-    val monthlyMmsBytes = (monthlyData?.get("mmsBytes") as? Number)?.toLong() ?: 0L
-    val monthlyFileBytes = (monthlyData?.get("fileBytes") as? Number)?.toLong() ?: 0L
+private fun parseUsageFromVPS(data: VPSUsageData): UsageSummary {
+    val plan = data.plan
+    val planExpiresAt = data.planExpiresAt
+    val trialStartedAt = data.trialStartedAt
+    val storageBytes = data.storageBytes
+    val lastUpdatedAt = data.lastUpdatedAt
+    val monthlyUploadBytes = data.monthlyUploadBytes
+    val monthlyMmsBytes = data.monthlyMmsBytes
+    val monthlyFileBytes = data.monthlyFileBytes
 
     val now = System.currentTimeMillis()
     val isPaid = isPaidPlan(plan, planExpiresAt, now)

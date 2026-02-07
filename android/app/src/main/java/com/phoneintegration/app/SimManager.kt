@@ -236,60 +236,39 @@ class SimManager(private val context: Context) {
     }
 
     /**
-     * Sync SIM information to Firebase
+     * Sync SIM information to VPS
      */
-    suspend fun syncSimsToFirebase(syncService: com.phoneintegration.app.desktop.DesktopSyncService) {
+    suspend fun syncSimsToVps(syncService: com.phoneintegration.app.desktop.DesktopSyncService) {
         try {
             val sims = getActiveSims()
             val simsData = sims.map { it.toMap() }
 
-            val userId = syncService.getCurrentUserId()
-            val database = com.google.firebase.database.FirebaseDatabase.getInstance()
-            val simsRef = database.reference
-                .child("users")
-                .child(userId)
-                .child("sims")
+            val vpsClient = com.phoneintegration.app.vps.VPSClient.getInstance(context)
+            vpsClient.storeSharedData("sims", simsData)
+            Log.d(TAG, "Synced ${sims.size} SIM(s) to VPS")
 
-            com.google.android.gms.tasks.Tasks.await(simsRef.setValue(simsData))
-            Log.d(TAG, "Synced ${sims.size} SIM(s) to Firebase")
-
-            // Also register phone numbers in phone_to_uid for video calling lookup
-            registerPhoneNumbersForVideoCalling(userId, sims, database)
+            // Register phone numbers for calling lookup
+            registerPhoneNumbersForCalling(sims, vpsClient)
         } catch (e: Exception) {
-            Log.e(TAG, "Error syncing SIMs to Firebase", e)
+            Log.e(TAG, "Error syncing SIMs to VPS", e)
         }
     }
 
     /**
-     * Register phone numbers in phone_to_uid for video call lookup
+     * Register phone numbers for call lookup
      */
-    private fun registerPhoneNumbersForVideoCalling(
-        userId: String,
+    private suspend fun registerPhoneNumbersForCalling(
         sims: List<SimInfo>,
-        database: com.google.firebase.database.FirebaseDatabase
+        vpsClient: com.phoneintegration.app.vps.VPSClient
     ) {
         for (sim in sims) {
             val phoneNumber = sim.phoneNumber
             if (!phoneNumber.isNullOrEmpty() && phoneNumber != "Unknown") {
-                // Normalize phone number - remove +, spaces, dashes, etc.
-                val normalizedPhone = phoneNumber.replace(Regex("[^0-9]"), "")
-                if (normalizedPhone.isNotEmpty()) {
-                    val variants = mutableSetOf(normalizedPhone)
-                    if (normalizedPhone.length == 10) {
-                        variants.add("1$normalizedPhone")
-                    }
-                    for (variant in variants) {
-                        database.reference
-                            .child("phone_to_uid")
-                            .child(variant)
-                            .setValue(userId)
-                            .addOnSuccessListener {
-                                Log.d(TAG, "Registered phone $variant -> $userId in phone_to_uid")
-                            }
-                            .addOnFailureListener { e ->
-                                Log.e(TAG, "Failed to register phone in phone_to_uid: ${e.message}")
-                            }
-                    }
+                try {
+                    vpsClient.registerPhoneNumber(phoneNumber)
+                    Log.d(TAG, "Registered phone $phoneNumber via VPS")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to register phone: ${e.message}")
                 }
             }
         }

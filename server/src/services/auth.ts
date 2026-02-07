@@ -125,7 +125,8 @@ export async function updateDeviceLastSeen(deviceId: string): Promise<void> {
 export async function createPairingRequest(
   deviceId: string,
   deviceName: string,
-  deviceType: string
+  deviceType: string,
+  tempUserId?: string
 ): Promise<string> {
   const token = uuidv4().replace(/-/g, '').substring(0, 16).toUpperCase();
   const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
@@ -136,8 +137,8 @@ export async function createPairingRequest(
     [token, deviceId, deviceName, expiresAt]
   );
 
-  // Also cache in Redis for fast lookup
-  await setCache(`pairing:${token}`, { deviceId, deviceName, deviceType }, 300);
+  // Also cache in Redis for fast lookup (include tempUserId for cleanup)
+  await setCache(`pairing:${token}`, { deviceId, deviceName, deviceType, tempUserId }, 300);
 
   return token;
 }
@@ -203,13 +204,17 @@ export async function completePairing(
 
 // Pairing: Redeem pairing token (macOS/Web gets credentials)
 export async function redeemPairingToken(
-  token: string
+  token: string,
+  clientTempUserId?: string
 ): Promise<{ userId: string; deviceId: string } | null> {
   const request = await getPairingRequest(token);
 
   if (!request || request.status !== 'approved' || !request.userId) {
     return null;
   }
+
+  // Get the temp user ID from the request cache or client
+  const tempUserId = (request as any).tempUserId || clientTempUserId;
 
   // Mark as redeemed
   await query(
@@ -220,26 +225,80 @@ export async function redeemPairingToken(
   // Clean up Redis
   await deleteCache(`pairing:${token}`);
 
+  // Clean up the temporary anonymous user created during pair/initiate
+  // Method 1: Use tracked tempUserId if available
+  if (tempUserId && tempUserId !== request.userId) {
+    try {
+      await query('DELETE FROM user_devices WHERE user_id = $1', [tempUserId]);
+      await query('DELETE FROM users WHERE uid = $1', [tempUserId]);
+      console.log(`[Auth] Cleaned up temp pairing user: ${tempUserId}`);
+    } catch (err) {
+      console.warn(`[Auth] Failed to clean up temp user ${tempUserId}:`, err);
+    }
+  }
+
+  // Method 2: Clean up ANY orphaned users with no devices and no messages
+  // These are always leftover from pairing initiations
+  try {
+    const orphans = await query(
+      `DELETE FROM users
+       WHERE uid != $1
+       AND uid NOT IN (SELECT DISTINCT user_id FROM user_devices)
+       AND uid NOT IN (SELECT DISTINCT user_id FROM user_messages)
+       RETURNING uid`,
+      [request.userId]
+    );
+    if (orphans.length > 0) {
+      console.log(`[Auth] Cleaned up ${orphans.length} orphaned user(s): ${orphans.map((o: any) => o.uid).join(', ')}`);
+    }
+  } catch (err) {
+    console.warn('[Auth] Orphan cleanup failed:', err);
+  }
+
   return {
     userId: request.userId,
     deviceId: request.deviceId,
   };
 }
 
-// Get or create user by Firebase UID
+// Get or create user by Firebase UID (device fingerprint)
 export async function getOrCreateUserByFirebaseUid(firebaseUid: string): Promise<string> {
-  // Check if user exists with this Firebase UID
+  // Check if user exists with this Firebase UID (device fingerprint)
   const existing = await queryOne<{ uid: string }>(
     `SELECT uid FROM users WHERE firebase_uid = $1`,
     [firebaseUid]
   );
 
   if (existing) {
+    console.log(`[Auth] Found existing user ${existing.uid} for device fingerprint ${firebaseUid.substring(0, 8)}...`);
     return existing.uid;
   }
 
+  // Check if there's an orphaned user without firebase_uid that has data we should claim
+  // This handles the case where anonymous auth was used before
+  const orphanedUser = await queryOne<{ uid: string; message_count: string }>(
+    `SELECT u.uid, COUNT(m.id) as message_count
+     FROM users u
+     LEFT JOIN user_messages m ON m.user_id = u.uid
+     WHERE u.firebase_uid IS NULL
+     GROUP BY u.uid
+     ORDER BY COUNT(m.id) DESC
+     LIMIT 1`,
+    []
+  );
+
+  if (orphanedUser && parseInt(orphanedUser.message_count) > 0) {
+    // Claim this orphaned user by setting the firebase_uid
+    console.log(`[Auth] Claiming orphaned user ${orphanedUser.uid} with ${orphanedUser.message_count} messages for device ${firebaseUid.substring(0, 8)}...`);
+    await query(
+      `UPDATE users SET firebase_uid = $1 WHERE uid = $2`,
+      [firebaseUid, orphanedUser.uid]
+    );
+    return orphanedUser.uid;
+  }
+
   // Create new user with Firebase UID as the primary user ID
-  // This maintains compatibility with existing Firebase-based data
+  console.log(`[Auth] Creating new user for device fingerprint ${firebaseUid.substring(0, 8)}...`);
   await query(
     `INSERT INTO users (uid, firebase_uid, created_at) VALUES ($1, $1, NOW())
      ON CONFLICT (uid) DO UPDATE SET firebase_uid = EXCLUDED.firebase_uid`,
@@ -247,6 +306,51 @@ export async function getOrCreateUserByFirebaseUid(firebaseUid: string): Promise
   );
 
   return firebaseUid;
+}
+
+// Migrate all data from one user to another
+export async function migrateUserData(fromUserId: string, toUserId: string): Promise<{ migrated: boolean; counts: Record<string, number> }> {
+  const counts: Record<string, number> = {};
+
+  try {
+    // Migrate messages
+    const msgResult = await query(
+      `UPDATE user_messages SET user_id = $1 WHERE user_id = $2`,
+      [toUserId, fromUserId]
+    );
+    counts.messages = msgResult.length || 0;
+
+    // Migrate contacts
+    const contactResult = await query(
+      `UPDATE user_contacts SET user_id = $1 WHERE user_id = $2`,
+      [toUserId, fromUserId]
+    );
+    counts.contacts = contactResult.length || 0;
+
+    // Migrate call history
+    const callResult = await query(
+      `UPDATE user_call_history SET user_id = $1 WHERE user_id = $2`,
+      [toUserId, fromUserId]
+    );
+    counts.calls = callResult.length || 0;
+
+    // Delete old user's devices instead of migrating (they're stale)
+    // The new user already has their own device from authentication
+    const deviceResult = await query(
+      `DELETE FROM user_devices WHERE user_id = $1 RETURNING id`,
+      [fromUserId]
+    );
+    counts.devicesDeleted = deviceResult.length || 0;
+
+    // Optionally delete the old user record
+    await query(`DELETE FROM users WHERE uid = $1`, [fromUserId]);
+
+    console.log(`[Auth] Migrated data from ${fromUserId} to ${toUserId}:`, counts);
+    return { migrated: true, counts };
+  } catch (error) {
+    console.error(`[Auth] Failed to migrate data from ${fromUserId} to ${toUserId}:`, error);
+    return { migrated: false, counts };
+  }
 }
 
 // Hash password (for recovery codes)
