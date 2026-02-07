@@ -45,6 +45,10 @@ export const bytesToBase64 = (bytes: Uint8Array) => {
   return btoa(binary)
 }
 
+const bytesToBase64url = (bytes: Uint8Array) => {
+  return bytesToBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
 const getEncryptedPayload = async (): Promise<EncryptedKeyPayload | null> => {
   if (typeof window === 'undefined') return null
   await initSecureStorage()
@@ -486,10 +490,10 @@ export const importSyncGroupKeypair = async (
     const privateKeyJwk: JsonWebKey = {
       kty: 'EC',
       crv: 'P-256',
-      d: bytesToBase64(rawPrivateKey),
+      d: bytesToBase64url(rawPrivateKey),
       // Extract x and y from public key (skip first byte which is 0x04)
-      x: bytesToBase64(publicKeyBytes.slice(1, 33)),
-      y: bytesToBase64(publicKeyBytes.slice(33, 65)),
+      x: bytesToBase64url(publicKeyBytes.slice(1, 33)),
+      y: bytesToBase64url(publicKeyBytes.slice(33, 65)),
       key_ops: ['deriveBits'],
       ext: true,
     }
@@ -497,8 +501,8 @@ export const importSyncGroupKeypair = async (
     const publicKeyJwk: JsonWebKey = {
       kty: 'EC',
       crv: 'P-256',
-      x: bytesToBase64(publicKeyBytes.slice(1, 33)),
-      y: bytesToBase64(publicKeyBytes.slice(33, 65)),
+      x: bytesToBase64url(publicKeyBytes.slice(1, 33)),
+      y: bytesToBase64url(publicKeyBytes.slice(33, 65)),
       key_ops: [],
       ext: true,
     }
