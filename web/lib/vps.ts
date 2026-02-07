@@ -272,6 +272,7 @@ class VPSService {
   }
 
   async redeemPairing(token: string): Promise<VPSUser> {
+    console.log('[Pairing] Calling pair/redeem...');
     const response = await this.request<{
       userId: string;
       deviceId: string;
@@ -284,6 +285,7 @@ class VPSService {
       true
     );
 
+    console.log('[Pairing] Redeem success, userId:', response.userId);
     this.saveTokens(
       response.accessToken,
       response.refreshToken,
@@ -301,26 +303,31 @@ class VPSService {
     const startTime = Date.now();
 
     while (Date.now() - startTime < timeoutMs) {
+      let status;
       try {
-        const status = await this.checkPairingStatus(token);
-
-        if (status.approved) {
-          return this.redeemPairing(token);
-        }
-
-        if (status.status === 'expired') {
-          throw new Error('Pairing request expired');
-        }
-
-        // Wait 2 seconds before checking again
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        status = await this.checkPairingStatus(token);
       } catch (error: any) {
         if (error.message === 'Pairing request expired') {
           throw error;
         }
-        // Continue polling on other errors
+        // Continue polling on status check errors
+        console.warn('[Pairing] Status check error, retrying...', error.message);
         await new Promise(resolve => setTimeout(resolve, 2000));
+        continue;
       }
+
+      if (status.approved) {
+        // Redeem errors should NOT be swallowed - throw immediately
+        console.log('[Pairing] Approved! Redeeming...');
+        return this.redeemPairing(token);
+      }
+
+      if (status.status === 'expired') {
+        throw new Error('Pairing request expired');
+      }
+
+      // Wait 2 seconds before checking again
+      await new Promise(resolve => setTimeout(resolve, 2000));
     }
 
     throw new Error('Pairing timeout');
