@@ -1,13 +1,11 @@
 package com.phoneintegration.app.models
 
-import com.google.firebase.database.IgnoreExtraProperties
-import com.google.firebase.database.ServerValue
-
 /**
  * Represents a SyncFlow-to-SyncFlow audio/video call between devices.
  * This is separate from cellular phone calls - it's app-to-app VoIP.
+ *
+ * VPS Backend Only - Firebase annotations removed.
  */
-@IgnoreExtraProperties
 data class SyncFlowCall(
     val id: String = "",
     val callerId: String = "",
@@ -71,7 +69,6 @@ data class SyncFlowCall(
     /**
      * SDP (Session Description Protocol) data for WebRTC signaling
      */
-    @IgnoreExtraProperties
     data class SDPData(
         val sdp: String = "",
         val type: String = ""
@@ -80,7 +77,6 @@ data class SyncFlowCall(
     /**
      * ICE (Interactive Connectivity Establishment) candidate for WebRTC
      */
-    @IgnoreExtraProperties
     data class IceCandidate(
         val candidate: String = "",
         val sdpMid: String? = null,
@@ -88,7 +84,7 @@ data class SyncFlowCall(
     )
 
     /**
-     * Convert to Firebase-compatible map for writing
+     * Convert to map for API serialization
      */
     fun toMap(): Map<String, Any?> = mapOf(
         "id" to id,
@@ -161,7 +157,7 @@ data class SyncFlowCall(
         )
 
         /**
-         * Parse from Firebase snapshot
+         * Parse from map data
          */
         fun fromMap(id: String, map: Map<String, Any?>): SyncFlowCall {
             val offerMap = map["offer"] as? Map<*, *>
@@ -202,7 +198,6 @@ data class SyncFlowCall(
 /**
  * Device information for SyncFlow calling
  */
-@IgnoreExtraProperties
 data class SyncFlowDevice(
     val id: String = "",
     val name: String = "",

@@ -5,10 +5,8 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization") version "2.2.10"
-    id("com.google.gms.google-services")
-    // Disabled: Crashlytics plugin not generating build ID properly - causes app crash
-    // id("com.google.firebase.crashlytics")
     id("com.google.devtools.ksp")
+    // Firebase plugins removed - using VPS backend only
 }
 
 android {
@@ -66,7 +64,7 @@ android {
 
             // BuildConfig for release
             buildConfigField("Boolean", "ENABLE_LOGGING", "false")
-            buildConfigField("Boolean", "ENABLE_CRASH_REPORTING", "true") // Using CustomCrashReporter (Firebase Realtime Database)
+            buildConfigField("Boolean", "ENABLE_CRASH_REPORTING", "true") // Using CustomCrashReporter (VPS backend)
         }
         debug {
             isMinifyEnabled = false
@@ -196,17 +194,9 @@ dependencies {
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
     // ──────────────────────────────────────────────
-    // FIREBASE - Desktop Integration
+    // VPS BACKEND - Desktop Integration (Firebase removed)
     // ──────────────────────────────────────────────
-    implementation(platform("com.google.firebase:firebase-bom:32.7.0"))
-    implementation("com.google.firebase:firebase-database-ktx")
-    implementation("com.google.firebase:firebase-auth-ktx")
-    implementation("com.google.firebase:firebase-storage-ktx")
-    implementation("com.google.firebase:firebase-messaging-ktx")
-    implementation("com.google.firebase:firebase-functions-ktx")
-    // Disabled: Crashlytics build ID issue - causes app crash on release builds
-    // implementation("com.google.firebase:firebase-crashlytics-ktx")
-    implementation("com.google.firebase:firebase-analytics-ktx")
+    // All sync, auth, and messaging now handled via VPS server
 
     // Certificate pinning dependencies
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

@@ -6,19 +6,20 @@ import android.content.pm.PackageManager
 import android.provider.CallLog
 import android.util.Log
 import androidx.core.content.ContextCompat
-import com.google.firebase.database.ServerValue
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.tasks.await
 import java.text.SimpleDateFormat
 import java.util.*
 
 /**
- * Handles syncing call history to Firebase for desktop access
+ * Handles syncing call history to VPS for desktop access
+ *
+ * VPS Backend Only - Uses VPS API instead of Firebase.
  */
 class CallHistorySyncService(private val context: Context) {
 
-    private val syncService = DesktopSyncService(context)
+    private val vpsClient = VPSClient.getInstance(context)
 
     companion object {
         private const val TAG = "CallHistorySyncService"
@@ -154,19 +155,26 @@ class CallHistorySyncService(private val context: Context) {
     }
 
     /**
-     * Sync call history to Firebase
+     * Sync call history to VPS
      */
     suspend fun syncCallHistory() {
-        val userId = syncService.getCurrentUserId()
-        syncCallHistoryForUser(userId)
+        if (!vpsClient.isAuthenticated) {
+            Log.w(TAG, "Not authenticated, skipping call history sync")
+            return
+        }
+        syncCallHistoryForUser()
     }
 
     /**
-     * Sync call history to Firebase for a specific user ID via Cloud Function
-     * Uses Cloud Function to avoid OOM from Firebase WebSocket sync
+     * Sync call history via VPS API
      */
-    suspend fun syncCallHistoryForUser(userId: String) {
+    suspend fun syncCallHistoryForUser(userId: String = "") {
         try {
+            if (!vpsClient.isAuthenticated) {
+                Log.w(TAG, "Not authenticated, skipping call history sync")
+                return
+            }
+
             val callLogs = getCallHistory()
 
             if (callLogs.isEmpty()) {
@@ -174,39 +182,24 @@ class CallHistorySyncService(private val context: Context) {
                 return
             }
 
-            Log.d(TAG, "Syncing ${callLogs.size} call logs via Cloud Function...")
+            Log.d(TAG, "Syncing ${callLogs.size} call logs via VPS API...")
 
-            // Convert call logs to list of maps for Cloud Function
+            // Convert call logs to list of maps for VPS API
             val callLogsList = callLogs.map { call ->
-                mapOf(
+                mapOf<String, Any?>(
                     "id" to "${call.phoneNumber}_${call.callDate}",
                     "phoneNumber" to call.phoneNumber,
                     "contactName" to (call.contactName ?: ""),
-                    "callType" to call.callType.toDisplayString(),
+                    "callType" to call.callType.value,
                     "callDate" to call.callDate,
-                    "duration" to call.duration,
-                    "formattedDuration" to formatDuration(call.duration),
-                    "formattedDate" to formatDate(call.callDate),
-                    "simId" to (call.simId ?: 0)
+                    "duration" to call.duration.toInt(),
+                    "simSubscriptionId" to call.simId
                 )
             }
 
-            // Call Cloud Function to sync (avoids OOM from Firebase WebSocket)
-            val functions = com.google.firebase.functions.FirebaseFunctions.getInstance()
-            val result = functions
-                .getHttpsCallable("syncCallHistory")
-                .call(mapOf("userId" to userId, "callLogs" to callLogsList))
-                .await()
-
-            val data = result.data as? Map<*, *>
-            val success = data?.get("success") as? Boolean ?: false
-            val count = data?.get("count") as? Int ?: 0
-
-            if (success) {
-                Log.d(TAG, "Successfully synced $count call logs via Cloud Function")
-            } else {
-                Log.e(TAG, "Cloud Function sync failed: ${data?.get("error")}")
-            }
+            // Call VPS API to sync call history
+            val result = vpsClient.syncCallHistory(callLogsList)
+            Log.d(TAG, "Successfully synced ${result.synced} call logs via VPS API")
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing call logs", e)
             throw e
@@ -218,29 +211,22 @@ class CallHistorySyncService(private val context: Context) {
      */
     suspend fun syncCallEntry(call: CallLogEntry) {
         try {
-            val userId = syncService.getCurrentUserId()
+            if (!vpsClient.isAuthenticated) {
+                Log.w(TAG, "Not authenticated, skipping call entry sync")
+                return
+            }
 
-            val callHistoryRef = com.google.firebase.database.FirebaseDatabase.getInstance().reference
-                .child("users")
-                .child(userId)
-                .child("call_history")
-                .child("${call.phoneNumber}_${call.callDate}")
-
-            val callData = mapOf(
-                "id" to call.id,
+            val callData = mapOf<String, Any?>(
+                "id" to "${call.phoneNumber}_${call.callDate}",
                 "phoneNumber" to call.phoneNumber,
                 "contactName" to (call.contactName ?: ""),
-                "callType" to call.callType.toDisplayString(),
-                "callTypeInt" to call.callType.value,
+                "callType" to call.callType.value,
                 "callDate" to call.callDate,
-                "duration" to call.duration,
-                "formattedDuration" to formatDuration(call.duration),
-                "formattedDate" to formatDate(call.callDate),
-                "simId" to (call.simId ?: 0),
-                "syncedAt" to ServerValue.TIMESTAMP
+                "duration" to call.duration.toInt(),
+                "simSubscriptionId" to call.simId
             )
 
-            callHistoryRef.setValue(callData).await()
+            vpsClient.syncCallHistory(listOf(callData))
             Log.d(TAG, "Synced call entry: ${call.phoneNumber} at ${call.callDate}")
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing call entry", e)

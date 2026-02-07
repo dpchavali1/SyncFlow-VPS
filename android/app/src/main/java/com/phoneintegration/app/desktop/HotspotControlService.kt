@@ -9,10 +9,8 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.*
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.*
-import kotlinx.coroutines.tasks.await
 import java.lang.reflect.Method
 
 /**
@@ -21,51 +19,48 @@ import java.lang.reflect.Method
  * - Check hotspot status
  * - Open hotspot settings for user to toggle manually
  * - On older devices, toggle programmatically
+ *
+ * VPS Backend Only - Uses VPS API instead of Firebase.
  */
 class HotspotControlService(context: Context) {
     private val context: Context = context.applicationContext
-    private val auth = FirebaseAuth.getInstance()
-    private val database = FirebaseDatabase.getInstance()
+    private val vpsClient = VPSClient.getInstance(context)
     private val wifiManager = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
     private val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
-    private var commandListener: ValueEventListener? = null
+    private var commandPollingJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val mainHandler = Handler(Looper.getMainLooper())
 
     companion object {
         private const val TAG = "HotspotControlService"
-        private const val HOTSPOT_COMMAND_PATH = "hotspot_command"
-        private const val HOTSPOT_STATUS_PATH = "hotspot_status"
-        private const val USERS_PATH = "users"
+        private const val COMMAND_POLL_INTERVAL_MS = 2000L
     }
 
     /**
-     * Start listening for hotspot commands from macOS
+     * Start listening for hotspot commands from macOS via polling
      */
     fun startListening() {
-        database.goOnline()
-        scope.launch {
-            try {
-                val currentUser = auth.currentUser ?: return@launch
-                val userId = currentUser.uid
+        commandPollingJob?.cancel()
+        commandPollingJob = scope.launch {
+            // Sync initial status
+            syncHotspotStatus()
 
-                val commandRef = database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(HOTSPOT_COMMAND_PATH)
+            while (isActive) {
+                try {
+                    if (!vpsClient.isAuthenticated) {
+                        delay(COMMAND_POLL_INTERVAL_MS)
+                        continue
+                    }
 
-                val listener = object : ValueEventListener {
-                    override fun onDataChange(snapshot: DataSnapshot) {
-                        val command = snapshot.child("action").value as? String ?: return
-                        val timestamp = snapshot.child("timestamp").value as? Long ?: return
-
+                    val commands = vpsClient.getHotspotCommands()
+                    for (command in commands) {
                         // Only process recent commands (within 10 seconds)
-                        if (System.currentTimeMillis() - timestamp > 10000) return
+                        if (System.currentTimeMillis() - command.timestamp > 10000) continue
 
-                        Log.d(TAG, "Received hotspot command: $command")
+                        Log.d(TAG, "Received hotspot command: ${command.action}")
 
-                        when (command) {
+                        when (command.action) {
                             "toggle" -> toggleHotspot()
                             "enable" -> enableHotspot()
                             "disable" -> disableHotspot()
@@ -73,47 +68,24 @@ class HotspotControlService(context: Context) {
                             "open_settings" -> openHotspotSettings()
                         }
 
-                        // Clear the command after processing
-                        snapshot.ref.removeValue()
+                        // Mark command as processed
+                        vpsClient.markHotspotCommandProcessed(command.id)
                     }
-
-                    override fun onCancelled(error: DatabaseError) {
-                        Log.e(TAG, "Command listener cancelled: ${error.message}")
-                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error polling hotspot commands", e)
                 }
-
-                commandListener = listener
-                commandRef.addValueEventListener(listener)
-
-                // Sync initial status
-                syncHotspotStatus()
-
-                Log.d(TAG, "HotspotControlService started listening")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error starting hotspot control service", e)
+                delay(COMMAND_POLL_INTERVAL_MS)
             }
         }
+        Log.d(TAG, "HotspotControlService started listening")
     }
 
     /**
      * Stop listening for commands
      */
     fun stopListening() {
-        commandListener?.let { listener ->
-            scope.launch {
-                try {
-                    val userId = auth.currentUser?.uid ?: return@launch
-                    database.reference
-                        .child(USERS_PATH)
-                        .child(userId)
-                        .child(HOTSPOT_COMMAND_PATH)
-                        .removeEventListener(listener)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error removing listener", e)
-                }
-            }
-        }
-        commandListener = null
+        commandPollingJob?.cancel()
+        commandPollingJob = null
         scope.cancel()
         Log.d(TAG, "HotspotControlService stopped")
     }
@@ -241,32 +213,26 @@ class HotspotControlService(context: Context) {
     }
 
     /**
-     * Sync current hotspot status to Firebase
+     * Sync current hotspot status to VPS
      */
     private fun syncHotspotStatus() {
         scope.launch {
             try {
-                val currentUser = auth.currentUser ?: return@launch
-                val userId = currentUser.uid
+                if (!vpsClient.isAuthenticated) return@launch
 
                 val isEnabled = isHotspotEnabled()
                 val ssid = getHotspotSSID()
                 val connectedDevices = getConnectedDevicesCount()
-
-                val statusRef = database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(HOTSPOT_STATUS_PATH)
 
                 val statusData = mapOf(
                     "enabled" to isEnabled,
                     "ssid" to (ssid ?: ""),
                     "connectedDevices" to connectedDevices,
                     "canToggleProgrammatically" to (Build.VERSION.SDK_INT < Build.VERSION_CODES.O),
-                    "timestamp" to ServerValue.TIMESTAMP
+                    "timestamp" to System.currentTimeMillis()
                 )
 
-                statusRef.setValue(statusData).await()
+                vpsClient.syncHotspotStatus(statusData)
                 Log.d(TAG, "Hotspot status synced: enabled=$isEnabled")
             } catch (e: Exception) {
                 Log.e(TAG, "Error syncing hotspot status", e)
@@ -280,23 +246,17 @@ class HotspotControlService(context: Context) {
     private fun sendStatusUpdate(enabled: Boolean, message: String? = null) {
         scope.launch {
             try {
-                val currentUser = auth.currentUser ?: return@launch
-                val userId = currentUser.uid
-
-                val statusRef = database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(HOTSPOT_STATUS_PATH)
+                if (!vpsClient.isAuthenticated) return@launch
 
                 val statusData = mutableMapOf<String, Any>(
                     "enabled" to enabled,
                     "canToggleProgrammatically" to (Build.VERSION.SDK_INT < Build.VERSION_CODES.O),
-                    "timestamp" to ServerValue.TIMESTAMP
+                    "timestamp" to System.currentTimeMillis()
                 )
 
                 message?.let { statusData["message"] = it }
 
-                statusRef.updateChildren(statusData).await()
+                vpsClient.syncHotspotStatus(statusData)
             } catch (e: Exception) {
                 Log.e(TAG, "Error sending status update", e)
             }

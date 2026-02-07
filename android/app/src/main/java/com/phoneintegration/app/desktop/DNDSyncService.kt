@@ -8,32 +8,29 @@ import android.content.IntentFilter
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.*
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.*
-import kotlinx.coroutines.tasks.await
 
 /**
  * Service to sync Do Not Disturb status between Android and macOS.
  * Requires Notification Policy Access permission.
+ *
+ * VPS Backend Only - Uses VPS API instead of Firebase.
  */
 class DNDSyncService(context: Context) {
     private val context: Context = context.applicationContext
-    private val auth = FirebaseAuth.getInstance()
-    private val database = FirebaseDatabase.getInstance()
+    private val vpsClient = VPSClient.getInstance(context)
     private val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
     private var dndReceiver: BroadcastReceiver? = null
-    private var commandListener: ValueEventListener? = null
+    private var commandPollingJob: Job? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private var lastSyncedDndState: Boolean? = null
 
     companion object {
         private const val TAG = "DNDSyncService"
-        private const val DND_STATUS_PATH = "dnd_status"
-        private const val DND_COMMAND_PATH = "dnd_command"
-        private const val USERS_PATH = "users"
+        private const val COMMAND_POLL_INTERVAL_MS = 2000L
 
         /**
          * Check if notification policy access is granted
@@ -59,7 +56,6 @@ class DNDSyncService(context: Context) {
      */
     fun startSync() {
         Log.d(TAG, "Starting DND sync")
-        database.goOnline()
         registerDndReceiver()
         startListeningForCommands()
         syncDndStatus()
@@ -136,30 +132,26 @@ class DNDSyncService(context: Context) {
     }
 
     /**
-     * Listen for DND commands from macOS
+     * Listen for DND commands from macOS via polling
      */
     private fun startListeningForCommands() {
-        scope.launch {
-            try {
-                val currentUser = auth.currentUser ?: return@launch
-                val userId = currentUser.uid
+        commandPollingJob?.cancel()
+        commandPollingJob = scope.launch {
+            while (isActive) {
+                try {
+                    if (!vpsClient.isAuthenticated) {
+                        delay(COMMAND_POLL_INTERVAL_MS)
+                        continue
+                    }
 
-                val commandRef = database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(DND_COMMAND_PATH)
-
-                val listener = object : ValueEventListener {
-                    override fun onDataChange(snapshot: DataSnapshot) {
-                        val action = snapshot.child("action").value as? String ?: return
-                        val timestamp = snapshot.child("timestamp").value as? Long ?: return
-
+                    val commands = vpsClient.getDndCommands()
+                    for (command in commands) {
                         // Only process recent commands
-                        if (System.currentTimeMillis() - timestamp > 10000) return
+                        if (System.currentTimeMillis() - command.timestamp > 10000) continue
 
-                        Log.d(TAG, "Received DND command: $action")
+                        Log.d(TAG, "Received DND command: ${command.action}")
 
-                        when (action) {
+                        when (command.action) {
                             "enable" -> enableDnd()
                             "disable" -> disableDnd()
                             "toggle" -> toggleDnd()
@@ -168,40 +160,21 @@ class DNDSyncService(context: Context) {
                             "silence" -> setDndMode(NotificationManager.INTERRUPTION_FILTER_NONE)
                         }
 
-                        // Clear the command
-                        snapshot.ref.removeValue()
+                        // Mark command as processed
+                        vpsClient.markDndCommandProcessed(command.id)
                     }
-
-                    override fun onCancelled(error: DatabaseError) {
-                        Log.e(TAG, "Command listener cancelled: ${error.message}")
-                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error polling DND commands", e)
                 }
-
-                commandListener = listener
-                commandRef.addValueEventListener(listener)
-                Log.d(TAG, "DND command listener registered")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error starting command listener", e)
+                delay(COMMAND_POLL_INTERVAL_MS)
             }
         }
+        Log.d(TAG, "DND command polling started")
     }
 
     private fun stopListeningForCommands() {
-        commandListener?.let { listener ->
-            scope.launch {
-                try {
-                    val userId = auth.currentUser?.uid ?: return@launch
-                    database.reference
-                        .child(USERS_PATH)
-                        .child(userId)
-                        .child(DND_COMMAND_PATH)
-                        .removeEventListener(listener)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error removing command listener", e)
-                }
-            }
-        }
-        commandListener = null
+        commandPollingJob?.cancel()
+        commandPollingJob = null
     }
 
     /**
@@ -270,7 +243,7 @@ class DNDSyncService(context: Context) {
     }
 
     /**
-     * Sync current DND status to Firebase
+     * Sync current DND status to VPS
      */
     private fun syncDndStatus() {
         val isEnabled = isDndEnabled()
@@ -281,23 +254,17 @@ class DNDSyncService(context: Context) {
 
         scope.launch {
             try {
-                val currentUser = auth.currentUser ?: return@launch
-                val userId = currentUser.uid
-
-                val statusRef = database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(DND_STATUS_PATH)
+                if (!vpsClient.isAuthenticated) return@launch
 
                 val statusData = mapOf(
                     "enabled" to isEnabled,
                     "mode" to getDndFilterMode(),
                     "hasPermission" to hasNotificationPolicyAccess(context),
-                    "timestamp" to ServerValue.TIMESTAMP,
+                    "timestamp" to System.currentTimeMillis(),
                     "source" to "android"
                 )
 
-                statusRef.setValue(statusData).await()
+                vpsClient.syncDndStatus(statusData)
                 Log.d(TAG, "DND status synced: enabled=$isEnabled")
             } catch (e: Exception) {
                 Log.e(TAG, "Error syncing DND status", e)
@@ -311,24 +278,18 @@ class DNDSyncService(context: Context) {
     private fun sendStatusUpdate(enabled: Boolean, message: String) {
         scope.launch {
             try {
-                val currentUser = auth.currentUser ?: return@launch
-                val userId = currentUser.uid
-
-                val statusRef = database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(DND_STATUS_PATH)
+                if (!vpsClient.isAuthenticated) return@launch
 
                 val statusData = mapOf(
                     "enabled" to enabled,
                     "mode" to getDndFilterMode(),
                     "hasPermission" to hasNotificationPolicyAccess(context),
                     "message" to message,
-                    "timestamp" to ServerValue.TIMESTAMP,
+                    "timestamp" to System.currentTimeMillis(),
                     "source" to "android"
                 )
 
-                statusRef.setValue(statusData).await()
+                vpsClient.syncDndStatus(statusData)
             } catch (e: Exception) {
                 Log.e(TAG, "Error sending status update", e)
             }

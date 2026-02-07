@@ -3,24 +3,25 @@ package com.phoneintegration.app.desktop
 import android.app.*
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Build
 import android.os.IBinder
 import android.util.Base64
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
-import com.google.firebase.storage.FirebaseStorage
 import com.phoneintegration.app.MainActivity
 import com.phoneintegration.app.MmsHelper
 import com.phoneintegration.app.PhoneNumberUtils
 import com.phoneintegration.app.R
 import com.phoneintegration.app.SmsRepository
 import com.phoneintegration.app.e2ee.SignalProtocolManager
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.catch
-import kotlinx.coroutines.tasks.await
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.io.File
+import java.util.concurrent.TimeUnit
 
 /**
  * Foreground service that continuously listens for outgoing messages from desktop
@@ -56,10 +57,12 @@ class OutgoingMessageService : Service() {
     private var listeningJob: Job? = null
     private var idleTimeoutJob: Job? = null
     private var lastActivityTime = System.currentTimeMillis()
+    private lateinit var vpsClient: VPSClient
 
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "Service created")
+        vpsClient = VPSClient.getInstance(applicationContext)
         createNotificationChannel()
         startListening()
         startIdleTimeout()
@@ -129,7 +132,6 @@ class OutgoingMessageService : Service() {
                             markActivity()
 
                             val messageId = messageData["_messageId"] as? String
-                            val messageRef = messageData["_messageRef"] as? com.google.firebase.database.DatabaseReference
                             val address = messageData["address"] as? String
                             val body = messageData["body"] as? String ?: ""
                             val isMms = messageData["isMms"] as? Boolean ?: false
@@ -137,11 +139,11 @@ class OutgoingMessageService : Service() {
                             val attachments = messageData["attachments"] as? List<Map<String, Any?>>
 
                             if (address != null && messageId != null) {
-                                Log.d(TAG, "[AndroidReceive] Received message from Firebase - id: $messageId, address: $address, isMms: $isMms, body length: ${body.length}, attachments: ${attachments?.size ?: 0}")
+                                Log.d(TAG, "[AndroidReceive] Received message from VPS - id: $messageId, address: $address, isMms: $isMms, body length: ${body.length}, attachments: ${attachments?.size ?: 0}")
 
                                 // Update status to 'sending' so web knows we're processing
                                 try {
-                                    messageRef?.child("status")?.setValue("sending")
+                                    vpsClient.updateOutgoingStatus(messageId, "sending")
                                 } catch (e: Exception) {
                                     Log.w(TAG, "Failed to update status to sending", e)
                                 }
@@ -178,12 +180,12 @@ class OutgoingMessageService : Service() {
                                 if (sendSuccess) {
                                     Log.d(TAG, "Message sent successfully to $address")
 
-                                    // Remove from outgoing_messages first
+                                    // Update status to sent via VPS API
                                     try {
-                                        messageRef?.removeValue()
-                                        Log.d(TAG, "Outgoing message removed from Firebase")
+                                        vpsClient.updateOutgoingStatus(messageId, "sent")
+                                        Log.d(TAG, "Outgoing message marked as sent via VPS")
                                     } catch (e: Exception) {
-                                        Log.e(TAG, "Error removing outgoing message", e)
+                                        Log.e(TAG, "Error updating outgoing message status", e)
                                     }
 
                                     // Wait for the message to be written to SMS provider
@@ -241,10 +243,7 @@ class OutgoingMessageService : Service() {
                                     Log.e(TAG, "Failed to send message to $address")
                                     // Update status to 'failed' so web knows
                                     try {
-                                        messageRef?.updateChildren(mapOf(
-                                            "status" to "failed",
-                                            "error" to "Failed to send message"
-                                        ))
+                                        vpsClient.updateOutgoingStatus(messageId, "failed", "Failed to send message")
                                     } catch (e: Exception) {
                                         Log.e(TAG, "Failed to update status to failed", e)
                                     }
@@ -258,11 +257,10 @@ class OutgoingMessageService : Service() {
                             Log.e(TAG, "Error sending message", e)
                             // Try to update status to failed
                             try {
-                                val msgRef = messageData["_messageRef"] as? com.google.firebase.database.DatabaseReference
-                                msgRef?.updateChildren(mapOf(
-                                    "status" to "failed",
-                                    "error" to (e.message ?: "Unknown error")
-                                ))
+                                val msgId = messageData["_messageId"] as? String
+                                if (msgId != null) {
+                                    vpsClient.updateOutgoingStatus(msgId, "failed", e.message ?: "Unknown error")
+                                }
                             } catch (updateError: Exception) {
                                 Log.e(TAG, "Failed to update status to failed after exception", updateError)
                             }
@@ -422,13 +420,35 @@ class OutgoingMessageService : Service() {
     }
 
     /**
-     * Download attachment from Firebase Storage URL
+     * Download attachment from URL (R2 or VPS storage)
      */
-    private suspend fun downloadAttachment(url: String): ByteArray? {
-        return try {
-            val storageRef = FirebaseStorage.getInstance().getReferenceFromUrl(url)
-            val maxSize = 25L * 1024 * 1024 // 25MB max for MMS attachments
-            storageRef.getBytes(maxSize).await()
+    private suspend fun downloadAttachment(url: String): ByteArray? = withContext(Dispatchers.IO) {
+        try {
+            val client = OkHttpClient.Builder()
+                .connectTimeout(30, TimeUnit.SECONDS)
+                .readTimeout(60, TimeUnit.SECONDS)
+                .build()
+
+            val request = Request.Builder()
+                .url(url)
+                .build()
+
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.e(TAG, "Error downloading attachment: ${response.code}")
+                    return@withContext null
+                }
+
+                val bytes = response.body?.bytes()
+                val maxSize = 25L * 1024 * 1024 // 25MB max for MMS attachments
+
+                if (bytes != null && bytes.size > maxSize) {
+                    Log.e(TAG, "Attachment too large: ${bytes.size} bytes (max: $maxSize)")
+                    return@withContext null
+                }
+
+                bytes
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Error downloading attachment", e)
             null

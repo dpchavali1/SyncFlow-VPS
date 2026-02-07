@@ -1,27 +1,27 @@
 package com.phoneintegration.app
 
 // =============================================================================
-// ARCHITECTURE OVERVIEW
+// ARCHITECTURE OVERVIEW - VPS BACKEND ONLY
 // =============================================================================
 //
 // SyncFlowApp is the Android Application class and primary entry point for the
 // SyncFlow Android application. It initializes all core services and managers
 // required for the app to function.
 //
+// NOTE: This version uses VPS backend ONLY - Firebase has been completely removed.
+//
 // INITIALIZATION ORDER:
 // ---------------------
 // The initialization order is critical for proper app function:
 // 1. ErrorHandler - Must be first to catch any initialization errors
-// 2. Firebase Security Config - Certificate pinning for secure communication
-// 3. AuthManager - Session management and authentication
+// 2. VPS Security Config - Security configuration for VPS connections
+// 3. VPSAuthManager - Session management and authentication via VPS
 // 4. SecurityMonitor - Monitors for security threats and anomalies
 // 5. InputValidation - Sanitizes user input to prevent injection attacks
 // 6. SQLCipher - Encrypted local database for sensitive data
 // 7. DealNotificationScheduler - Background job for promotional notifications
-// 8. IntelligentSyncManager - Cross-platform message sync coordination
-// 9. UnifiedIdentityManager - Single user identity across all devices
-// 10. DataCleanupService - Firebase storage cost management
-// 11. SpamFilterWorker - Background spam detection and filtering
+// 8. VPSSyncService - VPS-based cross-platform sync
+// 9. SpamFilterWorker - Background spam detection and filtering
 //
 // ERROR HANDLING STRATEGY:
 // ------------------------
@@ -60,13 +60,14 @@ import coil.ImageLoaderFactory
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import coil.request.CachePolicy
-import com.phoneintegration.app.auth.AuthManager
 import com.phoneintegration.app.deals.notify.DealNotificationScheduler
-import com.phoneintegration.app.network.FirebaseSecurityConfig
 import com.phoneintegration.app.security.SecurityMonitor
 import com.phoneintegration.app.spam.SpamFilterWorker
 import com.phoneintegration.app.utils.ErrorHandler
 import com.phoneintegration.app.utils.InputValidation
+import com.phoneintegration.app.vps.VPSAuthManager
+import com.phoneintegration.app.vps.VPSSecurityConfig
+import com.phoneintegration.app.vps.VPSSyncService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -74,11 +75,15 @@ import net.sqlcipher.database.SQLiteDatabase
 import java.io.File
 
 /**
- * Main Application class for SyncFlow Android app.
+ * Main Application class for SyncFlow Android app (VPS Backend Only).
  *
  * This class serves as the entry point for the Android application and is responsible
  * for initializing all core services, managers, and configurations before any Activity
  * or Service is created.
+ *
+ * ## VPS Backend
+ * This version uses the VPS backend exclusively. All sync, authentication, and
+ * messaging operations go through the VPS server at http://5.78.188.206.
  *
  * ## Initialization Flow
  * The `onCreate()` method initializes services in a specific order to ensure proper
@@ -91,14 +96,14 @@ import java.io.File
  *
  * ## Security
  * Initializes multiple security layers:
- * - Firebase certificate pinning for network security
+ * - VPS connection security configuration
  * - SQLCipher for encrypted local database
  * - SecurityMonitor for threat detection
  * - InputValidation for injection prevention
  *
  * @see MainActivity Main activity that starts after Application initialization
- * @see AuthManager Authentication and session management
- * @see FirebaseSecurityConfig Network security configuration
+ * @see VPSAuthManager VPS-based authentication and session management
+ * @see VPSSecurityConfig VPS security configuration
  */
 class SyncFlowApp : Application(), ImageLoaderFactory {
 
@@ -116,7 +121,7 @@ class SyncFlowApp : Application(), ImageLoaderFactory {
             // Initialize global error handler first
             ErrorHandler.init(this)
 
-            // Initialize custom crash reporter (free Firebase-based solution, no Gradle plugin needed)
+            // Initialize custom crash reporter (VPS-based)
             try {
                 com.phoneintegration.app.utils.CustomCrashReporter.init(this)
                 android.util.Log.i("SyncFlowApp", "Custom crash reporter initialized successfully")
@@ -125,57 +130,53 @@ class SyncFlowApp : Application(), ImageLoaderFactory {
                 // Continue without crash reporting if it fails
             }
 
-            // Initialize Firebase with certificate pinning for security
+            // Initialize VPS security configuration
             try {
-                FirebaseSecurityConfig.initializeFirebaseWithCertificatePinning(this)
-                android.util.Log.i("SyncFlowApp", "Firebase security config initialized successfully")
+                VPSSecurityConfig.initialize(this)
+                android.util.Log.i("SyncFlowApp", "VPS security config initialized successfully")
             } catch (e: Exception) {
-                android.util.Log.e("SyncFlowApp", "Failed to initialize Firebase security config", e)
-                // Continue without security features if Firebase fails
+                android.util.Log.e("SyncFlowApp", "Failed to initialize VPS security config", e)
             }
 
-            // BANDWIDTH OPTIMIZATION: Only initialize Firebase-heavy services if user has paired devices
-            // This prevents 2MB+ Firebase downloads on fresh install before any device pairing
-            val hasPairedDevices = com.phoneintegration.app.desktop.DesktopSyncService.hasPairedDevices(this)
+            android.util.Log.i("SyncFlowApp", "VPS mode enabled - using VPS backend exclusively")
 
-            if (hasPairedDevices) {
-                // Check for backed-up recovery code and auto-restore account
-                // PERFORMANCE FIX: Launch async to avoid blocking app startup
-                try {
-                    val recoveryManager = com.phoneintegration.app.auth.RecoveryCodeManager.getInstance(this)
+            // Initialize VPS authentication manager
+            try {
+                VPSAuthManager.getInstance(this)
+                android.util.Log.i("SyncFlowApp", "VPSAuthManager initialized successfully")
+            } catch (e: Exception) {
+                android.util.Log.e("SyncFlowApp", "Failed to initialize VPSAuthManager", e)
+            }
 
-                    // Launch in background with IO dispatcher (don't block main thread)
-                    CoroutineScope(Dispatchers.IO).launch {
-                        val restoreResult = recoveryManager.checkAndRestoreFromBackup()
-
-                        when {
-                            restoreResult.isSuccess && restoreResult.getOrNull() != null -> {
-                                val userId = restoreResult.getOrNull()
-                                android.util.Log.i("SyncFlowApp", "Auto-restored user account from backup: $userId")
-                            }
-                            restoreResult.isSuccess && restoreResult.getOrNull() == null -> {
-                                android.util.Log.d("SyncFlowApp", "No backup found, proceeding with fresh install")
-                            }
-                            else -> {
-                                android.util.Log.w("SyncFlowApp", "Auto-restore failed: ${restoreResult.exceptionOrNull()?.message}")
+            // Initialize VPS authentication and sync service
+            try {
+                val vpsAuth = VPSAuthManager.getInstance(this)
+                CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        // Use UnifiedIdentityManager for stable device-fingerprint-based auth
+                        // This prevents creating orphan anonymous users
+                        if (!vpsAuth.isAuthenticated()) {
+                            android.util.Log.i("SyncFlowApp", "Not authenticated - using unified identity manager...")
+                            val unifiedIdentityManager = com.phoneintegration.app.auth.UnifiedIdentityManager.getInstance(this@SyncFlowApp)
+                            val userId = unifiedIdentityManager.getUnifiedUserId()
+                            if (userId != null) {
+                                android.util.Log.i("SyncFlowApp", "Authenticated via device fingerprint: $userId")
+                            } else {
+                                android.util.Log.e("SyncFlowApp", "Authentication failed")
+                                return@launch
                             }
                         }
-                    }
-                    android.util.Log.i("SyncFlowApp", "Backup restore check started in background")
-                } catch (e: Exception) {
-                    android.util.Log.e("SyncFlowApp", "Failed to check for backup recovery", e)
-                }
 
-                // Initialize authentication manager for secure session management
-                // This sets up Firebase Auth state listener and token refresh - causes network traffic
-                try {
-                    AuthManager.getInstance(this)
-                    android.util.Log.i("SyncFlowApp", "AuthManager initialized successfully")
-                } catch (e: Exception) {
-                    android.util.Log.e("SyncFlowApp", "Failed to initialize AuthManager", e)
+                        // Now initialize sync service
+                        val vpsSyncService = VPSSyncService.getInstance(this@SyncFlowApp)
+                        vpsSyncService.initialize()
+                        android.util.Log.i("SyncFlowApp", "VPSSyncService initialized successfully")
+                    } catch (e: Exception) {
+                        android.util.Log.e("SyncFlowApp", "Failed to initialize VPS services", e)
+                    }
                 }
-            } else {
-                android.util.Log.i("SyncFlowApp", "Skipping RecoveryCodeManager and AuthManager - no paired devices yet")
+            } catch (e: Exception) {
+                android.util.Log.e("SyncFlowApp", "Failed to initialize VPS authentication", e)
             }
 
             // Initialize security monitoring
@@ -213,36 +214,6 @@ class SyncFlowApp : Application(), ImageLoaderFactory {
             } catch (e: Exception) {
                 android.util.Log.e("SyncFlowApp", "Failed to initialize DealNotificationScheduler", e)
                 // Continue without notification scheduling if it fails
-            }
-
-            // BANDWIDTH OPTIMIZATION: Only initialize sync managers if user has paired devices
-            // These services create Firebase instances that can cause network traffic
-            if (hasPairedDevices) {
-                // Initialize intelligent sync manager for seamless cross-platform messaging
-                try {
-                    com.phoneintegration.app.services.IntelligentSyncManager.getInstance(this)
-                    android.util.Log.i("SyncFlowApp", "IntelligentSyncManager initialized successfully")
-                } catch (e: Exception) {
-                    android.util.Log.e("SyncFlowApp", "Failed to initialize IntelligentSyncManager", e)
-                }
-
-                // Initialize unified identity manager for single user across all devices
-                try {
-                    com.phoneintegration.app.auth.UnifiedIdentityManager.getInstance(this)
-                    android.util.Log.i("SyncFlowApp", "UnifiedIdentityManager initialized successfully")
-                } catch (e: Exception) {
-                    android.util.Log.e("SyncFlowApp", "Failed to initialize UnifiedIdentityManager", e)
-                }
-
-                // Initialize data cleanup service to manage Firebase storage costs
-                try {
-                    com.phoneintegration.app.services.DataCleanupService.getInstance(this)
-                    android.util.Log.i("SyncFlowApp", "DataCleanupService initialized successfully")
-                } catch (e: Exception) {
-                    android.util.Log.e("SyncFlowApp", "Failed to initialize DataCleanupService", e)
-                }
-            } else {
-                android.util.Log.i("SyncFlowApp", "Skipping sync managers - no paired devices yet (will init after first pairing)")
             }
 
             // Initialize automatic spam filter protection

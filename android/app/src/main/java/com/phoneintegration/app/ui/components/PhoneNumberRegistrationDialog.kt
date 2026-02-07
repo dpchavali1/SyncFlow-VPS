@@ -20,15 +20,11 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.app.ActivityCompat
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.FirebaseDatabase
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
-import com.phoneintegration.app.network.FirebaseSecurityConfig
 
 private const val TAG = "PhoneNumberRegistration"
 private const val PREFS_NAME = "phone_registration_prefs"
@@ -230,18 +226,18 @@ private fun normalizePhoneNumber(phone: String): String {
 }
 
 /**
- * Register phone number in Firebase for video calling lookup
+ * Register phone number in VPS for video calling lookup
  */
 private fun registerPhoneNumber(
     context: Context,
     phoneNumber: String,
     callback: (success: Boolean, error: String?) -> Unit
 ) {
-    val userId = FirebaseAuth.getInstance().currentUser?.uid
+    val vpsClient = VPSClient.getInstance(context)
+    var userId = vpsClient.userId
+
     if (userId == null) {
-        Log.e(TAG, "Not signed in - cannot register phone")
-        callback(false, "Not signed in")
-        return
+        Log.w(TAG, "Not signed in - will authenticate first during registration")
     }
 
     val normalizedPhone = normalizePhoneNumber(phoneNumber)
@@ -249,55 +245,42 @@ private fun registerPhoneNumber(
 
     Log.d(TAG, "Registering phone number: $phoneKey for user: $userId")
 
-    val database = FirebaseDatabase.getInstance()
-
-    // Use Firebase's executeFirebaseWrite wrapper to temporarily go online
-    // (Firebase is kept offline to prevent OOM, this wrapper handles going online/offline)
     GlobalScope.launch(Dispatchers.IO) {
         try {
-            Log.d(TAG, "Going online to register phone...")
-
-            // Use the security wrapper that handles online/offline state
-            FirebaseSecurityConfig.executeFirebaseWrite {
-                // Register primary phone number
-                database.reference
-                    .child("phone_to_uid")
-                    .child(phoneKey)
-                    .setValue(userId)
-                    .await()
-
-                Log.d(TAG, "SUCCESS: Registered primary phone: $phoneKey")
-
-                // SAVE IMMEDIATELY after primary registration succeeds
-                // (before the 2-second delay in executeFirebaseWrite)
-                saveRegistrationState(context, normalizedPhone)
-                Log.d(TAG, "Saved registration state immediately")
-
-                // Also save to user profile (fire and forget - don't await)
-                database.reference
-                    .child("users")
-                    .child(userId)
-                    .child("phoneNumber")
-                    .setValue(normalizedPhone)
-
-                // Register variant (fire and forget - don't await)
-                val variant = if (phoneKey.length == 11 && phoneKey.startsWith("1")) {
-                    phoneKey.substring(1)
-                } else if (phoneKey.length == 10) {
-                    "1$phoneKey"
-                } else null
-
-                if (variant != null) {
-                    database.reference
-                        .child("phone_to_uid")
-                        .child(variant)
-                        .setValue(userId)
-                    Log.d(TAG, "Registering variant: $variant")
+            // Ensure authenticated before registering
+            if (!vpsClient.isAuthenticated) {
+                Log.d(TAG, "Authenticating with VPS before phone registration...")
+                val unifiedIdentityManager = com.phoneintegration.app.auth.UnifiedIdentityManager.getInstance(context)
+                val authUserId = unifiedIdentityManager.getUnifiedUserId()
+                if (authUserId == null || !vpsClient.isAuthenticated) {
+                    Log.e(TAG, "Failed to authenticate for phone registration")
+                    withContext(Dispatchers.Main) {
+                        callback(false, "Authentication failed. Please try again.")
+                    }
+                    return@launch
                 }
+                userId = authUserId
+                Log.d(TAG, "Authenticated as: $userId")
             }
 
-            withContext(Dispatchers.Main) {
-                callback(true, null)
+            // Register phone number via VPS API
+            val result = vpsClient.registerPhoneNumber(normalizedPhone)
+
+            if (result.success) {
+                Log.d(TAG, "SUCCESS: Registered phone: $phoneKey")
+                saveRegistrationState(context, normalizedPhone)
+                Log.d(TAG, "Saved registration state")
+
+                withContext(Dispatchers.Main) {
+                    callback(true, null)
+                }
+            } else {
+                Log.e(TAG, "Failed to register phone: ${result.error}")
+                // Save locally anyway so user isn't stuck
+                saveRegistrationState(context, normalizedPhone)
+                withContext(Dispatchers.Main) {
+                    callback(false, result.error ?: "Registration failed")
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error registering phone: ${e.message}", e)
@@ -313,7 +296,7 @@ private fun registerPhoneNumber(
 /**
  * Save registration state to preferences
  */
-private fun saveRegistrationState(context: Context, phoneNumber: String) {
+fun saveRegistrationState(context: Context, phoneNumber: String) {
     val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     prefs.edit()
         .putBoolean(KEY_PHONE_REGISTERED, true)
@@ -344,4 +327,25 @@ fun getRegisteredPhoneNumber(context: Context): String? {
 fun clearPhoneRegistration(context: Context) {
     val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     prefs.edit().clear().apply()
+}
+
+/**
+ * Restore phone registration from VPS server if missing locally.
+ * Call this on app startup after VPS authentication.
+ */
+suspend fun restorePhoneRegistrationFromVPS(context: Context) {
+    if (isPhoneNumberRegistered(context)) return
+
+    try {
+        val vpsClient = VPSClient.getInstance(context)
+        if (!vpsClient.isAuthenticated) return
+
+        val phoneNumber = vpsClient.getMyPhoneNumber()
+        if (!phoneNumber.isNullOrEmpty()) {
+            Log.d(TAG, "Restoring phone registration from VPS: $phoneNumber")
+            saveRegistrationState(context, phoneNumber)
+        }
+    } catch (e: Exception) {
+        Log.e(TAG, "Failed to restore phone registration from VPS: ${e.message}")
+    }
 }

@@ -8,20 +8,19 @@ import android.os.Looper
 import android.provider.VoicemailContract
 import android.util.Base64
 import android.util.Log
-import com.google.firebase.auth.FirebaseAuth
-import com.google.firebase.database.*
+import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.*
-import kotlinx.coroutines.tasks.await
 import java.io.ByteArrayOutputStream
 
 /**
  * Service to sync voicemails from Android to macOS.
- * Reads voicemails from ContentProvider and syncs metadata to Firebase.
+ * Reads voicemails from ContentProvider and syncs metadata to VPS.
+ *
+ * VPS Backend Only - Uses VPS API instead of Firebase.
  */
 class VoicemailSyncService(context: Context) {
     private val context: Context = context.applicationContext
-    private val auth = FirebaseAuth.getInstance()
-    private val database = FirebaseDatabase.getInstance()
+    private val vpsClient = VPSClient.getInstance(context)
 
     private var voicemailObserver: ContentObserver? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -31,8 +30,6 @@ class VoicemailSyncService(context: Context) {
 
     companion object {
         private const val TAG = "VoicemailSyncService"
-        private const val VOICEMAILS_PATH = "voicemails"
-        private const val USERS_PATH = "users"
         private const val MAX_VOICEMAIL_SIZE = 5 * 1024 * 1024 // 5MB max
     }
 
@@ -51,7 +48,6 @@ class VoicemailSyncService(context: Context) {
      */
     fun startSync() {
         Log.d(TAG, "Starting voicemail sync")
-        database.goOnline()
         registerVoicemailObserver()
         syncVoicemails()
     }
@@ -96,13 +92,12 @@ class VoicemailSyncService(context: Context) {
     }
 
     /**
-     * Sync all voicemails to Firebase
+     * Sync all voicemails to VPS
      */
     private fun syncVoicemails() {
         scope.launch {
             try {
-                val currentUser = auth.currentUser ?: return@launch
-                val userId = currentUser.uid
+                if (!vpsClient.isAuthenticated) return@launch
 
                 val voicemails = readVoicemails()
                 Log.d(TAG, "Found ${voicemails.size} voicemails")
@@ -111,7 +106,7 @@ class VoicemailSyncService(context: Context) {
                     // Skip if already synced
                     if (lastSyncedVoicemailIds.contains(voicemail.id)) continue
 
-                    syncVoicemail(userId, voicemail)
+                    syncVoicemail(voicemail)
                     lastSyncedVoicemailIds.add(voicemail.id)
                 }
             } catch (e: Exception) {
@@ -184,27 +179,22 @@ class VoicemailSyncService(context: Context) {
     }
 
     /**
-     * Sync a single voicemail to Firebase
+     * Sync a single voicemail to VPS
      */
-    private suspend fun syncVoicemail(userId: String, voicemail: Voicemail) {
+    private suspend fun syncVoicemail(voicemail: Voicemail) {
         try {
-            val voicemailRef = database.reference
-                .child(USERS_PATH)
-                .child(userId)
-                .child(VOICEMAILS_PATH)
-                .child(voicemail.id)
-
             // Get contact name if available
             val contactName = getContactName(voicemail.number)
 
             val voicemailData = mutableMapOf<String, Any?>(
+                "id" to voicemail.id,
                 "number" to voicemail.number,
                 "contactName" to contactName,
                 "duration" to voicemail.duration,
                 "date" to voicemail.date,
                 "isRead" to voicemail.isRead,
                 "hasAudio" to voicemail.hasAudio,
-                "syncedAt" to ServerValue.TIMESTAMP
+                "syncedAt" to System.currentTimeMillis()
             )
 
             // Add transcription if available
@@ -212,7 +202,7 @@ class VoicemailSyncService(context: Context) {
                 voicemailData["transcription"] = it
             }
 
-            voicemailRef.setValue(voicemailData).await()
+            vpsClient.syncVoicemail(voicemailData)
             Log.d(TAG, "Synced voicemail: ${voicemail.id} from ${voicemail.number}")
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing voicemail ${voicemail.id}", e)
@@ -252,17 +242,9 @@ class VoicemailSyncService(context: Context) {
     fun markAsRead(voicemailId: String) {
         scope.launch {
             try {
-                val userId = auth.currentUser?.uid ?: return@launch
+                if (!vpsClient.isAuthenticated) return@launch
 
-                database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(VOICEMAILS_PATH)
-                    .child(voicemailId)
-                    .child("isRead")
-                    .setValue(true)
-                    .await()
-
+                vpsClient.markVoicemailAsRead(voicemailId)
                 Log.d(TAG, "Marked voicemail $voicemailId as read")
             } catch (e: Exception) {
                 Log.e(TAG, "Error marking voicemail as read", e)
@@ -276,16 +258,9 @@ class VoicemailSyncService(context: Context) {
     fun deleteVoicemail(voicemailId: String) {
         scope.launch {
             try {
-                val userId = auth.currentUser?.uid ?: return@launch
+                if (!vpsClient.isAuthenticated) return@launch
 
-                database.reference
-                    .child(USERS_PATH)
-                    .child(userId)
-                    .child(VOICEMAILS_PATH)
-                    .child(voicemailId)
-                    .removeValue()
-                    .await()
-
+                vpsClient.deleteVoicemail(voicemailId)
                 lastSyncedVoicemailIds.remove(voicemailId)
                 Log.d(TAG, "Deleted voicemail $voicemailId")
             } catch (e: Exception) {

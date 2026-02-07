@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { query } from '../services/database';
 import { authenticate } from '../middleware/auth';
 import { apiRateLimit } from '../middleware/rateLimit';
+import { broadcastToUser } from '../services/websocket';
 
 const router = Router();
 
@@ -111,10 +112,10 @@ router.delete('/:id', async (req: Request, res: Response) => {
     const { id } = req.params;
     const userId = req.userId!;
 
-    // Don't allow deleting current device
+    // Self-removal is allowed (this is the unpair flow for macOS/web)
+    // Log it so we can distinguish from cross-device removal
     if (id === req.deviceId) {
-      res.status(400).json({ error: 'Cannot remove current device' });
-      return;
+      console.log(`[Devices] Device ${id} removing itself (unpair flow)`);
     }
 
     const result = await query(
@@ -127,6 +128,13 @@ router.delete('/:id', async (req: Request, res: Response) => {
       return;
     }
 
+    // Notify all user's devices about the removal
+    broadcastToUser(userId, 'devices', {
+      type: 'device_removed',
+      data: { deviceId: id, removedBy: req.deviceId },
+    });
+
+    console.log(`[Devices] Device ${id} removed by ${req.deviceId} for user ${userId}`);
     res.json({ success: true });
   } catch (error) {
     console.error('Delete device error:', error);

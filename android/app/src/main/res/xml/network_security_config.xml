@@ -1,11 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Production: Only allow HTTPS connections -->
+    <!-- Production: Only allow HTTPS connections by default -->
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
     </base-config>
+
+    <!-- VPS Server -->
+    <domain-config cleartextTrafficPermitted="false">
+        <domain includeSubdomains="true">sfweb.app</domain>
+    </domain-config>
+
+    <!-- Development: Allow cleartext HTTP for local testing -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">5.78.188.206</domain>
+        <domain includeSubdomains="false">10.0.2.2</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
 
     <!-- Firebase and Google services (system trust store) -->
     <domain-config cleartextTrafficPermitted="false">

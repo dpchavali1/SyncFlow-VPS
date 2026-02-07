@@ -7,23 +7,24 @@ import android.net.Uri
 import android.provider.ContactsContract
 import android.util.Base64
 import android.util.Log
-import com.google.firebase.database.ServerValue
 import com.phoneintegration.app.utils.PhoneNumberNormalizer
+import com.phoneintegration.app.vps.VPSClient
 import java.security.MessageDigest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.tasks.await
 import java.io.ByteArrayOutputStream
 import android.Manifest
 import android.content.pm.PackageManager
 import androidx.core.content.ContextCompat
 
 /**
- * Handles syncing contacts to Firebase for desktop access
+ * Handles syncing contacts to VPS for desktop access
+ *
+ * VPS Backend Only - Uses VPS API instead of Firebase.
  */
 class ContactsSyncService(private val context: Context) {
 
-    private val syncService = DesktopSyncService(context)
+    private val vpsClient = VPSClient.getInstance(context)
 
     companion object {
         private const val TAG = "ContactsSyncService"
@@ -189,20 +190,27 @@ class ContactsSyncService(private val context: Context) {
     }
 
     /**
-     * Sync all contacts to Firebase using the universal contact schema.
+     * Sync all contacts to VPS using the universal contact schema.
      * Ensures desktop-originated contacts are preserved while Android data takes priority.
      */
     suspend fun syncContacts() {
-        val userId = syncService.getCurrentUserId()
-        syncContactsForUser(userId)
+        if (!vpsClient.isAuthenticated) {
+            Log.w(TAG, "Not authenticated, skipping contact sync")
+            return
+        }
+        syncContactsForUser()
     }
 
     /**
-     * Sync all contacts for a specific user ID via Cloud Function
-     * Uses Cloud Function to avoid OOM from Firebase WebSocket sync
+     * Sync all contacts via VPS API
      */
-    suspend fun syncContactsForUser(userId: String) {
+    suspend fun syncContactsForUser(userId: String = "") {
         try {
+            if (!vpsClient.isAuthenticated) {
+                Log.w(TAG, "Not authenticated, skipping contact sync")
+                return
+            }
+
             val contacts = getAllContacts()
 
             if (contacts.isEmpty()) {
@@ -210,43 +218,25 @@ class ContactsSyncService(private val context: Context) {
                 return
             }
 
-            Log.d(TAG, "Syncing ${contacts.size} contacts via Cloud Function...")
+            Log.d(TAG, "Syncing ${contacts.size} contacts via VPS API...")
 
-            // Convert contacts to list of maps for Cloud Function
+            // Convert contacts to list of maps for VPS API
             // Skip photos to reduce payload size
             val contactsList = contacts.map { contact ->
                 val contactId = PhoneNumberNormalizer.getDeduplicationKey(contact.phoneNumber, contact.displayName)
-                mapOf(
+                mapOf<String, Any?>(
                     "id" to contactId,
                     "displayName" to contact.displayName,
-                    "phoneNumbers" to mapOf(
-                        "primary" to mapOf(
-                            "number" to contact.phoneNumber,
-                            "type" to (contact.phoneType ?: "Mobile")
-                        )
-                    ),
-                    "email" to contact.email,
+                    "phoneNumbers" to listOf(contact.phoneNumber),
+                    "emails" to listOfNotNull(contact.email),
+                    "phoneType" to (contact.phoneType ?: "Mobile"),
                     "notes" to contact.notes
-                    // Skip photo to reduce payload - can sync separately if needed
                 )
             }
 
-            // Call Cloud Function to sync (avoids OOM from Firebase WebSocket)
-            val functions = com.google.firebase.functions.FirebaseFunctions.getInstance()
-            val result = functions
-                .getHttpsCallable("syncContacts")
-                .call(mapOf("userId" to userId, "contacts" to contactsList))
-                .await()
-
-            val data = result.data as? Map<*, *>
-            val success = data?.get("success") as? Boolean ?: false
-            val count = data?.get("count") as? Int ?: 0
-
-            if (success) {
-                Log.d(TAG, "Successfully synced $count contacts via Cloud Function")
-            } else {
-                Log.e(TAG, "Cloud Function sync failed: ${data?.get("error")}")
-            }
+            // Call VPS API to sync contacts
+            val result = vpsClient.syncContacts(contactsList)
+            Log.d(TAG, "Successfully synced ${result.synced} contacts via VPS API")
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing contacts", e)
             throw e
@@ -484,7 +474,7 @@ class ContactsSyncService(private val context: Context) {
             // New photo provided - update it
             map["thumbnailBase64"] = photoBase64
             map["hash"] = sha1(photoBase64)
-            map["updatedAt"] = ServerValue.TIMESTAMP
+            map["updatedAt"] = System.currentTimeMillis()
         }
         // If photoBase64 is null/blank, preserve existing photo (don't remove it)
         // This prevents accidental photo loss due to temporary read errors
@@ -496,7 +486,7 @@ class ContactsSyncService(private val context: Context) {
         val existingVersion = (existingSync?.get("version") as? Number)?.toLong() ?: 0L
         val version = existingVersion + 1
         return mutableMapOf(
-            "lastUpdatedAt" to ServerValue.TIMESTAMP,
+            "lastUpdatedAt" to System.currentTimeMillis(),
             "lastUpdatedBy" to "android",
             "version" to version,
             "pendingAndroidSync" to false,
