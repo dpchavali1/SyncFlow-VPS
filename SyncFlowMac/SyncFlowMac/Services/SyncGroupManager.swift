@@ -1,15 +1,14 @@
 import Foundation
 import Combine
-// FirebaseDatabase - using FirebaseStubs.swift
 
 /**
  * Manages sync group operations for macOS device
  * Handles pairing, device registration, and sync group recovery
+ *
+ * Operations stubbed pending VPS implementation.
  */
 class SyncGroupManager: NSObject, ObservableObject {
     static let shared = SyncGroupManager()
-
-    private let database = Database.database().reference()
 
     @Published var syncGroupId: String? {
         didSet {
@@ -93,243 +92,67 @@ class SyncGroupManager: NSObject, ObservableObject {
     }
 
     /**
-     * Create a new sync group (called when device initializes)
-     * Generates QR code that can be scanned by other devices
+     * Create a new sync group - not implemented via VPS
      */
     func createSyncGroup(deviceName: String = "macOS", completion: @escaping (Result<String, Error>) -> Void) {
-        let newGroupId = "sync_\(UUID().uuidString)"
-        let now = Date().timeIntervalSince1970
-
-        let groupData: [String: Any] = [
-            "plan": "free",
-            "deviceLimit": 3,
-            "masterDevice": deviceId,
-            "createdAt": now,
-            "devices": [
-                deviceId: [
-                    "deviceType": "macos",
-                    "joinedAt": now,
-                    "status": "active",
-                    "deviceName": deviceName
-                ]
-            ]
-        ]
-
-        database.child("syncGroups").child(newGroupId).setValue(groupData) { [weak self] error, _ in
-            if let error = error {
-                completion(.failure(error))
-            } else {
-                self?.syncGroupId = newGroupId
-                completion(.success(newGroupId))
-            }
-        }
+        completion(.failure(NSError(domain: "SyncGroup", code: -100, userInfo: [NSLocalizedDescriptionKey: "Not implemented via VPS"])))
     }
 
     /**
-     * Join an existing sync group
-     * Call this when user scans QR code from another device or enters group ID manually
+     * Join an existing sync group - not implemented via VPS
      */
     func joinSyncGroup(
         scannedSyncGroupId: String,
         deviceName: String = "macOS",
         completion: @escaping (Result<JoinResult, Error>) -> Void
     ) {
-        let groupRef = database.child("syncGroups").child(scannedSyncGroupId)
-
-        groupRef.observeSingleEvent(of: .value) { [weak self] snapshot in
-            guard let self = self else { return }
-
-            guard snapshot.exists() else {
-                completion(.failure(NSError(domain: "SyncGroup", code: -1, userInfo: [NSLocalizedDescriptionKey: "Sync group not found"])))
-                return
-            }
-
-            guard let groupData = snapshot.value as? [String: Any] else {
-                completion(.failure(NSError(domain: "SyncGroup", code: -2, userInfo: [NSLocalizedDescriptionKey: "Invalid group data"])))
-                return
-            }
-
-            let plan = groupData["plan"] as? String ?? "free"
-            let deviceLimit = plan == "free" ? 3 : 999
-            let currentDevices = (groupData["devices"] as? [String: Any])?.count ?? 0
-
-            // Check device limit
-            if currentDevices >= deviceLimit {
-                let error = NSError(
-                    domain: "SyncGroup",
-                    code: -3,
-                    userInfo: [
-                        NSLocalizedDescriptionKey: "Device limit reached: \(currentDevices)/\(deviceLimit). Upgrade to Pro for unlimited devices."
-                    ]
-                )
-                completion(.failure(error))
-                return
-            }
-
-            // Save locally
-            self.syncGroupId = scannedSyncGroupId
-
-            // Register device in Firebase
-            let now = Date().timeIntervalSince1970
-            let deviceData: [String: Any] = [
-                "deviceType": "macos",
-                "joinedAt": now,
-                "status": "active",
-                "deviceName": deviceName
-            ]
-
-            groupRef.child("devices").child(self.deviceId).setValue(deviceData) { error, _ in
-                if let error = error {
-                    completion(.failure(error))
-                    return
-                }
-
-                // Log to history
-                groupRef.child("history").child("\(Int(now * 1000))").setValue([
-                    "action": "device_joined",
-                    "deviceId": self.deviceId,
-                    "deviceType": "macos",
-                    "deviceName": deviceName
-                ]) { error, _ in
-                    if let error = error {
-                        completion(.failure(error))
-                    } else {
-                        completion(.success(JoinResult(
-                            success: true,
-                            deviceCount: currentDevices + 1,
-                            limit: deviceLimit
-                        )))
-                    }
-                }
-            }
-        }
+        completion(.failure(NSError(domain: "SyncGroup", code: -100, userInfo: [NSLocalizedDescriptionKey: "Not implemented via VPS"])))
     }
 
     /**
-     * Recover sync group on app reinstall
-     * Searches Firebase for existing device entry
+     * Recover sync group on app reinstall - not implemented via VPS
      */
     func recoverSyncGroup(completion: @escaping (Result<String, Error>) -> Void) {
-        database.child("syncGroups").observeSingleEvent(of: .value) { [weak self] snapshot in
-            guard let self = self else { return }
-
-            guard snapshot.exists() else {
-                completion(.failure(NSError(domain: "SyncGroup", code: -1, userInfo: [NSLocalizedDescriptionKey: "No sync groups found"])))
-                return
-            }
-
-            // Search for sync group containing this device
-            for child in snapshot.children {
-                guard let childSnapshot = child as? DataSnapshot else { continue }
-                let groupId = childSnapshot.key
-                let devices = childSnapshot.childSnapshot(forPath: "devices").value as? [String: Any] ?? [:]
-
-                if devices[self.deviceId] != nil {
-                    self.syncGroupId = groupId
-                    completion(.success(groupId))
-                    return
-                }
-            }
-
-            completion(.failure(NSError(domain: "SyncGroup", code: -2, userInfo: [NSLocalizedDescriptionKey: "No previous sync group found for this device"])))
-        }
+        completion(.failure(NSError(domain: "SyncGroup", code: -100, userInfo: [NSLocalizedDescriptionKey: "Not implemented via VPS"])))
     }
 
     /**
-     * Get current sync group information
+     * Get current sync group information - not implemented via VPS
      */
     func getSyncGroupInfo(completion: @escaping (Result<SyncGroupInfo, Error>) -> Void) {
-        guard let groupId = syncGroupId else {
+        guard syncGroupId != nil else {
             completion(.failure(NSError(domain: "SyncGroup", code: -1, userInfo: [NSLocalizedDescriptionKey: "Device not paired to any sync group"])))
             return
         }
 
-        database.child("syncGroups").child(groupId).observeSingleEvent(of: .value) { snapshot in
-            guard snapshot.exists() else {
-                completion(.failure(NSError(domain: "SyncGroup", code: -2, userInfo: [NSLocalizedDescriptionKey: "Sync group no longer exists"])))
-                return
-            }
-
-            guard let groupData = snapshot.value as? [String: Any] else {
-                completion(.failure(NSError(domain: "SyncGroup", code: -3, userInfo: [NSLocalizedDescriptionKey: "Invalid group data"])))
-                return
-            }
-
-            let plan = groupData["plan"] as? String ?? "free"
-            let deviceLimit = plan == "free" ? 3 : 999
-            let devices = groupData["devices"] as? [String: Any] ?? [:]
-
-            let devicesList = devices.compactMap { (deviceId, info) -> DeviceInfo? in
-                guard let infoDict = info as? [String: Any] else { return nil }
-                return DeviceInfo(
-                    deviceId: deviceId,
-                    deviceType: infoDict["deviceType"] as? String ?? "unknown",
-                    joinedAt: infoDict["joinedAt"] as? TimeInterval ?? 0,
-                    lastSyncedAt: infoDict["lastSyncedAt"] as? TimeInterval,
-                    status: infoDict["status"] as? String ?? "active",
-                    deviceName: infoDict["deviceName"] as? String
-                )
-            }
-
-            completion(.success(SyncGroupInfo(
-                plan: plan,
-                deviceLimit: deviceLimit,
-                deviceCount: devices.count,
-                devices: devicesList
-            )))
-        }
+        completion(.failure(NSError(domain: "SyncGroup", code: -100, userInfo: [NSLocalizedDescriptionKey: "Not implemented via VPS"])))
     }
 
     /**
-     * Update device last synced time
+     * Update device last synced time - no-op (VPS not yet implemented)
      */
     func updateLastSyncTime(completion: @escaping (Result<Bool, Error>) -> Void) {
-        guard let groupId = syncGroupId else {
+        guard syncGroupId != nil else {
             completion(.failure(NSError(domain: "SyncGroup", code: -1, userInfo: [NSLocalizedDescriptionKey: "Device not paired"])))
             return
         }
 
-        let now = Date().timeIntervalSince1970
-        database.child("syncGroups").child(groupId).child("devices").child(deviceId).child("lastSyncedAt").setValue(now) { error, _ in
-            if let error = error {
-                completion(.failure(error))
-            } else {
-                completion(.success(true))
-            }
-        }
+        // No-op: VPS sync time tracking not yet implemented.
+        completion(.success(true))
     }
 
     /**
-     * Remove device from sync group
+     * Remove device from sync group - not implemented via VPS
      */
     func leaveGroup(completion: @escaping (Result<Bool, Error>) -> Void) {
-        guard let groupId = syncGroupId else {
+        guard syncGroupId != nil else {
             completion(.failure(NSError(domain: "SyncGroup", code: -1, userInfo: [NSLocalizedDescriptionKey: "Device not paired"])))
             return
         }
 
-        let groupRef = database.child("syncGroups").child(groupId)
-
-        // Remove device
-        groupRef.child("devices").child(deviceId).removeValue { error, _ in
-            if let error = error {
-                completion(.failure(error))
-                return
-            }
-
-            // Log to history
-            groupRef.child("history").child("\(Int(Date().timeIntervalSince1970 * 1000))").setValue([
-                "action": "device_removed",
-                "deviceId": self.deviceId
-            ]) { error, _ in
-                if let error = error {
-                    completion(.failure(error))
-                } else {
-                    self.syncGroupId = nil
-                    completion(.success(true))
-                }
-            }
-        }
+        // Clear local state
+        self.syncGroupId = nil
+        completion(.success(true))
     }
 
     /**

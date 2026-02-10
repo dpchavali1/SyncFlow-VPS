@@ -7,7 +7,6 @@
 
 import Foundation
 import Combine
-// FirebaseDatabase - using FirebaseStubs.swift
 
 class PerformanceOptimizer {
     static let shared = PerformanceOptimizer()
@@ -82,39 +81,7 @@ class PerformanceOptimizer {
         AttachmentCacheManager.shared.clearAll()
     }
 
-    // MARK: - Firebase Listener Optimization
-
-    /// Optimized listener that batches updates
-    func createBatchedListener<T>(
-        for query: DatabaseQuery,
-        transform: @escaping ([DataSnapshot]) -> T,
-        update: @escaping (T) -> Void
-    ) -> DatabaseHandle {
-        var pendingSnapshots: [DataSnapshot] = []
-        var updateWorkItem: DispatchWorkItem?
-
-        return query.observe(.value) { snapshot in
-            // Collect all child snapshots
-            if let children = snapshot.children.allObjects as? [DataSnapshot] {
-                pendingSnapshots = children
-            }
-
-            // Cancel existing update
-            updateWorkItem?.cancel()
-
-            // Schedule batched update
-            updateWorkItem = DispatchWorkItem {
-                let result = transform(pendingSnapshots)
-                DispatchQueue.main.async {
-                    update(result)
-                }
-                pendingSnapshots.removeAll()
-            }
-
-            // Execute after short delay to batch rapid updates
-            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.1, execute: updateWorkItem!)
-        }
-    }
+    // MARK: - Listener Optimization (VPS WebSocket handles real-time sync)
 
     // MARK: - Background Processing Optimization
 
@@ -217,7 +184,6 @@ class PerformanceOptimizer {
     }
 
     private func reduceBackgroundActivity() {
-        // Reduce Firebase listener frequency
         // Decrease cache sizes
         // Pause non-essential sync operations
         NotificationCenter.default.post(name: .batteryLowModeEnabled, object: nil)

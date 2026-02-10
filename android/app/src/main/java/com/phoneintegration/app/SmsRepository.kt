@@ -1,9 +1,12 @@
 package com.phoneintegration.app
 
+import android.app.PendingIntent
 import android.content.ContentResolver
 import android.content.Context
 import android.content.ContentValues
+import android.content.Intent
 import android.net.Uri
+import android.os.Build
 import android.provider.ContactsContract
 import android.provider.Telephony
 import android.telephony.SmsManager
@@ -11,6 +14,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import android.Manifest
 import android.content.pm.PackageManager
+import com.phoneintegration.app.sms.SmsDeliveredReceiver
 import com.phoneintegration.app.utils.MemoryOptimizer
 import com.phoneintegration.app.utils.MemoryPressure
 import kotlinx.coroutines.Dispatchers
@@ -909,12 +913,28 @@ class SmsRepository(private val context: Context) {
     // ---------------------------------------------------------------------
     //  SEND SMS
     // ---------------------------------------------------------------------
-    suspend fun sendSms(address: String, body: String): Boolean =
+    suspend fun sendSms(address: String, body: String, outgoingId: String? = null): Boolean =
         withContext(Dispatchers.IO) {
             try {
-                // Send the SMS
-                SmsManager.getDefault().sendTextMessage(address, null, body, null, null)
-                Log.d("SmsRepository", "SMS sent to $address")
+                // Create delivery PendingIntent for carrier delivery confirmation
+                val deliveryIntent = if (outgoingId != null) {
+                    val intent = Intent(SmsDeliveredReceiver.ACTION_SMS_DELIVERED).apply {
+                        setClass(context, SmsDeliveredReceiver::class.java)
+                        putExtra("outgoing_id", outgoingId)
+                    }
+                    val flags = PendingIntent.FLAG_UPDATE_CURRENT or
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
+                    PendingIntent.getBroadcast(
+                        context,
+                        outgoingId.hashCode(),
+                        intent,
+                        flags
+                    )
+                } else null
+
+                // Send the SMS with optional delivery intent
+                SmsManager.getDefault().sendTextMessage(address, null, body, null, deliveryIntent)
+                Log.d("SmsRepository", "SMS sent to $address (deliveryIntent=${deliveryIntent != null})")
 
                 // Manually write to sent folder
                 // This is needed because SmsManager.sendTextMessage() doesn't write to sent folder
@@ -1248,11 +1268,13 @@ class SmsRepository(private val context: Context) {
 
                 val timestamp = dateSec * 1000L
 
-                var address = MmsHelper.getMmsAddress(resolver, mmsId)
-                if (msgBox == 2 && (address.isNullOrBlank() || address.contains("insert-address-token", ignoreCase = true))) {
+                var address: String? = if (msgBox == 2) {
+                    // For SENT MMS, use the recipient (TO) address, not our own FROM address
                     val recipients = MmsHelper.getMmsAllRecipients(resolver, mmsId)
                         .filter { it.isNotBlank() && !it.contains("insert-address-token", ignoreCase = true) }
-                    address = recipients.firstOrNull() ?: address
+                    recipients.firstOrNull() ?: MmsHelper.getMmsAddress(resolver, mmsId)
+                } else {
+                    MmsHelper.getMmsAddress(resolver, mmsId)
                 }
 
                 if (address.isNullOrBlank()) continue
@@ -1316,6 +1338,11 @@ class SmsRepository(private val context: Context) {
                 val timestamp = dateSec * 1000L
                 val rawAddress = if (inboxOnly) {
                     MmsHelper.getMmsSender(resolver, mmsId)
+                } else if (msgBox == 2) {
+                    // For SENT MMS, use recipient (TO) address instead of own FROM address
+                    val recipients = MmsHelper.getMmsAllRecipients(resolver, mmsId)
+                        .filter { it.isNotBlank() && !it.contains("insert-address-token", ignoreCase = true) }
+                    recipients.firstOrNull() ?: MmsHelper.getMmsAddress(resolver, mmsId)
                 } else {
                     MmsHelper.getMmsAddress(resolver, mmsId)
                 }
@@ -1594,7 +1621,14 @@ class SmsRepository(private val context: Context) {
                         val timestamp = dateSec * 1000L
 
                         val address = try {
-                            MmsHelper.getMmsAddress(resolver, mmsId) ?: continue
+                            if (msgBox == 2) {
+                                // For SENT MMS, use recipient (TO) address
+                                val recipients = MmsHelper.getMmsAllRecipients(resolver, mmsId)
+                                    .filter { it.isNotBlank() && !it.contains("insert-address-token", ignoreCase = true) }
+                                recipients.firstOrNull() ?: MmsHelper.getMmsAddress(resolver, mmsId) ?: continue
+                            } else {
+                                MmsHelper.getMmsAddress(resolver, mmsId) ?: continue
+                            }
                         } catch (e: Exception) {
                             android.util.Log.e("SmsRepository", "Error getting MMS address", e)
                             continue
@@ -1730,7 +1764,14 @@ class SmsRepository(private val context: Context) {
 
                 val timestamp = dateSec * 1000L
 
-                val address = MmsHelper.getMmsAddress(resolver, mmsId) ?: continue
+                val address = if (msgBox == 2) {
+                    // For SENT MMS, use recipient (TO) address
+                    val recipients = MmsHelper.getMmsAllRecipients(resolver, mmsId)
+                        .filter { it.isNotBlank() && !it.contains("insert-address-token", ignoreCase = true) }
+                    recipients.firstOrNull() ?: MmsHelper.getMmsAddress(resolver, mmsId) ?: continue
+                } else {
+                    MmsHelper.getMmsAddress(resolver, mmsId) ?: continue
+                }
                 if (isRcsAddress(address)) continue
                 val text = MmsHelper.getMmsText(resolver, mmsId)
                     ?: mmsCache.loadBody(mmsId)
@@ -2005,11 +2046,15 @@ class SmsRepository(private val context: Context) {
 
                     val timestamp = dateSec * 1000L
 
-                    var address = MmsHelper.getMmsAddress(resolver, mmsId)
-                    if (msgBox == 2 && (address.isNullOrBlank() || address.contains("insert-address-token", ignoreCase = true))) {
+                    var address: String? = if (msgBox == 2) {
+                        // For SENT MMS, use the recipient (TO) address, not our own FROM address.
+                        // getMmsAddress() returns the first addr entry (often FROM = own number),
+                        // so for sent messages we need to explicitly get the TO recipients.
                         val recipients = MmsHelper.getMmsAllRecipients(resolver, mmsId)
                             .filter { it.isNotBlank() && !it.contains("insert-address-token", ignoreCase = true) }
-                        address = recipients.firstOrNull() ?: address
+                        recipients.firstOrNull() ?: MmsHelper.getMmsAddress(resolver, mmsId)
+                    } else {
+                        MmsHelper.getMmsAddress(resolver, mmsId)
                     }
 
                     if (address.isNullOrBlank()) continue
@@ -2129,11 +2174,15 @@ class SmsRepository(private val context: Context) {
 
                     val timestamp = dateSec * 1000L
 
-                    var address = MmsHelper.getMmsAddress(resolver, mmsId)
-                    if (msgBox == 2 && (address.isNullOrBlank() || address.contains("insert-address-token", ignoreCase = true))) {
+                    var address: String? = if (msgBox == 2) {
+                        // For SENT MMS, use the recipient (TO) address, not our own FROM address.
+                        // getMmsAddress() returns the first addr entry (often FROM = own number),
+                        // so for sent messages we need to explicitly get the TO recipients.
                         val recipients = MmsHelper.getMmsAllRecipients(resolver, mmsId)
                             .filter { it.isNotBlank() && !it.contains("insert-address-token", ignoreCase = true) }
-                        address = recipients.firstOrNull() ?: address
+                        recipients.firstOrNull() ?: MmsHelper.getMmsAddress(resolver, mmsId)
+                    } else {
+                        MmsHelper.getMmsAddress(resolver, mmsId)
                     }
 
                     if (address.isNullOrBlank()) continue

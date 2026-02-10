@@ -6,53 +6,41 @@
 	objectVersion = 77;
 	objects = {
 
-/* Begin PBXBuildFile section */
-		2991E65B13F3FC42169BBD53 /* Pods_SyncFlowMac.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D2D07720B3AF8F9D14647EAE /* Pods_SyncFlowMac.framework */; };
-/* End PBXBuildFile section */
-
 /* Begin PBXFileReference section */
 		8C6B81232ED6585400307672 /* SyncFlowMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SyncFlowMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		B6AD6E480EDD3E45DE7B10AE /* Pods-SyncFlowMac.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-SyncFlowMac.release.xcconfig"; path = "Target Support Files/Pods-SyncFlowMac/Pods-SyncFlowMac.release.xcconfig"; sourceTree = "<group>"; };
-		D2D07720B3AF8F9D14647EAE /* Pods_SyncFlowMac.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_SyncFlowMac.framework; sourceTree = BUILT_PRODUCTS_DIR; };
-		FDA649B75C45B7BA4204F0F5 /* Pods-SyncFlowMac.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-SyncFlowMac.debug.xcconfig"; path = "Target Support Files/Pods-SyncFlowMac/Pods-SyncFlowMac.debug.xcconfig"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		8C6B81252ED6585400307672 /* SyncFlowMac */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+			);
 			path = SyncFlowMac;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXBuildFile section */
+		A1B2C3D400000001 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = A1B2C3D400000002 /* WebRTC */; };
+/* End PBXBuildFile section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		8C6B81202ED6585400307672 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				2991E65B13F3FC42169BBD53 /* Pods_SyncFlowMac.framework in Frameworks */,
+				A1B2C3D400000001 /* WebRTC in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		143183A501851AA34D3EEB3A /* Pods */ = {
-			isa = PBXGroup;
-			children = (
-				FDA649B75C45B7BA4204F0F5 /* Pods-SyncFlowMac.debug.xcconfig */,
-				B6AD6E480EDD3E45DE7B10AE /* Pods-SyncFlowMac.release.xcconfig */,
-			);
-			path = Pods;
-			sourceTree = "<group>";
-		};
 		8C6B811A2ED6585400307672 = {
 			isa = PBXGroup;
 			children = (
 				8C6B81252ED6585400307672 /* SyncFlowMac */,
 				8C6B81242ED6585400307672 /* Products */,
-				143183A501851AA34D3EEB3A /* Pods */,
-				B368B1FF3BA9AE640ADB4CB7 /* Frameworks */,
 			);
 			sourceTree = "<group>";
 		};
@@ -64,14 +52,6 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
-		B368B1FF3BA9AE640ADB4CB7 /* Frameworks */ = {
-			isa = PBXGroup;
-			children = (
-				D2D07720B3AF8F9D14647EAE /* Pods_SyncFlowMac.framework */,
-			);
-			name = Frameworks;
-			sourceTree = "<group>";
-		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -79,10 +59,8 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 8C6B812E2ED6585600307672 /* Build configuration list for PBXNativeTarget "SyncFlowMac" */;
 			buildPhases = (
-				B078FA5302ADECCF892EBFDF /* [CP] Check Pods Manifest.lock */,
 				8C6B811F2ED6585400307672 /* Sources */,
 				8C6B81202ED6585400307672 /* Frameworks */,
-				8C2E451B2F2CFB51001A753A /* Upload Crashlytics Symbols */,
 				8C6B81212ED6585400307672 /* Resources */,
 			);
 			buildRules = (
@@ -93,6 +71,9 @@
 				8C6B81252ED6585400307672 /* SyncFlowMac */,
 			);
 			name = SyncFlowMac;
+			packageProductDependencies = (
+				A1B2C3D400000002 /* WebRTC */,
+			);
 			productName = SyncFlowMac;
 			productReference = 8C6B81232ED6585400307672 /* SyncFlowMac.app */;
 			productType = "com.apple.product-type.application";
@@ -122,6 +103,9 @@
 			mainGroup = 8C6B811A2ED6585400307672;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
+			packageReferences = (
+				A1B2C3D400000003 /* XCRemoteSwiftPackageReference "WebRTC" */,
+			);
 			productRefGroup = 8C6B81242ED6585400307672 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -141,48 +125,6 @@
 		};
 /* End PBXResourcesBuildPhase section */
 
-/* Begin PBXShellScriptBuildPhase section */
-		8C2E451B2F2CFB51001A753A /* Upload Crashlytics Symbols */ = {
-			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 8;
-			files = (
-			);
-			inputFileListPaths = (
-			);
-			inputPaths = (
-			);
-			name = "Upload Crashlytics Symbols";
-			outputFileListPaths = (
-			);
-			outputPaths = (
-			);
-			runOnlyForDeploymentPostprocessing = 1;
-			shellPath = /bin/sh;
-			shellScript = "# Type a script or drag a script file from your workspace to insert its path.\n\"${PODS_ROOT}/FirebaseCrashlytics/run\"\n";
-		};
-		B078FA5302ADECCF892EBFDF /* [CP] Check Pods Manifest.lock */ = {
-			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-			);
-			inputPaths = (
-				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
-				"${PODS_ROOT}/Manifest.lock",
-			);
-			name = "[CP] Check Pods Manifest.lock";
-			outputFileListPaths = (
-			);
-			outputPaths = (
-				"$(DERIVED_FILE_DIR)/Pods-SyncFlowMac-checkManifestLockResult.txt",
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
-			showEnvVarsInLog = 0;
-		};
-/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		8C6B811F2ED6585400307672 /* Sources */ = {
@@ -315,7 +257,6 @@
 		};
 		8C6B812F2ED6585600307672 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = FDA649B75C45B7BA4204F0F5 /* Pods-SyncFlowMac.debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -349,7 +290,6 @@
 		};
 		8C6B81302ED6585600307672 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = B6AD6E480EDD3E45DE7B10AE /* Pods-SyncFlowMac.release.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -403,6 +343,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		A1B2C3D400000003 /* XCRemoteSwiftPackageReference "WebRTC" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/stasel/WebRTC.git";
+			requirement = {
+				kind = exactVersion;
+				version = 140.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A1B2C3D400000002 /* WebRTC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A1B2C3D400000003 /* XCRemoteSwiftPackageReference "WebRTC" */;
+			productName = WebRTC;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 8C6B811B2ED6585400307672 /* Project object */;
 }

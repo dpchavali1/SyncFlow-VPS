@@ -5,6 +5,17 @@ import { query, queryOne } from '../services/database';
 import { authenticate } from '../middleware/auth';
 import { apiRateLimit } from '../middleware/rateLimit';
 import { config } from '../config';
+import { S3Client, DeleteObjectCommand } from '@aws-sdk/client-s3';
+
+// R2 client (only if configured)
+const s3Client = config.r2.endpoint ? new S3Client({
+  region: 'auto',
+  endpoint: config.r2.endpoint,
+  credentials: {
+    accessKeyId: config.r2.accessKeyId,
+    secretAccessKey: config.r2.secretAccessKey,
+  },
+}) : null;
 
 const router = Router();
 
@@ -207,6 +218,37 @@ router.get('/', async (req: Request, res: Response) => {
       [userId]
     );
 
+    // Calculate MMS attachment sizes from stored mms_parts JSONB
+    const mmsBytes = await queryOne(
+      `SELECT COALESCE(SUM(
+        (SELECT COALESCE(SUM((part->>'fileSize')::bigint), 0)
+         FROM jsonb_array_elements(mms_parts) AS part
+         WHERE part->>'fileSize' IS NOT NULL)
+      ), 0) as total
+       FROM user_messages
+       WHERE user_id = $1 AND is_mms = true AND mms_parts IS NOT NULL
+         AND date > $2`,
+      [userId, Date.now() - 30 * 24 * 60 * 60 * 1000]
+    );
+
+    // Calculate file transfer sizes for current month
+    const fileBytes = await queryOne(
+      `SELECT COALESCE(SUM(file_size), 0) as total
+       FROM user_file_transfers
+       WHERE user_id = $1 AND status = 'completed'
+         AND timestamp > $2`,
+      [userId, Date.now() - 30 * 24 * 60 * 60 * 1000]
+    );
+
+    // Calculate photo sizes for current month
+    const photoBytes = await queryOne(
+      `SELECT COALESCE(SUM(file_size), 0) as total
+       FROM user_photos
+       WHERE user_id = $1
+         AND synced_at > NOW() - INTERVAL '30 days'`,
+      [userId]
+    );
+
     res.json({
       success: true,
       usage: {
@@ -219,8 +261,9 @@ router.get('/', async (req: Request, res: Response) => {
           : null,
         storageBytes: parseInt(usage?.storage_bytes || '0'),
         monthlyUploadBytes: parseInt(usage?.bandwidth_bytes_month || '0'),
-        monthlyMmsBytes: 0, // TODO: Track separately
-        monthlyFileBytes: 0, // TODO: Track separately
+        monthlyMmsBytes: parseInt(mmsBytes?.total || '0'),
+        monthlyFileBytes: parseInt(fileBytes?.total || '0'),
+        monthlyPhotoBytes: parseInt(photoBytes?.total || '0'),
         messageCount: parseInt(msgCount?.count || '0'),
         contactCount: parseInt(contactCount?.count || '0'),
         lastUpdatedAt: usage?.updated_at
@@ -261,18 +304,69 @@ router.post('/record', async (req: Request, res: Response) => {
   }
 });
 
-// POST /usage/reset-storage - Reset storage usage
+// POST /usage/reset-storage - Reset storage usage and delete R2 objects
 router.post('/reset-storage', async (req: Request, res: Response) => {
   try {
     const userId = req.userId!;
+    let r2Deleted = 0;
 
+    // Collect R2 keys from MMS attachments
+    const mmsMessages = await query<{ mms_parts: any }>(
+      `SELECT mms_parts FROM user_messages
+       WHERE user_id = $1 AND is_mms = true AND mms_parts IS NOT NULL`,
+      [userId]
+    );
+
+    const r2Keys: string[] = [];
+    for (const msg of mmsMessages) {
+      const parts = Array.isArray(msg.mms_parts) ? msg.mms_parts : [];
+      for (const part of parts) {
+        const key = part.r2Key || part.fileKey || part.r2_key;
+        if (key) r2Keys.push(key);
+      }
+    }
+
+    // Collect R2 keys from photos
+    const photos = await query<{ r2_key: string }>(
+      `SELECT r2_key FROM user_photos WHERE user_id = $1`,
+      [userId]
+    );
+    for (const photo of photos) {
+      if (photo.r2_key) r2Keys.push(photo.r2_key);
+    }
+
+    // Delete R2 objects
+    if (s3Client && r2Keys.length > 0) {
+      for (const key of r2Keys) {
+        try {
+          await s3Client.send(new DeleteObjectCommand({
+            Bucket: config.r2.bucketName,
+            Key: key,
+          }));
+          r2Deleted++;
+        } catch (e) {}
+      }
+    }
+
+    // Clear mms_parts references from messages
+    await query(
+      `UPDATE user_messages SET mms_parts = NULL
+       WHERE user_id = $1 AND is_mms = true AND mms_parts IS NOT NULL`,
+      [userId]
+    );
+
+    // Delete photo records
+    await query(`DELETE FROM user_photos WHERE user_id = $1`, [userId]);
+
+    // Reset storage counter
     await query(
       `UPDATE user_usage SET storage_bytes = 0, updated_at = NOW()
        WHERE user_id = $1`,
       [userId]
     );
 
-    res.json({ success: true });
+    console.log(`[Usage] Reset storage for user ${userId}: deleted ${r2Deleted}/${r2Keys.length} R2 objects`);
+    res.json({ success: true, r2Deleted, totalKeys: r2Keys.length });
   } catch (error) {
     console.error('Reset storage usage error:', error);
     res.status(500).json({ error: 'Failed to reset storage usage' });
@@ -316,7 +410,7 @@ router.get('/subscription', async (req: Request, res: Response) => {
         features: {
           maxDevices: 2,
           maxFileSize: 50 * 1024 * 1024, // 50MB
-          photoSync: false,
+          photoSync: true,
           mediaControl: false,
         },
       });

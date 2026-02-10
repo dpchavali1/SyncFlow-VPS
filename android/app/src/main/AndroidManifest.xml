@@ -200,6 +200,11 @@
             </intent-filter>
         </receiver>
 
+        <!-- SMS Delivery Receiver -->
+        <receiver
+            android:name=".sms.SmsDeliveredReceiver"
+            android:exported="false" />
+
         <!-- MMS Sent/Delivered Receivers -->
         <receiver
             android:name=".mms.MmsSentReceiver"

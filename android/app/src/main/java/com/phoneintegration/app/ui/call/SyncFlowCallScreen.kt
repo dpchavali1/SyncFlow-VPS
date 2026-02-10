@@ -435,7 +435,9 @@ fun VideoRenderer(
     var currentTrackId by remember { mutableStateOf<String?>(null) }
 
     // Track the video track to handle changes
-    val trackId = remember(videoTrack) { videoTrack.id() }
+    val trackId = remember(videoTrack) {
+        try { videoTrack.id() } catch (e: Exception) { "unknown" }
+    }
 
     // Handle video track changes - re-add sink when track changes
     DisposableEffect(videoTrack, trackId) {
@@ -460,7 +462,8 @@ fun VideoRenderer(
                     videoTrack.removeSink(r)
                     android.util.Log.d("VideoRenderer", "Removed sink for track: $trackId")
                 } catch (e: Exception) {
-                    android.util.Log.e("VideoRenderer", "Error removing sink", e)
+                    // Track may already be disposed - this is expected during cleanup
+                    android.util.Log.w("VideoRenderer", "Error removing sink (track may be disposed): ${e.message}")
                 }
             }
         }
@@ -477,10 +480,10 @@ fun VideoRenderer(
                         try {
                             if (isInitialized) {
                                 videoTrack.addSink(renderer)
-                                android.util.Log.d("VideoRenderer", "Re-added sink on resume")
                             }
                         } catch (e: Exception) {
-                            android.util.Log.e("VideoRenderer", "Error re-adding sink on resume", e)
+                            // Track may have been disposed while backgrounded
+                            android.util.Log.w("VideoRenderer", "Error re-adding sink on resume: ${e.message}")
                         }
                     }
                 }
@@ -539,17 +542,26 @@ fun VideoRenderer(
         onRelease = { renderer ->
             try {
                 videoTrack.removeSink(renderer)
+            } catch (e: Exception) {
+                // Track may already be disposed during cleanup - this is expected
+                android.util.Log.w("VideoRenderer", "removeSink on release (track may be disposed): ${e.message}")
+            }
+            try {
                 renderer.clearImage()
                 renderer.release()
-                localEglBase?.release()
-                localEglBase = null
-                rendererRef = null
-                isInitialized = false
-                currentTrackId = null
-                android.util.Log.d("VideoRenderer", "Renderer released")
             } catch (e: Exception) {
-                android.util.Log.e("VideoRenderer", "Error releasing renderer", e)
+                android.util.Log.w("VideoRenderer", "Error releasing renderer: ${e.message}")
             }
+            try {
+                localEglBase?.release()
+            } catch (e: Exception) {
+                android.util.Log.w("VideoRenderer", "Error releasing EGL: ${e.message}")
+            }
+            localEglBase = null
+            rendererRef = null
+            isInitialized = false
+            currentTrackId = null
+            android.util.Log.d("VideoRenderer", "Renderer released")
         }
     )
 }

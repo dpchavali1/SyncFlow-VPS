@@ -12,9 +12,14 @@ interface AuthenticatedWebSocket extends WebSocket {
 }
 
 interface SubscriptionMessage {
-  type: 'subscribe' | 'unsubscribe';
+  type: 'subscribe' | 'unsubscribe' | 'webrtc_signal';
   channel?: string; // e.g., 'messages', 'contacts', 'calls', or 'all'
   channels?: string[]; // bulk subscribe: ['messages', 'contacts', 'calls']
+  // WebRTC signal relay fields
+  callId?: string;
+  signalType?: string;
+  signalData?: any;
+  toDevice?: string;
 }
 
 interface BroadcastMessage {
@@ -99,7 +104,11 @@ export function createWebSocketServer(server: HttpServer): WebSocketServer {
     client.on('message', (data) => {
       try {
         const message = JSON.parse(data.toString()) as SubscriptionMessage;
-        handleClientMessage(client, message);
+        if (message.type === 'webrtc_signal') {
+          handleWebRTCSignal(client, message);
+        } else {
+          handleClientMessage(client, message);
+        }
       } catch (error) {
         console.error('WebSocket message parse error:', error);
       }
@@ -135,7 +144,7 @@ const VALID_CHANNELS = [
   'messages', 'contacts', 'calls', 'devices', 'outgoing', 'call_requests',
   'clipboard', 'dnd', 'media', 'hotspot', 'phone_status', 'typing',
   'notifications', 'voicemails', 'e2ee', 'photos', 'file_transfers',
-  'continuity', 'scheduled_messages', 'find_phone', 'subscription',
+  'continuity', 'scheduled_messages', 'find_phone', 'subscription', 'spam',
 ];
 
 function handleClientMessage(client: AuthenticatedWebSocket, message: SubscriptionMessage): void {
@@ -191,6 +200,43 @@ function handleClientMessage(client: AuthenticatedWebSocket, message: Subscripti
       client.send(JSON.stringify({ type: 'unsubscribed', channels: unsubscribed }));
     }
   }
+}
+
+async function handleWebRTCSignal(client: AuthenticatedWebSocket, message: SubscriptionMessage): Promise<void> {
+  if (!client.userId || !message.callId || !message.signalType || !message.signalData) {
+    client.send(JSON.stringify({ type: 'error', message: 'Invalid webrtc_signal: missing fields' }));
+    return;
+  }
+
+  const signalMessage = {
+    type: 'webrtc_signal',
+    data: {
+      callId: message.callId,
+      signalType: message.signalType,
+      signalData: message.signalData,
+      fromDevice: client.deviceId || '',
+    },
+  };
+
+  // Look up the call to find the other participant for cross-user routing
+  try {
+    const rows = await pool.query(
+      `SELECT user_id, callee_user_id FROM user_syncflow_calls WHERE id = $1`,
+      [message.callId]
+    );
+    if (rows.rows.length > 0) {
+      const { user_id: callerId, callee_user_id: calleeId } = rows.rows[0];
+      const otherUserId = client.userId === callerId ? calleeId : callerId;
+      if (otherUserId && otherUserId !== client.userId) {
+        broadcastToUser(otherUserId, 'calls', signalMessage);
+      }
+    }
+  } catch (err) {
+    console.error('[WS] Error looking up call for signaling:', err);
+  }
+
+  // Also broadcast to same-user's other devices
+  broadcastToAllDevicesExcept(client.userId, client.deviceId || '', 'calls', signalMessage);
 }
 
 async function setupDatabaseListeners(): Promise<void> {

@@ -6,7 +6,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization") version "2.2.10"
     id("com.google.devtools.ksp")
-    // Firebase plugins removed - using VPS backend only
+    id("com.google.gms.google-services")
 }
 
 android {
@@ -194,7 +194,12 @@ dependencies {
     implementation("androidx.exifinterface:exifinterface:1.3.7")
 
     // ──────────────────────────────────────────────
-    // VPS BACKEND - Desktop Integration (Firebase removed)
+    // FIREBASE CLOUD MESSAGING - for push notifications when app is killed
+    // ──────────────────────────────────────────────
+    implementation("com.google.firebase:firebase-messaging:24.1.0")
+
+    // ──────────────────────────────────────────────
+    // VPS BACKEND - Desktop Integration
     // ──────────────────────────────────────────────
     // All sync, auth, and messaging now handled via VPS server
 

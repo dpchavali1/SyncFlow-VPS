@@ -477,58 +477,33 @@ export const importSyncGroupKeypair = async (
     // Decode PKCS#8 private key
     const pkcs8Bytes = base64ToBytes(privateKeyPKCS8Base64)
 
-    // Extract raw private key (last 32 bytes of PKCS#8)
-    const rawPrivateKey = pkcs8Bytes.length === 32
-      ? pkcs8Bytes
-      : pkcs8Bytes.slice(-32)
-
     // Decode X9.63 public key
     const publicKeyBytes = base64ToBytes(publicKeyX963Base64)
 
-    // Import private key from raw bytes
-    // WebCrypto doesn't directly support raw P-256 import, so we need to construct a JWK
-    const privateKeyJwk: JsonWebKey = {
-      kty: 'EC',
-      crv: 'P-256',
-      d: bytesToBase64url(rawPrivateKey),
-      // Extract x and y from public key (skip first byte which is 0x04)
-      x: bytesToBase64url(publicKeyBytes.slice(1, 33)),
-      y: bytesToBase64url(publicKeyBytes.slice(33, 65)),
-      key_ops: ['deriveBits'],
-      ext: true,
-    }
-
-    const publicKeyJwk: JsonWebKey = {
-      kty: 'EC',
-      crv: 'P-256',
-      x: bytesToBase64url(publicKeyBytes.slice(1, 33)),
-      y: bytesToBase64url(publicKeyBytes.slice(33, 65)),
-      key_ops: [],
-      ext: true,
-    }
-
-    // Import keys
+    // Import private key using WebCrypto's native PKCS#8 support
+    // (Previously we extracted the last 32 bytes as the raw key, but Java's PKCS#8
+    // includes the public key at the end, so slice(-32) got the Y coordinate instead)
     const privateKey = await crypto.subtle.importKey(
-      'jwk',
-      privateKeyJwk,
+      'pkcs8',
+      pkcs8Bytes,
       { name: 'ECDH', namedCurve: 'P-256' },
       true,
       ['deriveBits']
     )
 
+    // Export as JWK to get correct d, x, y values
+    const privateKeyJwk = await crypto.subtle.exportKey('jwk', privateKey) as JsonWebKey
+
+    // Import public key from X9.63 raw format
     const publicKey = await crypto.subtle.importKey(
-      'jwk',
-      publicKeyJwk,
+      'raw',
+      publicKeyBytes,
       { name: 'ECDH', namedCurve: 'P-256' },
       true,
       []
     )
 
-    // Verify keys match by exporting and comparing public keys
-    const exportedPublic = new Uint8Array(await crypto.subtle.exportKey('raw', publicKey))
-    if (exportedPublic.length !== publicKeyBytes.length) {
-      throw new Error('Public key mismatch')
-    }
+    const publicKeyJwk = await crypto.subtle.exportKey('jwk', publicKey) as JsonWebKey
 
     // Store keypair
     const payload: StoredKeyPair = { privateKeyJwk, publicKeyJwk }

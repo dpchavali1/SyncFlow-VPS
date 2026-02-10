@@ -70,8 +70,8 @@ class DesktopSyncService(context: Context) {
             "body" to message.body,
             "timestamp" to message.timestamp,
             "simSubscriptionId" to message.simSubscriptionId,
-            "isMms" to false,
-            "attachments" to emptyList<Map<String, Any?>>()
+            "isMms" to message.isMms,
+            "attachments" to (message.attachments ?: emptyList())
         )
     }
 

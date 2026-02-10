@@ -165,6 +165,19 @@ router.post('/confirm-upload', async (req: Request, res: Response) => {
        body.photoMetadata?.takenAt]
     );
 
+    // Record usage for photo upload (storage + bandwidth)
+    if (body.fileSize > 0) {
+      await query(
+        `INSERT INTO user_usage (user_id, storage_bytes, bandwidth_bytes_month, updated_at)
+         VALUES ($1, $2, $2, NOW())
+         ON CONFLICT (user_id) DO UPDATE SET
+           storage_bytes = user_usage.storage_bytes + $2,
+           bandwidth_bytes_month = user_usage.bandwidth_bytes_month + $2,
+           updated_at = NOW()`,
+        [userId, body.fileSize]
+      );
+    }
+
     res.json({ success: true });
   } catch (error) {
     if (error instanceof z.ZodError) {

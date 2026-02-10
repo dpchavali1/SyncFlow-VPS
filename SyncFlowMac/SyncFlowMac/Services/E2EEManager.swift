@@ -8,14 +8,10 @@
 
 import Foundation
 import CryptoKit
-// FirebaseDatabase, FirebaseAuth - using FirebaseStubs.swift
 
 class E2EEManager {
 
     static let shared = E2EEManager()
-
-    private let database = Database.database()
-    private let auth = Auth.auth()
 
     private let keychainService = "com.syncflow.e2ee"
     private let privateKeyTag = "e2ee_private_key"
@@ -36,12 +32,6 @@ class E2EEManager {
     /// Initialize E2EE keys - generates new keys if not exists
     func initializeKeys() async throws {
         if privateKey != nil {
-            // Keys already loaded - try to publish but don't fail if Firebase is unavailable
-            do {
-                try await publishDevicePublicKey()
-            } catch {
-                print("[E2EE] publishDevicePublicKey failed (non-fatal, VPS mode?): \(error.localizedDescription)")
-            }
             return
         }
 
@@ -55,19 +45,6 @@ class E2EEManager {
 
         self.privateKey = newPrivateKey
         self.publicKey = newPublicKey
-
-        // Publish public key - don't fail if Firebase is unavailable (VPS mode)
-        do {
-            try await publishPublicKeyToFirebase()
-        } catch {
-            print("[E2EE] publishPublicKeyToFirebase failed (non-fatal): \(error.localizedDescription)")
-        }
-        do {
-            try await publishDevicePublicKey()
-        } catch {
-            print("[E2EE] publishDevicePublicKey failed (non-fatal): \(error.localizedDescription)")
-        }
-
     }
 
     /// Check if E2EE is initialized
@@ -152,60 +129,53 @@ class E2EEManager {
         SecItemDelete(query as CFDictionary)
     }
 
-    // MARK: - Firebase Operations
+    /// Encrypt a message body for sync storage.
+    /// Returns (encryptedBody, encryptedNonce, keyMap) or nil if E2EE is not initialized.
+    func encryptForSync(_ body: String) -> (encryptedBody: String, encryptedNonce: String, keyMap: [String: String])? {
+        guard let publicKey = publicKey else { return nil }
 
-    /// Publish public key to Firebase for key exchange
-    private func publishPublicKeyToFirebase() async throws {
-        // Use stored user ID to ensure keys go to correct user account
-        guard let uid = UserDefaults.standard.string(forKey: "syncflow_user_id") ?? auth.currentUser?.uid,
-              let publicKey = publicKey else {
-            throw E2EEError.notAuthenticated
+        do {
+            // Generate random data key
+            var dataKey = Data(count: 32)
+            _ = dataKey.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 32, $0.baseAddress!) }
+
+            // Encrypt body with data key (AES-GCM)
+            let bodyData = body.data(using: .utf8) ?? Data()
+            let symmetricKey = SymmetricKey(data: dataKey)
+            let sealedBox = try AES.GCM.seal(bodyData, using: symmetricKey)
+            guard let combined = sealedBox.combined else { return nil }
+
+            let nonceSize = 12
+            let nonce = combined.prefix(nonceSize)
+            let ciphertextAndTag = combined.dropFirst(nonceSize)
+
+            let encryptedBody = Data(ciphertextAndTag).base64EncodedString()
+            let encryptedNonce = Data(nonce).base64EncodedString()
+
+            // Encrypt data key for sync group
+            let publicKeyX963 = publicKey.x963Representation.base64EncodedString()
+            let encryptedDataKey = try encryptDataKeyForDevice(
+                publicKeyX963Base64: publicKeyX963,
+                data: dataKey
+            )
+
+            return (encryptedBody, encryptedNonce, ["syncGroup": encryptedDataKey])
+        } catch {
+            print("[E2EE] encryptForSync failed: \(error.localizedDescription)")
+            return nil
         }
-
-        // Convert public key to Base64 for storage
-        let publicKeyBase64 = publicKey.rawRepresentation.base64EncodedString()
-
-        let keyData: [String: Any] = [
-            "publicKey": publicKeyBase64,
-            "algorithm": "ECIES_P256_CryptoKit",
-            "version": 1,
-            "platform": "macos",
-            "timestamp": ServerValue.timestamp()
-        ]
-
-        let keyRef = database.reference()
-            .child("e2ee_keys")
-            .child(uid)
-
-        // IMPORTANT: Use updateChildValues instead of setValue to preserve per-device keys
-        // setValue would delete all child nodes including per-device key entries
-        try await keyRef.updateChildValues(keyData)
     }
 
+    // MARK: - VPS Key Operations
+
+    /// Publish device public key via VPS
     func publishDevicePublicKey() async throws {
-        // Use stored user ID to ensure keys go to correct user account
-        guard let uid = UserDefaults.standard.string(forKey: "syncflow_user_id") ?? auth.currentUser?.uid,
-              let publicKey = publicKey else {
-            throw E2EEError.notAuthenticated
+        guard let publicKey = publicKey else {
+            throw E2EEError.notInitialized
         }
 
-        let deviceId = FirebaseService.shared.getDeviceId()
         let publicKeyX963 = publicKey.x963Representation.base64EncodedString()
-
-        let keyData: [String: Any] = [
-            "publicKeyX963": publicKeyX963,
-            "format": "x963",
-            "keyVersion": 2,
-            "platform": "macos",
-            "timestamp": ServerValue.timestamp()
-        ]
-
-        let keyRef = database.reference()
-            .child("e2ee_keys")
-            .child(uid)
-            .child(deviceId)
-
-        try await keyRef.setValue(keyData)
+        try await VPSService.shared.publishE2eePublicKey(publicKeyX963Base64: publicKeyX963)
     }
 
     /// Reset E2EE keys - clears existing keys and generates new ones.
@@ -233,31 +203,10 @@ class E2EEManager {
         print("[E2EE] Keys reset and regenerated")
     }
 
-    /// Get recipient's public key from Firebase
+    /// Get recipient's public key - E2EE uses shared sync group keypair,
+    /// so we use our own public key for encryption
     func getPublicKey(for uid: String) async throws -> P256.KeyAgreement.PublicKey? {
-        let keyRef = database.reference()
-            .child("e2ee_keys")
-            .child(uid)
-
-        let snapshot = try await keyRef.getData()
-
-        guard snapshot.exists(),
-              let keyData = snapshot.value as? [String: Any],
-              let publicKeyString = keyData["publicKey"] as? String else {
-            return nil
-        }
-
-        // Check if it's Tink format (JSON) or raw Base64
-        if publicKeyString.hasPrefix("{") {
-            // Tink JSON format - need to parse
-            return try parseTinkPublicKey(publicKeyString)
-        } else {
-            // Raw Base64 format
-            guard let publicKeyData = Data(base64Encoded: publicKeyString) else {
-                throw E2EEError.invalidPublicKey
-            }
-            return try P256.KeyAgreement.PublicKey(rawRepresentation: publicKeyData)
-        }
+        return publicKey
     }
 
     /// Parse Tink JSON format public key
@@ -595,7 +544,16 @@ class E2EEManager {
         self.privateKey = newPrivateKey
         self.publicKey = newPublicKey
 
+        // Mark that sync group keys have been imported (distinct from local key init)
+        UserDefaults.standard.set(true, forKey: "e2ee_sync_group_imported")
+
         print("[E2EE] Successfully imported sync group keypair from Android device")
+    }
+
+    /// Whether sync group keys from Android have been successfully imported.
+    /// Distinct from `isInitialized` which only checks for local device keys.
+    var hasSyncGroupKeys: Bool {
+        return UserDefaults.standard.bool(forKey: "e2ee_sync_group_imported")
     }
 
     /// Normalize raw private key data to 32 bytes when possible.
@@ -849,12 +807,6 @@ class E2EEManager {
         deleteFromKeychain(tag: publicKeyTag)
         privateKey = nil
         publicKey = nil
-
-        // Remove from Firebase - use stored user ID for consistency
-        if let uid = UserDefaults.standard.string(forKey: "syncflow_user_id") ?? auth.currentUser?.uid {
-            database.reference().child("e2ee_keys").child(uid).removeValue()
-        }
-
     }
 }
 
@@ -879,7 +831,7 @@ enum E2EEError: LocalizedError {
         case .notInitialized:
             return "E2EE not initialized"
         case .notAuthenticated:
-            return "Not authenticated with Firebase"
+            return "Not authenticated"
         case .keychainError(let status):
             return "Keychain error: \(status)"
         case .invalidPublicKey:

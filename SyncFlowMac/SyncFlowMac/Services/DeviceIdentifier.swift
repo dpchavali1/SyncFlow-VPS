@@ -227,7 +227,7 @@ class DeviceIdentifier {
     }
 }
 
-// MARK: - Extension for FirebaseService Integration
+// MARK: - Extension for Service Integration
 
 extension DeviceIdentifier {
 

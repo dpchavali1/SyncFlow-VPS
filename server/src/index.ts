@@ -7,7 +7,9 @@ import { pool, checkDatabaseHealth } from './services/database';
 import { redis, checkRedisHealth } from './services/redis';
 import { createWebSocketServer } from './services/websocket';
 import { initLogger } from './services/logger';
+import { initializeFCM } from './services/push';
 import { maintenanceMiddleware } from './middleware/maintenance';
+import { startDailyCleanup, stopDailyCleanup } from './services/dailyCleanup';
 
 // Initialize log capture before anything else
 initLogger();
@@ -37,6 +39,8 @@ import e2eeRoutes from './routes/e2ee';
 import spamRoutes from './routes/spam';
 import photosRoutes from './routes/photos';
 import usageRoutes from './routes/usage';
+import accountRoutes from './routes/account';
+import supportRoutes from './routes/support';
 
 const app = express();
 
@@ -118,6 +122,9 @@ app.use('/api/e2ee', e2eeRoutes);
 app.use('/api/spam', spamRoutes);
 app.use('/api/photos', photosRoutes);
 app.use('/api/usage', usageRoutes);
+app.use('/api/account', accountRoutes);
+app.use('/api/support', supportRoutes);
+app.use('/api/support-chat', supportRoutes);
 
 // 404 handler
 app.use((req, res) => {
@@ -143,6 +150,9 @@ async function start() {
     await checkRedisHealth();
     console.log('Redis connected');
 
+    // Initialize FCM for push notifications
+    initializeFCM();
+
     // Start HTTP server and attach WebSocket to it
     const server = http.createServer(app);
     createWebSocketServer(server);
@@ -150,6 +160,9 @@ async function start() {
     server.listen(config.port, () => {
       console.log(`HTTP + WebSocket server listening on port ${config.port}`);
     });
+
+    // Start daily cleanup scheduler (3 AM UTC)
+    startDailyCleanup();
 
     console.log(`\nSyncFlow API Server started in ${config.nodeEnv} mode`);
     console.log(`- HTTP + WS: http://localhost:${config.port}`);
@@ -164,6 +177,7 @@ async function start() {
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down...');
+  stopDailyCleanup();
   await pool.end();
   redis.disconnect();
   process.exit(0);
@@ -171,6 +185,7 @@ process.on('SIGTERM', async () => {
 
 process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down...');
+  stopDailyCleanup();
   await pool.end();
   redis.disconnect();
   process.exit(0);

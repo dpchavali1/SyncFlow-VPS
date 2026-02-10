@@ -38,7 +38,6 @@
 
 import SwiftUI
 import AppKit
-// FirebaseFunctions - using FirebaseStubs.swift
 
 // Theme imports for design system
 // SyncFlowColors, SyncFlowTypography, SyncFlowSpacing are defined in Theme/
@@ -130,147 +129,6 @@ struct MessageView: View {
     @State private var totalMessageCount: Int = 0
     /// Preferred phone number to send from (for multi-SIM contacts)
     @State private var preferredSendAddress: String? = nil
-    /// E2EE key sync state
-    @State private var isKeySyncInProgress: Bool = false
-    @State private var keySyncStatusMessage: String? = nil
-
-    // MARK: - E2EE Actions
-
-    private func startKeySync(userId: String, deviceId: String) {
-        isKeySyncInProgress = true
-        keySyncStatusMessage = nil
-
-        let isVPS = UserDefaults.standard.bool(forKey: "useVPSMode")
-
-        Task {
-            do {
-                try await E2EEManager.shared.initializeKeys()
-
-                if isVPS {
-                    // VPS mode: fetch device E2EE key from VPS server
-                    await MainActor.run {
-                        keySyncStatusMessage = "Fetching keys from VPS server..."
-                    }
-
-                    let encryptedKey = try await VPSService.shared.waitForDeviceE2eeKey(timeout: 60, pollInterval: 3, initialDelay: 0)
-
-                    guard let encryptedKey = encryptedKey else {
-                        await MainActor.run {
-                            keySyncStatusMessage = "Timeout. Is Android paired and online?"
-                        }
-                        return
-                    }
-
-                    let payloadData = try E2EEManager.shared.decryptDataKey(from: encryptedKey)
-                    let payload = try JSONSerialization.jsonObject(with: payloadData) as? [String: Any]
-
-                    guard let privateKeyPKCS8 = payload?["privateKeyPKCS8"] as? String,
-                          let publicKeyX963 = payload?["publicKeyX963"] as? String else {
-                        throw NSError(domain: "E2EE", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid key payload from VPS"])
-                    }
-
-                    try E2EEManager.shared.importSyncGroupKeypair(
-                        privateKeyPKCS8Base64: privateKeyPKCS8,
-                        publicKeyX963Base64: publicKeyX963
-                    )
-
-                    print("[E2EE] VPS keys synced, reloading messages")
-                    IncrementalSyncManager.shared.clearCache(userId: userId)
-                    NotificationCenter.default.post(name: .e2eeKeysUpdated, object: nil)
-
-                    await MainActor.run {
-                        keySyncStatusMessage = "Keys synced successfully! All messages accessible."
-                        appState.e2eeKeyMismatch = false
-                    }
-                } else {
-                    // Firebase mode: request key sync from Android via Firebase
-                    try await FirebaseService.shared.requestE2eeKeySync(userId: userId, deviceId: deviceId)
-                    _ = try await FirebaseService.shared.waitForE2eeKeySyncResponse(userId: userId, deviceId: deviceId)
-
-                    await MainActor.run {
-                        keySyncStatusMessage = "Keys synced successfully! All messages accessible."
-                        appState.e2eeKeyMismatch = false
-                    }
-                }
-                appState.refreshE2eeKeyStatus()
-            } catch {
-                await MainActor.run {
-                    keySyncStatusMessage = "Key sync failed: \(error.localizedDescription)"
-                }
-            }
-            await MainActor.run {
-                isKeySyncInProgress = false
-            }
-        }
-    }
-
-    private func requestResync(userId: String) {
-        Task {
-            do {
-                try await FirebaseService.shared.requestHistorySync(userId: userId)
-                await MainActor.run {
-                    keySyncStatusMessage = "Resync requested from phone."
-                }
-            } catch {
-                await MainActor.run {
-                    keySyncStatusMessage = "Resync request failed: \(error.localizedDescription)"
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var e2eeKeyMismatchBanner: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Image(systemName: "exclamationmark.shield.fill")
-                    .foregroundColor(.orange)
-                Text("Encryption keys changed")
-                    .font(.subheadline)
-                    .fontWeight(.semibold)
-                Spacer()
-            }
-            Text(appState.e2eeKeyMismatchMessage ?? "Encryption keys are syncing automatically. Keep your phone online to finish.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-
-            HStack(spacing: 8) {
-                Button(isKeySyncInProgress ? "Syncing..." : "Retry Now") {
-                    guard let userId = appState.userId,
-                          let deviceId = UserDefaults.standard.string(forKey: "syncflow_device_id") else {
-                        return
-                    }
-                    startKeySync(userId: userId, deviceId: deviceId)
-                }
-                .disabled(isKeySyncInProgress)
-
-                Button("Resync Messages") {
-                    guard let userId = appState.userId else { return }
-                    requestResync(userId: userId)
-                }
-
-                Button("Dismiss") {
-                    appState.e2eeKeyMismatch = false
-                }
-                .buttonStyle(.plain)
-                .foregroundColor(.secondary)
-            }
-
-            if let status = keySyncStatusMessage {
-                Text(status)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-        }
-        .padding(12)
-        .background(Color(nsColor: .controlBackgroundColor))
-        .overlay(
-            Rectangle()
-                .fill(Color.orange)
-                .frame(width: 3),
-            alignment: .leading
-        )
-    }
 
     // MARK: - Constants
 
@@ -430,14 +288,6 @@ struct MessageView: View {
             Rectangle()
                 .fill(SyncFlowColors.divider)
                 .frame(height: 1)
-
-            if appState.e2eeKeyMismatch {
-                e2eeKeyMismatchBanner
-
-                Rectangle()
-                    .fill(SyncFlowColors.divider)
-                    .frame(height: 1)
-            }
 
             // Search bar
             if showSearch {
@@ -787,7 +637,6 @@ struct MessageView: View {
                 draft: messageText
             )
             applyContinuityDraftIfNeeded()
-            appState.refreshE2eeKeyStatus()
         }
         .onChange(of: conversation.address) { _ in
             appState.continuityService.publishConversation(
@@ -1665,7 +1514,7 @@ struct ConversationHeader: View {
 
         Task {
             do {
-                let sims = try await FirebaseService.shared.getAvailableSims(userId: userId)
+                let sims = try await VPSService.shared.getAvailableSims(userId: userId)
                 await MainActor.run {
                     availableSims = sims
                     // Select first SIM as default if available
@@ -1694,10 +1543,8 @@ struct ConversationHeader: View {
                 // Use selected SIM if available and there are multiple SIMs
                 let simId = (availableSims.count > 1) ? selectedSim?.subscriptionId : nil
 
-                try await FirebaseService.shared.requestCall(
-                    userId: userId,
-                    to: effectiveSendAddress,
-                    contactName: conversation.contactName,
+                try await VPSService.shared.requestCall(
+                    phoneNumber: effectiveSendAddress,
                     simSubscriptionId: simId
                 )
 
@@ -1729,7 +1576,7 @@ struct ConversationHeader: View {
 
         Task {
             do {
-                let devices = try await FirebaseService.shared.getPairedDevices(userId: userId)
+                let devices = try await VPSService.shared.getPairedDevices(userId: userId)
                 await MainActor.run {
                     pairedDevices = devices
                     // Devices loaded
@@ -2042,11 +1889,36 @@ struct MessageBubble: View {
                         .font(.caption2)
                         .foregroundColor(.secondary)
 
-                    // Delivered/Read indicator for sent messages
+                    // Delivery status indicator for sent messages
                     if !message.isReceived {
-                        Image(systemName: "checkmark")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
+                        if message.id.hasPrefix("optimistic_") || message.deliveryStatus == "sending" {
+                            // Pending/sending — clock icon
+                            Image(systemName: "clock")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        } else if message.deliveryStatus == "delivered" {
+                            // Delivered — double checkmark
+                            ZStack(alignment: .leading) {
+                                Image(systemName: "checkmark")
+                                    .font(.caption2)
+                                    .foregroundColor(.blue)
+                                Image(systemName: "checkmark")
+                                    .font(.caption2)
+                                    .foregroundColor(.blue)
+                                    .offset(x: 4)
+                            }
+                            .frame(width: 16)
+                        } else if message.deliveryStatus == "failed" {
+                            // Failed — exclamation
+                            Image(systemName: "exclamationmark.circle")
+                                .font(.caption2)
+                                .foregroundColor(.red)
+                        } else {
+                            // Sent (default) — single checkmark
+                            Image(systemName: "checkmark")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
                     }
                 }
 
@@ -2737,7 +2609,7 @@ struct AttachmentView: View {
             let downloadUrl = try await getR2DownloadUrl(r2Key: r2Key)
             rawData = try await AttachmentCacheManager.shared.loadData(from: downloadUrl)
         } else if let urlString = attachment.url {
-            // Legacy Firebase Storage URL or direct URL
+            // Legacy Storage URL or direct URL
             rawData = try await AttachmentCacheManager.shared.loadData(from: urlString)
         } else if let inlineData = attachment.inlineData,
                   let decoded = Data(base64Encoded: inlineData) {

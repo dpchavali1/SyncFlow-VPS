@@ -1,5 +1,6 @@
 # Podfile for SyncFlowMac
-# VPS-only mode - Firebase and WebRTC removed
+# WebRTC is now added via Swift Package Manager (stasel/WebRTC)
+# This Podfile is kept empty for reference.
 
 source 'https://cdn.cocoapods.org/'
 
@@ -7,15 +8,4 @@ platform :macos, '14.0'
 
 target 'SyncFlowMac' do
   use_frameworks!
-
-  # No external dependencies - using VPS backend only
-  # All networking handled via URLSession and native WebSocket
-end
-
-post_install do |installer|
-  installer.pods_project.targets.each do |target|
-    target.build_configurations.each do |config|
-      config.build_settings['MACOSX_DEPLOYMENT_TARGET'] = '14.0'
-    end
-  end
 end

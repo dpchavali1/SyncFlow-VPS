@@ -6,11 +6,7 @@
 //
 //  This file defines the data model for phone call history, including incoming, outgoing,
 //  missed, rejected, blocked, and voicemail calls. Call history is synchronized from the
-//  Android device via Firebase, allowing users to view their complete call log on macOS.
-//
-//  ## Firebase Data Structure
-//  Call history entries are stored at: `users/{userId}/callHistory/{callId}`
-//  The Android app uploads call log entries, and the Mac app observes them in real-time.
+//  Android device via VPS, allowing users to view their complete call log on macOS.
 //
 //  ## Type Mapping
 //  Call types follow Android's CallLog.Calls constants:
@@ -23,8 +19,8 @@
 //
 //  ## Serialization Notes
 //  This model does not conform to Codable directly. Instead, it uses a factory method
-//  `from(_:id:)` to parse Firebase dictionary data, handling the type flexibility of
-//  Firebase's JSON (numbers may be Int, Int64, or Double).
+//  `from(_:id:)` to parse dictionary data, handling type flexibility
+//  (numbers may be Int, Int64, or Double).
 //
 
 import Foundation
@@ -43,9 +39,9 @@ import Foundation
 ///
 /// ## Relationships
 /// - Related to: `Conversation` - A call may be associated with an existing conversation by phone number
-/// - Created by: `from(_:id:)` factory method for Firebase data parsing
+/// - Created by: `from(_:id:)` factory method for data parsing
 struct CallHistoryEntry: Identifiable, Hashable {
-    /// Unique identifier for this call entry, typically the Firebase key
+    /// Unique identifier for this call entry, typically the entry key
     let id: String
 
     /// Phone number of the caller or recipient.
@@ -60,7 +56,7 @@ struct CallHistoryEntry: Identifiable, Hashable {
     /// Type/direction of the call (incoming, outgoing, missed, etc.)
     let callType: CallType
 
-    /// When the call occurred, converted from Firebase milliseconds to Swift Date
+    /// When the call occurred, converted from milliseconds to Swift Date
     let callDate: Date
 
     /// Duration of the call in seconds. Zero for missed/rejected calls.
@@ -102,7 +98,7 @@ struct CallHistoryEntry: Identifiable, Hashable {
 
         /// Parses a call type from a string value, supporting both text names and numeric codes.
         ///
-        /// This handles the various formats that Firebase data may contain:
+        /// This handles the various formats that JSON data may contain:
         /// - Lowercase text: "incoming", "outgoing", etc.
         /// - Android CallLog.Calls numeric constants: "1", "2", "3", etc.
         /// - Raw enum values: "Incoming", "Outgoing", etc.
@@ -177,9 +173,9 @@ struct CallHistoryEntry: Identifiable, Hashable {
 
     // MARK: - Factory Method
 
-    /// Creates a CallHistoryEntry from a Firebase dictionary.
+    /// Creates a CallHistoryEntry from a dictionary.
     ///
-    /// This factory method handles the parsing complexities of Firebase data:
+    /// This factory method handles the parsing complexities of JSON data:
     /// - Numbers may arrive as Int, Int64, or Double depending on their value
     /// - Timestamps may be stored under different field names ("callDate", "date", "timestamp")
     /// - Missing or empty values are handled with sensible defaults
@@ -197,8 +193,8 @@ struct CallHistoryEntry: Identifiable, Hashable {
     /// - `simId`: Numeric, defaults to 0
     ///
     /// - Parameters:
-    ///   - data: Dictionary of key-value pairs from Firebase
-    ///   - id: The Firebase key to use as the entry's identifier
+    ///   - data: Dictionary of key-value pairs
+    ///   - id: The key to use as the entry's identifier
     /// - Returns: A CallHistoryEntry if parsing succeeds, or nil if required fields are missing/invalid
     static func from(_ data: [String: Any], id: String) -> CallHistoryEntry? {
         // Validate required fields: phoneNumber and callType
@@ -208,7 +204,7 @@ struct CallHistoryEntry: Identifiable, Hashable {
             return nil
         }
 
-        // Handle callDate - Firebase stores Long as Double
+        // Handle callDate - Long may come as Double
         // Also check for "date" and "timestamp" as alternative field names
         // This flexibility accommodates different data formats from the Android app
         let callDate: Double
@@ -237,7 +233,7 @@ struct CallHistoryEntry: Identifiable, Hashable {
         // Contact name is optional - may be nil if not in address book
         let contactName = data["contactName"] as? String
 
-        // Handle duration - Firebase stores Long as Double
+        // Handle duration - Long may come as Double
         // Defaults to 0 for missed/rejected calls or if not provided
         let duration: Int
         if let durationInt = data["duration"] as? Int {
@@ -254,7 +250,7 @@ struct CallHistoryEntry: Identifiable, Hashable {
         let formattedDuration = data["formattedDuration"] as? String ?? "0:00"
         let formattedDate = data["formattedDate"] as? String ?? ""
 
-        // Handle simId - Firebase stores Long as Double
+        // Handle simId - Long may come as Double
         // Defaults to 0 (primary SIM) if not provided
         let simId: Int
         if let simIdInt = data["simId"] as? Int {

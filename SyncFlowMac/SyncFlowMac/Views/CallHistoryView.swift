@@ -6,7 +6,6 @@
 //
 
 import SwiftUI
-// FirebaseDatabase - using FirebaseStubs.swift
 import Combine
 
 struct CallHistoryView: View {

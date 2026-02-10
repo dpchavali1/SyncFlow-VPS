@@ -90,7 +90,7 @@ import androidx.lifecycle.LifecycleEventObserver
  * - Thread-safe with Compose state
  * - Supports force refresh when needed
  */
-private object PairedDevicesCache {
+internal object PairedDevicesCache {
     private val _devices = mutableStateListOf<PairedDevice>()
     val devices: List<PairedDevice> get() = _devices.toList()
 
@@ -409,11 +409,32 @@ fun DesktopIntegrationScreen(
         }
     }
 
+    // Sync spam messages after successful pairing
+    suspend fun syncInitialSpam() {
+        withContext(Dispatchers.IO) {
+            try {
+                android.util.Log.d("DesktopIntegrationScreen", "Starting initial spam sync")
+
+                val syncService = com.phoneintegration.app.desktop.DesktopSyncService(appContext)
+                val spamDao = com.phoneintegration.app.data.database.AppDatabase.getInstance(appContext).spamMessageDao()
+                val localSpam = spamDao.getSpamMessages()
+                if (localSpam.isNotEmpty()) {
+                    syncService.syncSpamMessages(localSpam)
+                    android.util.Log.d("DesktopIntegrationScreen", "Initial spam sync completed: ${localSpam.size} messages")
+                } else {
+                    android.util.Log.d("DesktopIntegrationScreen", "No local spam messages to sync")
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("DesktopIntegrationScreen", "Error during initial spam sync", e)
+            }
+        }
+    }
+
     // Load devices when screen appears + validate device is still registered
     LaunchedEffect(Unit) {
         android.util.Log.d("DesktopIntegrationScreen", "Screen appeared, loading devices...")
         refreshSettings()
-        loadDevices(forceRefresh = false)
+        loadDevices(forceRefresh = true)
 
         // Check if this device is still registered on the server
         val vpsSyncService = VPSSyncService.getInstance(appContext)
@@ -507,20 +528,19 @@ fun DesktopIntegrationScreen(
                                     successMessage = "Successfully joined sync group! (${joinResult.deviceCount}/${joinResult.deviceLimit} devices)"
                                     showSuccessDialog = true
                                     // Trigger initial data sync for newly joined group
-                                    scope.launch(Dispatchers.IO) {
-                                        try {
-                                            // Ensure full sync on new pairing
-                                            appContext.getSharedPreferences("vps_sync_prefs", Context.MODE_PRIVATE)
-                                                .edit()
-                                                .remove("last_message_sync_time")
-                                                .apply()
-                                            android.util.Log.d("DesktopIntegrationScreen", "Starting initial data sync after sync group join")
-                                            syncInitialMessages()
-                                            syncInitialContacts()
-                                            syncInitialCallHistory()
-                                        } catch (e: Exception) {
-                                            android.util.Log.e("DesktopIntegrationScreen", "Error syncing data after sync group join", e)
-                                        }
+                                    // Use NonCancellable so navigation away doesn't kill the sync
+                                    scope.launch(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
+                                        // Ensure full sync on new pairing
+                                        appContext.getSharedPreferences("vps_sync_prefs", Context.MODE_PRIVATE)
+                                            .edit()
+                                            .remove("last_message_sync_time")
+                                            .apply()
+                                        android.util.Log.d("DesktopIntegrationScreen", "Starting initial data sync after sync group join")
+                                        // Run all three syncs independently so one failure doesn't block others
+                                        syncInitialMessages()
+                                        syncInitialContacts()
+                                        syncInitialCallHistory()
+                                        syncInitialSpam()
                                     }
                                     // Refresh device list immediately (server already registered the device)
                                     loadDevices(forceRefresh = true)
@@ -585,9 +605,10 @@ fun DesktopIntegrationScreen(
                                             platform = tokenData.platform,
                                             lastSeen = System.currentTimeMillis()
                                         )
-                                        PairedDevicesCache.updateDevices(
-                                            PairedDevicesCache.devices + newDevice
-                                        )
+                                        val updatedDevices = PairedDevicesCache.devices + newDevice
+                                        PairedDevicesCache.updateDevices(updatedDevices)
+                                        // Also update SharedPreferences so SettingsScreen sees the pairing
+                                        DesktopSyncService.updatePairedDevicesCache(context, true, updatedDevices.size)
                                     }
 
                                     // CRITICAL: Push E2EE keys IMMEDIATELY after pairing
@@ -661,17 +682,8 @@ fun DesktopIntegrationScreen(
                                     android.util.Log.d("DesktopIntegrationScreen", "Starting CallMonitorService for VPS phone call sync")
                                     CallMonitorService.start(context)
 
-                                    // CRITICAL: Start IntelligentSyncManager's heavy polling
-                                    // Without this, ongoing message/call sync never starts after pairing
-                                    try {
-                                        com.phoneintegration.app.services.IntelligentSyncManager
-                                            .getInstance(context).startAfterPairing()
-                                        android.util.Log.d("DesktopIntegrationScreen", "IntelligentSyncManager started after VPS pairing")
-                                    } catch (e: Exception) {
-                                        android.util.Log.e("DesktopIntegrationScreen", "Failed to start IntelligentSyncManager", e)
-                                    }
-
-                                    // Trigger initial VPS data sync
+                                    // Trigger initial VPS data sync, THEN start IntelligentSyncManager
+                                    // (starting ISM first causes concurrent duplicate MMS uploads)
                                     scope.launch(Dispatchers.IO) {
                                         try {
                                             android.util.Log.d("DesktopIntegrationScreen", "Starting initial VPS data sync after pairing")
@@ -688,10 +700,19 @@ fun DesktopIntegrationScreen(
                                         } catch (e: Exception) {
                                             android.util.Log.e("DesktopIntegrationScreen", "Error syncing VPS data", e)
                                         }
+
+                                        // Start IntelligentSyncManager AFTER initial sync completes
+                                        withContext(Dispatchers.Main) {
+                                            try {
+                                                com.phoneintegration.app.services.IntelligentSyncManager
+                                                    .getInstance(context).startAfterPairing()
+                                                android.util.Log.d("DesktopIntegrationScreen", "IntelligentSyncManager started after VPS pairing")
+                                            } catch (e: Exception) {
+                                                android.util.Log.e("DesktopIntegrationScreen", "Failed to start IntelligentSyncManager", e)
+                                            }
+                                        }
                                     }
 
-                                    // Refresh device list immediately (server already registered the device)
-                                    loadDevices(forceRefresh = true)
                                 } catch (e: Exception) {
                                     android.util.Log.e("DesktopIntegrationScreen", "VPS pairing failed", e)
                                     errorMessage = e.message ?: "Failed to complete VPS pairing"
@@ -828,20 +849,18 @@ fun DesktopIntegrationScreen(
                                         }
 
                                         // Trigger initial data sync immediately
-                                        scope.launch(Dispatchers.IO) {
-                                            try {
-                                                // Ensure full sync on new pairing
-                                                appContext.getSharedPreferences("vps_sync_prefs", Context.MODE_PRIVATE)
-                                                    .edit()
-                                                    .remove("last_message_sync_time")
-                                                    .apply()
-                                                android.util.Log.d("DesktopIntegrationScreen", "Starting initial data sync after pairing")
-                                                syncInitialMessages()
-                                                syncInitialContacts()
-                                                syncInitialCallHistory()
-                                            } catch (e: Exception) {
-                                                android.util.Log.e("DesktopIntegrationScreen", "Error syncing data", e)
-                                            }
+                                        // Use NonCancellable so navigation away doesn't kill the sync
+                                        scope.launch(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
+                                            // Ensure full sync on new pairing
+                                            appContext.getSharedPreferences("vps_sync_prefs", Context.MODE_PRIVATE)
+                                                .edit()
+                                                .remove("last_message_sync_time")
+                                                .apply()
+                                            android.util.Log.d("DesktopIntegrationScreen", "Starting initial data sync after pairing")
+                                            syncInitialMessages()
+                                            syncInitialContacts()
+                                            syncInitialCallHistory()
+                                            syncInitialSpam()
                                         }
 
                                         // Refresh device list immediately (server already registered the device)
@@ -883,19 +902,17 @@ fun DesktopIntegrationScreen(
                                         showSuccessDialog = true
                                         // Start CallMonitorService for phone call sync
                                         CallMonitorService.start(context)
-                                        scope.launch(Dispatchers.IO) {
-                                            try {
-                                                // Ensure full sync on new pairing
-                                                appContext.getSharedPreferences("vps_sync_prefs", Context.MODE_PRIVATE)
-                                                    .edit()
-                                                    .remove("last_message_sync_time")
-                                                    .apply()
-                                                syncInitialMessages()
-                                                syncInitialContacts()
-                                                syncInitialCallHistory()
-                                            } catch (e: Exception) {
-                                                android.util.Log.e("DesktopIntegrationScreen", "Error syncing messages", e)
-                                            }
+                                        // Use NonCancellable so navigation away doesn't kill the sync
+                                        scope.launch(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
+                                            // Ensure full sync on new pairing
+                                            appContext.getSharedPreferences("vps_sync_prefs", Context.MODE_PRIVATE)
+                                                .edit()
+                                                .remove("last_message_sync_time")
+                                                .apply()
+                                            syncInitialMessages()
+                                            syncInitialContacts()
+                                            syncInitialCallHistory()
+                                            syncInitialSpam()
                                         }
                                         // Refresh device list immediately (server already registered the device)
                                         loadDevices(forceRefresh = true)

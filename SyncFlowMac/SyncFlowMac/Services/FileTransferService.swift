@@ -287,9 +287,16 @@ class FileTransferService: ObservableObject {
             do {
                 let response = try await vpsService.getFileTransfers()
 
+                // Log pending incoming transfers for debugging
+                let incoming = response.transfers.filter { $0.source != "macos" && $0.status == "pending" }
+                if !incoming.isEmpty {
+                    print("[FileTransfer] Found \(incoming.count) incoming pending transfers: \(incoming.map { "\($0.id) from \($0.source)" })")
+                }
+
                 for transfer in response.transfers {
                     // Only process files not from macOS that are pending
-                    guard transfer.source != "macos", transfer.status == "pending" else { continue }
+                    guard transfer.source != nil, transfer.source != "macos",
+                          transfer.status == "pending" else { continue }
 
                     // Prevent duplicate processing
                     guard !processingFileIds.contains(transfer.id) else { continue }
@@ -301,7 +308,16 @@ class FileTransferService: ObservableObject {
                     // Check if file is recent (within last 5 minutes)
                     let fileDate = Date(timeIntervalSince1970: timestamp / 1000)
                     guard Date().timeIntervalSince(fileDate) < 300 else {
-                        print("[FileTransfer] Ignoring old file transfer: \(transfer.id)")
+                        // Clean up stale transfers so they stop appearing in polls
+                        if !processingFileIds.contains(transfer.id) {
+                            processingFileIds.insert(transfer.id)
+                            print("[FileTransfer] Cleaning up stale transfer: \(transfer.id)")
+                            Task {
+                                try? await vpsService.updateFileTransferStatus(id: transfer.id, status: "failed", error: "Expired")
+                                try? await vpsService.deleteFileTransfer(id: transfer.id)
+                                processingFileIds.remove(transfer.id)
+                            }
+                        }
                         continue
                     }
 
@@ -315,15 +331,14 @@ class FileTransferService: ObservableObject {
                             fileId: transfer.id,
                             fileName: transfer.fileName,
                             fileSize: transfer.fileSize,
-                            contentType: transfer.contentType,
+                            contentType: transfer.contentType ?? "application/octet-stream",
                             r2Key: r2Key
                         )
                         processingFileIds.remove(transfer.id)
                     }
                 }
             } catch {
-                // Silently ignore polling errors to avoid log spam
-                // (network hiccups, server restarts, etc.)
+                print("[FileTransfer] Polling error: \(error.localizedDescription)")
             }
         }
     }
@@ -551,6 +566,7 @@ class FileTransferService: ObservableObject {
 
             // Step 3: Confirm upload to record usage
             try await vpsService.confirmFileUpload(fileKey: r2Key, fileSize: fileSize)
+            print("[FileTransfer] Upload confirmed for r2Key: \(r2Key)")
 
             updateStatus(id: fileId, fileName: fileName, state: .uploading, progress: 0.9, error: nil)
 
@@ -563,6 +579,7 @@ class FileTransferService: ObservableObject {
                 r2Key: r2Key,
                 source: "macos"
             )
+            print("[FileTransfer] Transfer record created: \(fileName), source=macos, r2Key=\(r2Key)")
 
             updateStatus(id: fileId, fileName: fileName, state: .sent, progress: 1, error: nil)
 

@@ -74,20 +74,8 @@ struct ContentView: View {
     /// The central application state injected from SyncFlowMacApp
     @EnvironmentObject var appState: AppState
 
-    /// Check if VPS mode is enabled (uses VPS server instead of Firebase)
-    /// Set via UserDefaults or environment variable
-    private var isVPSMode: Bool {
-        // Check UserDefaults for VPS mode setting
-        if UserDefaults.standard.bool(forKey: "useVPSMode") {
-            return true
-        }
-        // Check if VPS URL is configured via environment
-        if let vpsUrl = ProcessInfo.processInfo.environment["SYNCFLOW_VPS_URL"], !vpsUrl.isEmpty {
-            return true
-        }
-        // Default to VPS mode for new installs (can be changed to false for Firebase)
-        return true
-    }
+    /// VPS mode is always enabled
+    private var isVPSMode: Bool { true }
 
     // =========================================================================
     // MARK: - View Body
@@ -259,7 +247,7 @@ struct MainView: View {
     /// Modal presentation flags
     @State private var showKeyboardShortcuts = false
     @State private var showAIAssistant = false
-    @State private var showSupportChat = false
+    // showSupportChat is on appState so Help menu can trigger it too
 
     // =========================================================================
     // MARK: - View Body
@@ -271,7 +259,7 @@ struct MainView: View {
                 selectedTab: $appState.selectedTab,
                 onNewMessage: { appState.showNewMessage = true },
                 onAIAssistant: { showAIAssistant = true },
-                onSupportChat: { showSupportChat = true }
+                onSupportChat: { appState.showSupportChat = true }
             )
 
             Divider()
@@ -400,7 +388,7 @@ struct MainView: View {
                 .frame(minWidth: 500, minHeight: 600)
         }
         // Support Chat sheet
-        .sheet(isPresented: $showSupportChat) {
+        .sheet(isPresented: $appState.showSupportChat) {
             SupportChatView()
                 .environmentObject(appState)
         }

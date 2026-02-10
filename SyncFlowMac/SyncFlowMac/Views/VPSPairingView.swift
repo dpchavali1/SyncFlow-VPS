@@ -2,7 +2,7 @@
  * VPS Pairing View
  *
  * Displays a QR code for pairing with Android device via VPS server.
- * This replaces the Firebase-based pairing flow.
+ * VPS-based pairing flow.
  */
 
 import SwiftUI

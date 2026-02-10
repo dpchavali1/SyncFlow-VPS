@@ -89,6 +89,7 @@ import {
   Pencil,
   X,
   Check,
+  Clock,
 } from 'lucide-react'
 import { costMonitor } from '@/lib/monitoring'
 import { cacheManager } from '@/lib/cache'
@@ -223,7 +224,7 @@ export default function AdminCleanupPage() {
   // ============================================
   // NAVIGATION AND DATA STATE
   // ============================================
-  const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'data' | 'costs' | 'storage' | 'crashes' | 'testing' | 'monitoring' | 'database' | 'lookup' | 'live' | 'logs'>('overview')
+  const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'deletions' | 'data' | 'costs' | 'storage' | 'crashes' | 'testing' | 'monitoring' | 'database' | 'lookup' | 'live' | 'logs'>('overview')
   const [systemOverview, setSystemOverview] = useState<SystemOverview | null>(null)
   const [detailedCleanupOverview, setDetailedCleanupOverview] = useState<any | null>(null)
   const [detailedUsers, setDetailedUsers] = useState<DetailedUser[]>([])
@@ -238,6 +239,8 @@ export default function AdminCleanupPage() {
   const [hasPrevPage, setHasPrevPage] = useState(false)
   const [isLoadingUsers, setIsLoadingUsers] = useState(false)
   const [usersError, setUsersError] = useState<string | null>(null)
+  const [pendingDeletions, setPendingDeletions] = useState<any[]>([])
+  const [pendingDeletionsLoading, setPendingDeletionsLoading] = useState(false)
 
   /**
    * Handler for user filter dropdown changes
@@ -254,6 +257,7 @@ export default function AdminCleanupPage() {
   const [deletingUser, setDeletingUser] = useState<string | null>(null)
   const [isRunningBulkDelete, setIsRunningBulkDelete] = useState(false)
   const [isRunningDeviceCleanup, setIsRunningDeviceCleanup] = useState(false)
+  const [isCleaningE2ee, setIsCleaningE2ee] = useState(false)
 
   // ============================================
   // COST OPTIMIZATION STATE
@@ -758,6 +762,60 @@ export default function AdminCleanupPage() {
     })
   }
 
+  const loadPendingDeletions = async () => {
+    setPendingDeletionsLoading(true)
+    try {
+      const data = await vpsService.getPendingDeletions()
+      setPendingDeletions(data.pendingDeletions || [])
+    } catch (error) {
+      console.error('Failed to load pending deletions:', error)
+    } finally {
+      setPendingDeletionsLoading(false)
+    }
+  }
+
+  const handleProcessDeletion = async (userId: string) => {
+    setConfirmDialog({
+      open: true,
+      title: 'Process Account Deletion?',
+      message: `This will permanently delete ALL data for user "${userId}" immediately.\n\nThis action cannot be undone.`,
+      confirmButtonText: 'Delete Now',
+      onConfirm: async () => {
+        setConfirmDialog(null)
+        try {
+          await vpsService.processUserDeletion(userId)
+          addLog(`Processed deletion for user ${userId}`)
+          await loadPendingDeletions()
+          await loadDetailedUsers()
+          await loadSystemOverview()
+        } catch (error) {
+          addLog(`Error processing deletion for ${userId}`)
+          console.error(error)
+        }
+      }
+    })
+  }
+
+  const handleCancelDeletion = async (userId: string) => {
+    setConfirmDialog({
+      open: true,
+      title: 'Cancel Pending Deletion?',
+      message: `This will cancel the pending deletion for user "${userId}" and restore their account.`,
+      confirmButtonText: 'Keep Account',
+      onConfirm: async () => {
+        setConfirmDialog(null)
+        try {
+          await vpsService.cancelUserDeletion(userId)
+          addLog(`Cancelled deletion for user ${userId}`)
+          await loadPendingDeletions()
+        } catch (error) {
+          addLog(`Error cancelling deletion for ${userId}`)
+          console.error(error)
+        }
+      }
+    })
+  }
+
   /**
    * Implements a cost optimization recommendation
    * Routes to the appropriate cleanup function based on recommendation type
@@ -906,6 +964,40 @@ export default function AdminCleanupPage() {
       console.error(error)
     } finally {
       setIsRunningDeviceCleanup(false)
+    }
+  }
+
+  const handleE2eeCleanup = async () => {
+    if (!userId) {
+      addLog('Cannot run E2EE cleanup: Authentication required')
+      return
+    }
+
+    setIsCleaningE2ee(true)
+    addLog('Starting E2EE key cleanup...')
+
+    try {
+      const result = await vpsService.cleanupE2eeKeys()
+
+      if (result.success) {
+        addLog(`✅ E2EE cleanup complete! Removed ${result.totalCleaned} items`)
+        const b = result.breakdown || {}
+        if (b.staleDeviceKeys > 0) addLog(`  🔑 Stale device keys (90d+): ${b.staleDeviceKeys}`)
+        if (b.orphanedDeviceKeys > 0) addLog(`  🗑️ Orphaned device keys: ${b.orphanedDeviceKeys}`)
+        if (b.orphanedPublicKeys > 0) addLog(`  🗑️ Orphaned public keys: ${b.orphanedPublicKeys}`)
+        if (b.keysForMissingDevices > 0) addLog(`  📱 Keys for missing devices: ${b.keysForMissingDevices}`)
+        if (b.publicKeysForMissingDevices > 0) addLog(`  📱 Public keys for missing devices: ${b.publicKeysForMissingDevices}`)
+        if (b.expiredKeyRequests > 0) addLog(`  ⏰ Expired key requests: ${b.expiredKeyRequests}`)
+        if (b.expiredKeyResponses > 0) addLog(`  ⏰ Expired key responses: ${b.expiredKeyResponses}`)
+        if (result.totalCleaned === 0) addLog('  ✨ All E2EE keys are clean — nothing to remove')
+      } else {
+        addLog(`❌ E2EE cleanup failed`)
+      }
+    } catch (error) {
+      addLog('Error during E2EE cleanup')
+      console.error(error)
+    } finally {
+      setIsCleaningE2ee(false)
     }
   }
 
@@ -1884,6 +1976,7 @@ export default function AdminCleanupPage() {
           { id: 'live', label: 'Live', icon: Wifi },
           { id: 'logs', label: 'Logs', icon: ScrollText },
           { id: 'users', label: 'Users', icon: Users },
+          { id: 'deletions', label: 'Deletions', icon: UserX },
           { id: 'data', label: 'Data & Cleanup', icon: Database },
           { id: 'storage', label: 'R2 Storage', icon: Cloud },
           { id: 'crashes', label: 'Crash Reports', icon: AlertTriangle },
@@ -1902,9 +1995,11 @@ export default function AdminCleanupPage() {
               if (id === 'live') loadLiveSessions()
               if (id === 'logs') loadServerLogs()
               if (id === 'users' && detailedUsers.length === 0 && totalUserCount === 0) loadDetailedUsers(0)
+              if (id === 'deletions') loadPendingDeletions()
               if (id === 'costs' && costRecommendations.length === 0) loadCostRecommendations()
               if (id === 'storage' && !r2Analytics) loadR2Analytics()
               if (id === 'crashes' && crashReports.length === 0) loadCrashReports()
+              if (id === 'data' && !e2eeHealth) vpsService.getAdminE2EEHealth().then(setE2eeHealth).catch(() => {})
               if (id === 'database' && dbTables.length === 0) { loadDbTables(); loadDbHealth() }
             }}
             className={`flex-shrink-0 flex items-center gap-2 px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap ${
@@ -1915,6 +2010,11 @@ export default function AdminCleanupPage() {
           >
             <Icon className="w-4 h-4" />
             {label}
+            {id === 'deletions' && pendingDeletions.length > 0 && (
+              <span className="ml-1 px-1.5 py-0.5 bg-red-600 text-white text-xs rounded-full font-bold">
+                {pendingDeletions.length}
+              </span>
+            )}
           </button>
         ))}
       </div>
@@ -2522,6 +2622,116 @@ export default function AdminCleanupPage() {
           </div>
         )}
 
+        {/* ========== DELETIONS TAB ==========
+            Dedicated tab for managing pending account deletion requests */}
+        {activeTab === 'deletions' && (
+          <div className="space-y-6">
+            <div className="bg-gray-800 rounded-xl p-6">
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 bg-red-900/50 rounded-lg">
+                    <UserX className="w-6 h-6 text-red-400" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-bold">Pending Account Deletions</h2>
+                    <p className="text-sm text-gray-400">Users who requested account deletion (auto-deletes after 30 days)</p>
+                  </div>
+                </div>
+                <button
+                  onClick={loadPendingDeletions}
+                  disabled={pendingDeletionsLoading}
+                  className="flex items-center gap-2 px-4 py-2 bg-gray-700 hover:bg-gray-600 disabled:bg-gray-800 rounded-lg transition-colors"
+                >
+                  {pendingDeletionsLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                  Refresh
+                </button>
+              </div>
+
+              {pendingDeletionsLoading && pendingDeletions.length === 0 ? (
+                <div className="text-center py-12 text-gray-400">
+                  <Loader2 className="w-6 h-6 animate-spin mx-auto mb-3" />
+                  Loading pending deletions...
+                </div>
+              ) : pendingDeletions.length === 0 ? (
+                <div className="text-center py-12">
+                  <Check className="w-12 h-12 text-green-500 mx-auto mb-3" />
+                  <p className="text-lg font-medium text-gray-300">No Pending Deletions</p>
+                  <p className="text-sm text-gray-500 mt-1">All accounts are in good standing</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {pendingDeletions.map((d: any) => {
+                    const totalDays = 30
+                    const elapsed = totalDays - d.daysRemaining
+                    const progressPct = Math.min(100, Math.round((elapsed / totalDays) * 100))
+                    const isUrgent = d.daysRemaining <= 3
+                    const isWarning = d.daysRemaining <= 7
+
+                    return (
+                      <div key={d.userId} className={`rounded-xl border p-5 ${
+                        isUrgent ? 'bg-red-950/40 border-red-700' : isWarning ? 'bg-yellow-950/30 border-yellow-800' : 'bg-gray-900/50 border-gray-700'
+                      }`}>
+                        <div className="flex items-start justify-between mb-4">
+                          <div>
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="font-mono text-sm text-blue-400">{d.userId}</span>
+                              {isUrgent && <span className="px-2 py-0.5 bg-red-600 text-white text-xs rounded-full font-bold animate-pulse">URGENT</span>}
+                            </div>
+                            <div className="flex items-center gap-4 text-sm text-gray-400">
+                              {d.email && <span>{d.email}</span>}
+                              {d.phone && <span>{d.phone}</span>}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => handleCancelDeletion(d.userId)}
+                              className="px-4 py-2 bg-gray-600 hover:bg-gray-500 text-white text-sm font-medium rounded-lg transition-colors"
+                            >
+                              Cancel Deletion
+                            </button>
+                            <button
+                              onClick={() => handleProcessDeletion(d.userId)}
+                              className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-lg transition-colors"
+                            >
+                              Delete Now
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Progress bar */}
+                        <div className="mb-3">
+                          <div className="flex items-center justify-between text-xs mb-1">
+                            <span className="text-gray-400">Requested: {new Date(d.requestedAt).toLocaleDateString()}</span>
+                            <span className={`font-bold ${isUrgent ? 'text-red-400' : isWarning ? 'text-yellow-400' : 'text-gray-300'}`}>
+                              <Clock className="w-3 h-3 inline mr-1" />
+                              {d.daysRemaining} days remaining
+                            </span>
+                            <span className="text-gray-400">Auto-delete: {new Date(d.scheduledFor).toLocaleDateString()}</span>
+                          </div>
+                          <div className="w-full bg-gray-700 rounded-full h-2">
+                            <div
+                              className={`h-2 rounded-full transition-all ${
+                                isUrgent ? 'bg-red-500' : isWarning ? 'bg-yellow-500' : 'bg-blue-500'
+                              }`}
+                              style={{ width: `${progressPct}%` }}
+                            />
+                          </div>
+                        </div>
+
+                        {/* Reason */}
+                        <div className="flex items-center gap-2 text-sm">
+                          <span className="text-gray-500">Reason:</span>
+                          <span className="text-gray-300">{d.reason || 'No reason provided'}</span>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* ========== DATA & CLEANUP TAB ==========
             Main cleanup operations organized into sections:
             - Quick Actions (auto cleanup, smart cleanup, scan orphans)
@@ -2900,6 +3110,68 @@ export default function AdminCleanupPage() {
                       className="w-full px-4 py-2 bg-slate-600 text-white text-sm font-medium rounded-lg hover:bg-slate-700 disabled:opacity-50 transition-colors"
                     >
                       {isRunningDeviceCleanup ? 'Cleaning...' : 'Clean Device Registry'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* E2EE Key Management Section */}
+            <div className="bg-white rounded-2xl shadow-lg border border-gray-100 overflow-hidden">
+              <div className="bg-gradient-to-r from-purple-500 to-indigo-600 p-6">
+                <h3 className="text-xl font-bold text-white flex items-center gap-3">
+                  <div className="p-2 bg-white/20 rounded-lg">
+                    <Key className="w-6 h-6 text-white" />
+                  </div>
+                  E2EE Key Management
+                </h3>
+                <p className="text-purple-100 mt-2">Clean up stale, orphaned, and expired encryption keys</p>
+              </div>
+
+              <div className="p-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  <div className="group bg-gradient-to-br from-purple-50 to-indigo-50 border border-purple-200 rounded-xl p-6 hover:shadow-lg transition-all duration-200">
+                    <div className="flex items-start justify-between mb-4">
+                      <div className="p-3 bg-purple-100 rounded-xl group-hover:bg-purple-200 transition-colors">
+                        <Key className="w-6 h-6 text-purple-600" />
+                      </div>
+                      <div className="text-right">
+                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
+                          Security
+                        </span>
+                      </div>
+                    </div>
+
+                    <h4 className="font-bold text-gray-900 mb-2">E2EE Key Cleanup</h4>
+                    <p className="text-sm text-gray-600 mb-4 leading-relaxed">
+                      Remove stale keys (90d+), orphaned keys for deleted users/devices, and expired key exchange requests
+                    </p>
+
+                    <div className="mb-3 space-y-2">
+                      {e2eeHealth && (
+                        <>
+                          <div className="flex justify-between text-xs">
+                            <span className="text-gray-600">Total Keys:</span>
+                            <span className="font-medium text-gray-900">{e2eeHealth.totalKeys}</span>
+                          </div>
+                          <div className="flex justify-between text-xs">
+                            <span className="text-gray-600">Stale Keys (30d+):</span>
+                            <span className={`font-medium ${e2eeHealth.staleKeys > 0 ? 'text-orange-600' : 'text-gray-900'}`}>{e2eeHealth.staleKeys}</span>
+                          </div>
+                          <div className="flex justify-between text-xs">
+                            <span className="text-gray-600">Users With Keys:</span>
+                            <span className="font-medium text-gray-900">{e2eeHealth.usersWithKeys}</span>
+                          </div>
+                        </>
+                      )}
+                    </div>
+
+                    <button
+                      onClick={handleE2eeCleanup}
+                      disabled={isCleaningE2ee}
+                      className="w-full px-4 py-2 bg-purple-600 text-white text-sm font-medium rounded-lg hover:bg-purple-700 disabled:opacity-50 transition-colors"
+                    >
+                      {isCleaningE2ee ? 'Cleaning...' : 'Clean E2EE Keys'}
                     </button>
                   </div>
                 </div>

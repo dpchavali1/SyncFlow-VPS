@@ -60,7 +60,7 @@ package com.phoneintegration.app
 // For incoming calls, the activity can display over the lock screen using:
 // - setShowWhenLocked(true) on API 27+
 // - FLAG_SHOW_WHEN_LOCKED flag on older APIs
-// - KeyguardManager.requestDismissKeyguard() to unlock if needed
+// The call UI shows over the lock screen without forcing unlock.
 //
 // =============================================================================
 
@@ -204,6 +204,9 @@ class MainActivity : ComponentActivity() {
 
     /** Pending conversation to open from notification or deep link */
     private val pendingConversationLaunch = mutableStateOf<ConversationLaunch?>(null)
+
+    /** Pending request to open spam folder from notification */
+    private val pendingOpenSpam = mutableStateOf(false)
 
     /**
      * Data class representing a request to open a specific conversation.
@@ -691,6 +694,9 @@ class MainActivity : ComponentActivity() {
         handleCallIntent(intent)
         handleShareIntent(intent)?.let { pendingSharePayload.value = it }
         handleConversationIntent(intent)?.let { pendingConversationLaunch.value = it }
+        if (intent?.getBooleanExtra("open_spam", false) == true) {
+            pendingOpenSpam.value = true
+        }
 
         // Register broadcast receivers for call dismissal (at Activity level for reliability)
         registerCallBroadcastReceivers()
@@ -879,12 +885,22 @@ class MainActivity : ComponentActivity() {
             // React to service's pending incoming call flow changes (most reliable method)
             LaunchedEffect(servicePendingCall) {
                 android.util.Log.d("MainActivity", "📞 servicePendingCall changed: ${servicePendingCall?.id}")
-                if (servicePendingCall == null && incomingCallId != null) {
+                if (servicePendingCall != null && incomingCallId == null && !showActiveCallScreen) {
+                    // Service has a pending call that UI doesn't know about.
+                    // This happens when the activity is recreated after unlock,
+                    // or when the intent extras are lost.
+                    android.util.Log.d("MainActivity", "📞 Restoring incoming call UI from service flow: ${servicePendingCall!!.id}")
+                    incomingCallId = servicePendingCall!!.id
+                    incomingCallerName = servicePendingCall!!.callerName
+                    incomingIsVideo = servicePendingCall!!.isVideo
+                    enableCallScreenOverLockScreen()
+                } else if (servicePendingCall == null && incomingCallId != null) {
                     // Service says no incoming call, but we're showing one - dismiss it
                     android.util.Log.d("MainActivity", "📞 Service has no pending call, dismissing incoming call UI")
                     incomingCallId = null
                     incomingCallerName = null
                     incomingIsVideo = false
+                    disableCallScreenOverLockScreen()
 
                     // If we were launched from locked screen just for this call, finish the activity
                     if (wasLaunchedFromLockedScreen) {
@@ -995,6 +1011,7 @@ class MainActivity : ComponentActivity() {
                     is SyncFlowCallManager.CallState.Ended,
                     is SyncFlowCallManager.CallState.Failed -> {
                         showActiveCallScreen = false
+                        disableCallScreenOverLockScreen()
                         // If we launched from a locked screen, finish the activity
                         // so user returns to lock screen instead of seeing messages
                         if (wasLaunchedFromLockedScreen) {
@@ -1006,6 +1023,7 @@ class MainActivity : ComponentActivity() {
                     }
                     is SyncFlowCallManager.CallState.Idle -> {
                         showActiveCallScreen = false
+                        disableCallScreenOverLockScreen()
                     }
                     else -> {}
                 }
@@ -1041,7 +1059,9 @@ class MainActivity : ComponentActivity() {
                                 pendingShare = pendingSharePayload.value,
                                 onShareHandled = { pendingSharePayload.value = null },
                                 pendingConversation = pendingConversationLaunch.value,
-                                onConversationHandled = { pendingConversationLaunch.value = null }
+                                onConversationHandled = { pendingConversationLaunch.value = null },
+                                pendingOpenSpam = pendingOpenSpam.value,
+                                onSpamHandled = { pendingOpenSpam.value = false }
                             )
 
                         // Show incoming call screen
@@ -1089,9 +1109,11 @@ class MainActivity : ComponentActivity() {
                         }
 
                         // Show active call screen
+                        // Note: Don't gate on showActiveCallScreen || currentCall because the callee
+                        // never sets _currentCall, and showActiveCallScreen resets on activity recreation.
+                        // Instead, trust callState as the authoritative source.
                         val currentCallManager = callManager
                         if (currentCallManager != null &&
-                            (showActiveCallScreen || currentCall != null) &&
                             (callState == SyncFlowCallManager.CallState.Connected ||
                              callState == SyncFlowCallManager.CallState.Connecting ||
                              callState == SyncFlowCallManager.CallState.Ringing)) {
@@ -1168,6 +1190,9 @@ class MainActivity : ComponentActivity() {
         handleCallIntent(intent)
         handleShareIntent(intent)?.let { pendingSharePayload.value = it }
         handleConversationIntent(intent)?.let { pendingConversationLaunch.value = it }
+        if (intent.getBooleanExtra("open_spam", false)) {
+            pendingOpenSpam.value = true
+        }
     }
 
     private fun handleConversationIntent(intent: Intent?): ConversationLaunch? {
@@ -1336,41 +1361,40 @@ class MainActivity : ComponentActivity() {
         Log.d("MainActivity", "Enabling call screen over lock screen")
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            // API 27+ approach
+            // Show over lock screen WITHOUT dismissing the keyguard
             setShowWhenLocked(true)
             setTurnScreenOn(true)
             Log.d("MainActivity", "Used setShowWhenLocked/setTurnScreenOn")
         } else {
-            // Older API approach using window flags
+            // Older API: show over lock screen without FLAG_DISMISS_KEYGUARD
             @Suppress("DEPRECATION")
             window.addFlags(
                 WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
             )
             Log.d("MainActivity", "Used window flags for lock screen override")
         }
 
-        // Request to dismiss the keyguard (unlock screen)
-        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            keyguardManager.requestDismissKeyguard(this, object : KeyguardManager.KeyguardDismissCallback() {
-                override fun onDismissSucceeded() {
-                    Log.d("MainActivity", "Keyguard dismissed successfully")
-                }
+        // Do NOT call requestDismissKeyguard() here — the call screen (answer/decline)
+        // should display over the lock screen. The keyguard is only dismissed if the
+        // user answers and needs full app access.
 
-                override fun onDismissCancelled() {
-                    Log.d("MainActivity", "Keyguard dismiss cancelled")
-                }
-
-                override fun onDismissError() {
-                    Log.d("MainActivity", "Keyguard dismiss error")
-                }
-            })
-        }
-
-        // Also keep screen on during call
+        // Keep screen on during call
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    private fun disableCallScreenOverLockScreen() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            setShowWhenLocked(false)
+            setTurnScreenOn(false)
+        } else {
+            @Suppress("DEPRECATION")
+            window.clearFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON
+            )
+        }
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
     /** Requests storage permissions when file attachment features are accessed */

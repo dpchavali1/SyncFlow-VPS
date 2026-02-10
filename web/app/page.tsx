@@ -33,12 +33,20 @@ export default function Home() {
     // Check if user is already paired
     // For VPS mode, check VPS tokens; for Firebase mode, check Firebase user ID
     if (isVPSMode) {
-      // Check VPS authentication
-      if (vpsService.isAuthenticated && vpsService.currentUserId) {
+      // VPS auth tokens exist from initiatePairing() even before QR scan completes.
+      // Only redirect to /messages if pairing was fully completed (syncflow_user_id set).
+      const pairingComplete = !!localStorage.getItem('syncflow_user_id')
+      if (vpsService.isAuthenticated && vpsService.currentUserId && pairingComplete) {
         useAppStore.getState().setUserId(vpsService.currentUserId)
         router.push('/messages')
         return
       }
+      // Not fully paired — clear any stale temp tokens and show pairing screen
+      if (!pairingComplete && vpsService.isAuthenticated) {
+        vpsService.clearTokens()
+      }
+      setIsLoading(false)
+      return
     }
 
     // Legacy: check localStorage for Firebase mode
@@ -55,6 +63,7 @@ export default function Home() {
   const handleVPSPairingComplete = async (user: { userId: string; deviceId: string }) => {
     useAppStore.getState().setUserId(user.userId)
     localStorage.setItem('syncflow_user_id', user.userId)
+    localStorage.setItem('syncflow_device_id', user.deviceId)
 
     try {
       const encryptedKey = await vpsService.waitForDeviceE2eeKey(60000, 2000)

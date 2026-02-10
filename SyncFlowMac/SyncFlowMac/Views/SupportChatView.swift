@@ -2,12 +2,11 @@
 //  SupportChatView.swift
 //  SyncFlowMac
 //
-//  AI-powered support chatbot using Gemini
+//  Support chatbot
 //
 
 import SwiftUI
 import Combine
-// FirebaseFunctions - using FirebaseStubs.swift
 
 struct SupportChatMessage: Identifiable, Equatable {
     let id = UUID()
@@ -27,69 +26,81 @@ class SupportChatViewModel: ObservableObject {
     @Published var inputText: String = ""
     @Published var isLoading: Bool = false
 
-    private lazy var functions = Functions.functions()
-
-    // The actual sync group user ID (not the anonymous auth ID)
     var syncGroupUserId: String?
 
+    private let baseUrl = ProcessInfo.processInfo.environment["SYNCFLOW_VPS_URL"] ?? "https://api.sfweb.app"
+
     let quickQuestions = [
-        "What's my recovery code?",
+        "How does account recovery work?",
         "Show my sync status",
         "How many messages synced?",
         "Show my devices"
     ]
 
-    func sendMessage() {
-        let text = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isLoading else { return }
+    func sendMessage(_ text: String? = nil) {
+        let msgText = (text ?? inputText).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !msgText.isEmpty, !isLoading else { return }
 
-        let userMessage = SupportChatMessage(role: "user", content: text, timestamp: Date())
+        let userMessage = SupportChatMessage(role: "user", content: msgText, timestamp: Date())
         messages.append(userMessage)
         inputText = ""
         isLoading = true
 
-        // Prepare conversation history
         let history = messages.suffix(6).map { msg in
             ["role": msg.role, "content": msg.content]
         }
 
-        // Pass the actual sync group userId, not the anonymous auth ID
-        var data: [String: Any] = [
-            "message": text,
+        var payload: [String: Any] = [
+            "message": msgText,
             "conversationHistory": history
         ]
 
-        // Include the real user ID if available
         if let userId = syncGroupUserId, !userId.isEmpty {
-            data["syncGroupUserId"] = userId
+            payload["syncGroupUserId"] = userId
         }
 
-        functions.httpsCallable("supportChat").call(data) { [weak self] result, error in
-            DispatchQueue.main.async {
-                self?.isLoading = false
-
-                if let error = error {
-                    print("Chat error: \(error.localizedDescription)")
-                    self?.messages.append(SupportChatMessage(
-                        role: "assistant",
-                        content: "Sorry, I couldn't process your question. Please try again or contact syncflow.contact@gmail.com",
-                        timestamp: Date()
-                    ))
-                    return
+        Task {
+            do {
+                guard let url = URL(string: "\(baseUrl)/api/support-chat") else { throw URLError(.badURL) }
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                if let authHeader = VPSService.shared.authorizationHeader {
+                    request.setValue(authHeader, forHTTPHeaderField: "Authorization")
                 }
+                request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
-                if let data = result?.data as? [String: Any],
-                   let success = data["success"] as? Bool,
+                let (data, _) = try await URLSession.shared.data(for: request)
+                if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let success = json["success"] as? Bool,
                    success,
-                   let response = data["response"] as? String {
-                    self?.messages.append(SupportChatMessage(
-                        role: "assistant",
-                        content: response,
-                        timestamp: Date()
-                    ))
+                   let response = json["response"] as? String {
+                    await MainActor.run {
+                        self.isLoading = false
+                        self.messages.append(SupportChatMessage(
+                            role: "assistant",
+                            content: response,
+                            timestamp: Date()
+                        ))
+                    }
+                } else {
+                    await showError()
                 }
+            } catch {
+                print("Chat error: \(error.localizedDescription)")
+                await showError()
             }
         }
+    }
+
+    @MainActor
+    private func showError() {
+        isLoading = false
+        messages.append(SupportChatMessage(
+            role: "assistant",
+            content: "Sorry, I couldn't process your question. Please try again or contact syncflow.contact@gmail.com",
+            timestamp: Date()
+        ))
     }
 }
 
@@ -166,7 +177,7 @@ struct SupportChatView: View {
                     SupportFlowLayout(spacing: 8) {
                         ForEach(viewModel.quickQuestions, id: \.self) { question in
                             Button(action: {
-                                viewModel.inputText = question
+                                viewModel.sendMessage(question)
                             }) {
                                 Text(question)
                                     .font(.caption)
@@ -197,7 +208,7 @@ struct SupportChatView: View {
                     }
                     .disabled(viewModel.isLoading)
 
-                Button(action: viewModel.sendMessage) {
+                Button(action: { viewModel.sendMessage() }) {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.title)
                         .foregroundColor(viewModel.inputText.isEmpty || viewModel.isLoading ? .gray : .blue)
@@ -207,12 +218,27 @@ struct SupportChatView: View {
             }
             .padding()
         }
-        .frame(width: 400, height: 500)
+        .frame(minWidth: 350, idealWidth: 450, maxWidth: 700, minHeight: 400, idealHeight: 550, maxHeight: 800)
         .onAppear {
             // Pass the actual sync group userId to the viewModel
             viewModel.syncGroupUserId = appState.userId
         }
     }
+}
+
+// MARK: - Markdown Text Helper
+
+/// Parses basic markdown (**bold**, *italic*) into an AttributedString for SwiftUI rendering.
+private func parseMarkdownText(_ text: String) -> AttributedString {
+    // Try SwiftUI's built-in markdown parser first
+    if let attributed = try? AttributedString(
+        markdown: text,
+        options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+    ) {
+        return attributed
+    }
+    // Fallback to plain text
+    return AttributedString(text)
 }
 
 // MARK: - Support Chat Message Bubble
@@ -231,12 +257,18 @@ private struct SupportMessageBubble: View {
             if isUser { Spacer(minLength: 60) }
 
             VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
-                Text(message.content)
-                    .textSelection(.enabled)
-                    .padding(12)
-                    .background(isUser ? Color.blue : Color.secondary.opacity(0.1))
-                    .foregroundColor(isUser ? .white : .primary)
-                    .cornerRadius(16)
+                Group {
+                    if isUser {
+                        Text(message.content)
+                    } else {
+                        Text(parseMarkdownText(message.content))
+                    }
+                }
+                .textSelection(.enabled)
+                .padding(12)
+                .background(isUser ? Color.blue : Color.secondary.opacity(0.1))
+                .foregroundColor(isUser ? .white : .primary)
+                .cornerRadius(16)
 
                 // Copy button for assistant messages
                 if !isUser {

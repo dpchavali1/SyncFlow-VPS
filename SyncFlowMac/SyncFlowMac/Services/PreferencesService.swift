@@ -9,7 +9,7 @@
 //  PURPOSE
 //  ============================================================================
 //  PreferencesService manages all user preferences stored locally on the Mac.
-//  Unlike Firebase-synced data, these preferences are device-local and persist
+//  These preferences are device-local and persist
 //  across app restarts via UserDefaults.
 //
 //  Key Responsibilities:
@@ -41,7 +41,7 @@
 //  All data is stored in UserDefaults (~/Library/Preferences/com.syncflow.*.plist)
 //  - Survives app updates
 //  - Does NOT sync to iCloud (device-local only)
-//  - Does NOT sync to Firebase (faster local operations)
+//  - Device-local only (faster local operations)
 //
 
 import Foundation
@@ -305,7 +305,7 @@ class PreferencesService {
     /// Marks a single message as read locally.
     ///
     /// This is a local cache to track what the user has seen on this Mac.
-    /// Firebase read receipts provide cross-device read status.
+    /// VPS read receipts provide cross-device read status.
     ///
     /// - Parameter messageId: The message ID to mark as read
     func markMessageAsRead(_ messageId: String) {

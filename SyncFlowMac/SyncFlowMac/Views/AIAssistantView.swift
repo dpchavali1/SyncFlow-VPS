@@ -166,7 +166,7 @@ struct AIAssistantView: View {
                 Text("AI Assistant")
                     .font(.headline)
 
-                Text("Analyze your messages")
+                Text("Understands your messages & spending")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -262,45 +262,19 @@ struct AIAssistantView: View {
                                     .font(.caption)
                             }
                             .foregroundColor(digest.spendingChange > 0 ? SyncFlowColors.adaptiveRed : SyncFlowColors.adaptiveGreen)
-                        } else {
-                            Text("\(digest.transactionCount) transactions")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
                         }
                     }
 
                     Spacer()
 
                     VStack(alignment: .trailing, spacing: 4) {
-                        if digest.subscriptionTotal > 0 {
-                            HStack(spacing: 4) {
-                                Image(systemName: "repeat")
-                                    .font(.caption2)
-                                Text("\(cachedSubscriptionCount) subscriptions")
-                                    .font(.caption)
-                            }
-                            .foregroundColor(.secondary)
-                        }
+                        Text("\(digest.transactionCount)")
+                            .font(.title)
+                            .fontWeight(.bold)
 
-                        if digest.upcomingBills > 0 {
-                            HStack(spacing: 4) {
-                                Image(systemName: "calendar")
-                                    .font(.caption2)
-                                Text("\(digest.upcomingBills) bills due")
-                                    .font(.caption)
-                            }
+                        Text("transactions")
+                            .font(.caption)
                             .foregroundColor(.secondary)
-                        }
-
-                        if digest.recentPackages > 0 {
-                            HStack(spacing: 4) {
-                                Image(systemName: "shippingbox")
-                                    .font(.caption2)
-                                Text("\(digest.recentPackages) packages")
-                                    .font(.caption)
-                            }
-                            .foregroundColor(.secondary)
-                        }
                     }
                 }
             }

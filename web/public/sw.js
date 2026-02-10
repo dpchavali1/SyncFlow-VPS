@@ -6,15 +6,12 @@ const STATIC_CACHE = 'syncflow-static-v1.0.0';
 const DYNAMIC_CACHE = 'syncflow-dynamic-v1.0.0';
 const API_CACHE = 'syncflow-api-v1.0.0';
 
-// Static assets to cache
+// Static assets to cache (only assets guaranteed to exist at these exact paths)
 const STATIC_ASSETS = [
-  '/',
   '/manifest.json',
   '/favicon.ico',
   '/icon-192.png',
   '/icon-512.png',
-  '/globals.css',
-  // Add other static assets as needed
 ];
 
 // API endpoints to cache
@@ -67,17 +64,12 @@ self.addEventListener('fetch', (event) => {
   // Skip Chrome extension requests
   if (url.protocol === 'chrome-extension:') return;
 
+  // Skip third-party requests (ads, analytics, etc.) — let the browser handle them directly
+  if (url.origin !== self.location.origin) return;
+
   // Handle API requests
   if (url.pathname.startsWith('/api/')) {
     event.respondWith(handleApiRequest(request));
-    return;
-  }
-
-  // Handle Firebase requests (with special caching strategy)
-  if (url.hostname.includes('firestore.googleapis.com') ||
-      url.hostname.includes('firebaseio.com') ||
-      url.hostname.includes('firebasestorage.googleapis.com')) {
-    event.respondWith(handleFirebaseRequest(request));
     return;
   }
 

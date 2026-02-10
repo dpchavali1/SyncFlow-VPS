@@ -68,7 +68,7 @@ router.get('/', async (req: Request, res: Response) => {
         id: t.id,
         fileName: t.file_name,
         fileSize: parseInt(t.file_size) || 0,
-        contentType: t.content_type || t.file_type,
+        contentType: t.content_type || t.file_type || 'application/octet-stream',
         r2Key: t.r2_key,
         downloadUrl: t.download_url,
         source: t.source_device,
@@ -88,8 +88,11 @@ router.post('/upload-url', async (req: Request, res: Response) => {
     const body = uploadUrlSchema.parse(req.body);
     const userId = req.userId!;
 
-    // Generate unique file key
-    const fileKey = `${userId}/${body.transferType}/${Date.now()}_${body.fileName}`;
+    // Generate file key - deterministic for MMS (prevents duplicate uploads),
+    // timestamp-based for other transfers (allows multiple versions)
+    const fileKey = body.transferType === 'mms'
+      ? `${userId}/${body.transferType}/${body.fileName}`
+      : `${userId}/${body.transferType}/${Date.now()}_${body.fileName}`;
 
     // Create presigned URL for upload
     const command = new PutObjectCommand({

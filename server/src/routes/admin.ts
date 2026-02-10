@@ -23,9 +23,53 @@ const s3Client = config.r2.endpoint ? new S3Client({
   },
 }) : null;
 
-// Helper: delete all data for a user (comprehensive - covers ALL tables)
+// Helper: delete R2 objects by key
+async function deleteR2Objects(r2Keys: string[]) {
+  if (!s3Client || r2Keys.length === 0) return 0;
+  let deleted = 0;
+  for (const key of r2Keys) {
+    if (!key) continue;
+    try {
+      await s3Client.send(new DeleteObjectCommand({ Bucket: config.r2.bucketName, Key: key }));
+      deleted++;
+    } catch (e) {}
+  }
+  return deleted;
+}
+
+// Helper: delete all data for a user (comprehensive - covers ALL tables + R2)
 async function deleteUserData(userId: string) {
-  // All tables with user_id column
+  // Step 1: Collect R2 keys BEFORE deleting DB rows
+  const r2Keys: string[] = [];
+  try {
+    const photos = await query<{ r2_key: string }>('SELECT r2_key FROM user_photos WHERE user_id = $1 AND r2_key IS NOT NULL', [userId]);
+    r2Keys.push(...photos.map(p => p.r2_key));
+  } catch (e) {}
+  try {
+    const transfers = await query<{ r2_key: string }>('SELECT r2_key FROM user_file_transfers WHERE user_id = $1 AND r2_key IS NOT NULL', [userId]);
+    r2Keys.push(...transfers.map(t => t.r2_key));
+  } catch (e) {}
+  try {
+    // Extract R2 keys from MMS parts (JSONB array with r2Key in each element)
+    const mmsMessages = await query<{ mms_parts: any }>('SELECT mms_parts FROM user_messages WHERE user_id = $1 AND mms_parts IS NOT NULL', [userId]);
+    for (const msg of mmsMessages) {
+      let parts = msg.mms_parts;
+      if (typeof parts === 'string') { try { parts = JSON.parse(parts); } catch { continue; } }
+      if (Array.isArray(parts)) {
+        for (const part of parts) {
+          if (part?.r2Key) r2Keys.push(part.r2Key);
+        }
+      }
+    }
+  } catch (e) {}
+
+  // Step 2: Delete R2 objects
+  const r2Deleted = await deleteR2Objects(r2Keys);
+  if (r2Keys.length > 0) {
+    console.log(`[Admin] Deleted ${r2Deleted}/${r2Keys.length} R2 objects for user: ${userId}`);
+  }
+
+  // Step 3: Delete all DB tables
   const userIdTables = [
     'user_messages', 'user_contacts', 'user_call_history', 'user_photos',
     'user_file_transfers', 'user_outgoing_messages', 'user_spam_messages',
@@ -464,6 +508,30 @@ router.post('/cleanup/auto', async (req: Request, res: Response) => {
       }
     }
 
+    // Process overdue account deletions
+    try {
+      const overdue = await query<{ uid: string; email: string | null; phone: string | null; deletion_reason: string | null }>(
+        `SELECT uid, email, phone, deletion_reason FROM users WHERE deletion_scheduled_for IS NOT NULL AND deletion_scheduled_for <= $1`,
+        [Date.now()]
+      );
+      let deletedAccounts = 0;
+      for (const user of overdue) {
+        try {
+          await query(
+            `INSERT INTO deleted_accounts (user_id, email, phone, deletion_reason, deleted_by) VALUES ($1, $2, $3, $4, 'auto-cleanup')`,
+            [user.uid, user.email, user.phone, user.deletion_reason]
+          );
+          await deleteUserData(user.uid);
+          deletedAccounts++;
+        } catch (e) {
+          console.error(`[Admin] Failed to process overdue deletion for ${user.uid}:`, e);
+        }
+      }
+      results['overdueDeletions'] = deletedAccounts;
+    } catch (e) {
+      results['overdueDeletions'] = 0;
+    }
+
     const totalDeleted = Object.values(results).reduce((sum, c) => sum + c, 0);
     res.json({ success: true, totalDeleted, breakdown: results });
   } catch (error) {
@@ -472,18 +540,37 @@ router.post('/cleanup/auto', async (req: Request, res: Response) => {
   }
 });
 
-// POST /admin/cleanup/messages - Delete old messages
+// POST /admin/cleanup/messages - Delete old messages (with R2 MMS cleanup)
 router.post('/cleanup/messages', async (req: Request, res: Response) => {
   try {
     const { olderThanDays, mmsOnly } = req.body;
     if (!olderThanDays || olderThanDays < 1) { res.status(400).json({ error: 'olderThanDays required' }); return; }
 
+    // First collect R2 keys from MMS parts before deleting
+    let mmsR2Keys: string[] = [];
+    try {
+      let mmsSql = `SELECT mms_parts FROM user_messages WHERE date < (NOW() - INTERVAL '1 day' * $1) AND mms_parts IS NOT NULL`;
+      if (mmsOnly) mmsSql += ' AND is_mms = true';
+      const mmsRows = await query<{ mms_parts: any }>(mmsSql, [olderThanDays]);
+      for (const row of mmsRows) {
+        let parts = row.mms_parts;
+        if (typeof parts === 'string') { try { parts = JSON.parse(parts); } catch { continue; } }
+        if (Array.isArray(parts)) {
+          for (const part of parts) { if (part?.r2Key) mmsR2Keys.push(part.r2Key); }
+        }
+      }
+    } catch (e) {}
+
+    // Delete R2 objects
+    const r2Deleted = await deleteR2Objects(mmsR2Keys);
+
+    // Delete DB rows
     let sql = `DELETE FROM user_messages WHERE date < (NOW() - INTERVAL '1 day' * $1)`;
     if (mmsOnly) sql += ' AND is_mms = true';
     sql += ' RETURNING id';
 
     const deleted = await query(sql, [olderThanDays]);
-    res.json({ success: true, deletedCount: deleted.length, olderThanDays, mmsOnly: !!mmsOnly });
+    res.json({ success: true, deletedCount: deleted.length, r2Deleted, olderThanDays, mmsOnly: !!mmsOnly });
   } catch (error) {
     console.error('Admin cleanup messages error:', error);
     res.status(500).json({ error: 'Failed to cleanup messages' });
@@ -670,20 +757,59 @@ router.get('/r2/analytics', async (req: Request, res: Response) => {
     const photoStats = await queryOne<{ count: string; total_size: string }>(`SELECT COUNT(*) as count, COALESCE(SUM(file_size), 0) as total_size FROM user_photos`);
     const transferStats = await queryOne<{ count: string; total_size: string }>(`SELECT COUNT(*) as count, COALESCE(SUM(file_size), 0) as total_size FROM user_file_transfers`);
 
-    const topUsers = await query<{ user_id: string; photo_count: string; transfer_count: string; total_size: string }>(`
-      SELECT combined.user_id, SUM(combined.photo_count) as photo_count, SUM(combined.transfer_count) as transfer_count, SUM(combined.total_size) as total_size FROM (
-        SELECT user_id, COUNT(*) as photo_count, 0 as transfer_count, COALESCE(SUM(file_size), 0) as total_size FROM user_photos GROUP BY user_id
+    // MMS attachments stored in R2
+    let mmsCount = 0;
+    try {
+      const mmsStats = await queryOne<{ count: string }>(`SELECT COUNT(*) as count FROM user_messages, jsonb_array_elements(mms_parts) AS part WHERE mms_parts IS NOT NULL AND part->>'r2Key' IS NOT NULL`);
+      mmsCount = parseInt(mmsStats?.count || '0');
+    } catch { /* mms_parts column may not exist or be empty */ }
+
+    // Top users by storage
+    const topUsers = await query<{ user_id: string; total_size: string; last_updated: Date }>(`
+      SELECT combined.user_id, SUM(combined.total_size) as total_size, MAX(combined.last_updated) as last_updated FROM (
+        SELECT user_id, COALESCE(SUM(file_size), 0) as total_size, MAX(synced_at) as last_updated FROM user_photos GROUP BY user_id
         UNION ALL
-        SELECT user_id, 0 as photo_count, COUNT(*) as transfer_count, COALESCE(SUM(file_size), 0) as total_size FROM user_file_transfers GROUP BY user_id
+        SELECT user_id, COALESCE(SUM(file_size), 0) as total_size, MAX(created_at) as last_updated FROM user_file_transfers GROUP BY user_id
       ) combined GROUP BY combined.user_id ORDER BY total_size DESC LIMIT 20
     `);
 
+    // Largest files across photos and transfers
+    const largestPhotos = await query<{ r2_key: string; file_size: string; synced_at: Date }>(`SELECT r2_key, file_size, synced_at FROM user_photos WHERE r2_key IS NOT NULL ORDER BY file_size DESC LIMIT 10`);
+    const largestTransfers = await query<{ r2_key: string; file_size: string; created_at: Date }>(`SELECT r2_key, file_size, created_at FROM user_file_transfers WHERE r2_key IS NOT NULL ORDER BY file_size DESC LIMIT 10`);
+
+    // Oldest files
+    const oldestPhotos = await query<{ r2_key: string; file_size: string; synced_at: Date }>(`SELECT r2_key, file_size, synced_at FROM user_photos WHERE r2_key IS NOT NULL ORDER BY synced_at ASC LIMIT 10`);
+    const oldestTransfers = await query<{ r2_key: string; file_size: string; created_at: Date }>(`SELECT r2_key, file_size, created_at FROM user_file_transfers WHERE r2_key IS NOT NULL ORDER BY created_at ASC LIMIT 10`);
+
     const p = (v: string | undefined) => parseInt(v || '0');
+    const photoCount = p(photoStats?.count);
+    const photoSize = p(photoStats?.total_size);
+    const transferCount = p(transferStats?.count);
+    const transferSize = p(transferStats?.total_size);
+    const totalSize = photoSize + transferSize;
+    // R2 pricing: $0.015/GB/month
+    const estimatedCost = (totalSize / (1024 * 1024 * 1024)) * 0.015;
+
+    const allLargest = [
+      ...largestPhotos.map(f => ({ key: f.r2_key, size: p(f.file_size), uploadedAt: f.synced_at })),
+      ...largestTransfers.map(f => ({ key: f.r2_key, size: p(f.file_size), uploadedAt: f.created_at })),
+    ].sort((a, b) => b.size - a.size).slice(0, 10);
+
+    const allOldest = [
+      ...oldestPhotos.map(f => ({ key: f.r2_key, size: p(f.file_size), uploadedAt: f.synced_at })),
+      ...oldestTransfers.map(f => ({ key: f.r2_key, size: p(f.file_size), uploadedAt: f.created_at })),
+    ].sort((a, b) => new Date(a.uploadedAt).getTime() - new Date(b.uploadedAt).getTime()).slice(0, 10);
+
     res.json({
-      photos: { totalCount: p(photoStats?.count), totalSizeBytes: p(photoStats?.total_size) },
-      fileTransfers: { totalCount: p(transferStats?.count), totalSizeBytes: p(transferStats?.total_size) },
-      combinedTotalSizeBytes: p(photoStats?.total_size) + p(transferStats?.total_size),
-      topUsers: topUsers.map(u => ({ userId: u.user_id, photoCount: p(u.photo_count), transferCount: p(u.transfer_count), totalSizeBytes: p(u.total_size) })),
+      totalFiles: photoCount + transferCount + mmsCount,
+      totalSize,
+      estimatedCost,
+      fileCounts: { files: transferCount, mms: mmsCount, photos: photoCount },
+      sizeCounts: { files: transferSize, mms: 0, photos: photoSize },
+      largestFiles: allLargest,
+      oldestFiles: allOldest,
+      userStorage: topUsers.map(u => ({ userId: u.user_id, storageBytes: p(u.total_size), lastUpdatedAt: u.last_updated })),
+      totalUsersWithStorage: topUsers.length,
       r2Available: !!s3Client,
     });
   } catch (error) {
@@ -1560,6 +1686,98 @@ router.get('/user-lookup', async (req: Request, res: Response) => {
 });
 
 // ============================================
+// PENDING DELETIONS
+// ============================================
+
+// GET /admin/pending-deletions
+router.get('/pending-deletions', async (req: Request, res: Response) => {
+  try {
+    const users = await query<{
+      uid: string;
+      email: string | null;
+      phone: string | null;
+      deletion_requested_at: string;
+      deletion_reason: string | null;
+      deletion_scheduled_for: string;
+    }>(
+      `SELECT uid, email, phone, deletion_requested_at, deletion_reason, deletion_scheduled_for
+       FROM users
+       WHERE deletion_requested_at IS NOT NULL
+       ORDER BY deletion_scheduled_for ASC`
+    );
+
+    res.json({
+      pendingDeletions: users.map(u => ({
+        userId: u.uid,
+        email: u.email,
+        phone: u.phone,
+        requestedAt: parseInt(u.deletion_requested_at),
+        reason: u.deletion_reason,
+        scheduledFor: parseInt(u.deletion_scheduled_for),
+        daysRemaining: Math.max(0, Math.ceil((parseInt(u.deletion_scheduled_for) - Date.now()) / (24 * 60 * 60 * 1000))),
+      })),
+    });
+  } catch (error) {
+    console.error('Admin pending deletions error:', error);
+    res.status(500).json({ error: 'Failed to fetch pending deletions' });
+  }
+});
+
+// POST /admin/process-deletion/:userId - Immediately delete a user
+router.post('/process-deletion/:userId', async (req: Request, res: Response) => {
+  try {
+    const { userId } = req.params;
+
+    // Get user info for audit trail
+    const user = await queryOne<{ uid: string; email: string | null; phone: string | null; deletion_reason: string | null }>(
+      'SELECT uid, email, phone, deletion_reason FROM users WHERE uid = $1', [userId]
+    );
+    if (!user) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    // Insert audit record before deleting
+    await query(
+      `INSERT INTO deleted_accounts (user_id, email, phone, deletion_reason, deleted_by) VALUES ($1, $2, $3, $4, $5)`,
+      [userId, user.email, user.phone, user.deletion_reason, req.userId]
+    );
+
+    // Delete all user data
+    await deleteUserData(userId);
+
+    console.log(`[Admin] Processed deletion for user: ${userId}`);
+    res.json({ success: true, message: 'User data deleted' });
+  } catch (error) {
+    console.error('Admin process deletion error:', error);
+    res.status(500).json({ error: 'Failed to process deletion' });
+  }
+});
+
+// POST /admin/cancel-deletion/:userId - Admin cancels a user's pending deletion
+router.post('/cancel-deletion/:userId', async (req: Request, res: Response) => {
+  try {
+    const { userId } = req.params;
+
+    const result = await query(
+      `UPDATE users SET deletion_requested_at = NULL, deletion_reason = NULL, deletion_scheduled_for = NULL WHERE uid = $1 RETURNING uid`,
+      [userId]
+    );
+
+    if (result.length === 0) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    console.log(`[Admin] Cancelled deletion for user: ${userId}`);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Admin cancel deletion error:', error);
+    res.status(500).json({ error: 'Failed to cancel deletion' });
+  }
+});
+
+// ============================================
 // ACTIVE SESSIONS
 // ============================================
 
@@ -1629,6 +1847,90 @@ router.get('/e2ee/health', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Admin E2EE health error:', error);
     res.status(500).json({ error: 'Failed to fetch E2EE health' });
+  }
+});
+
+// POST /admin/cleanup/e2ee - Clean up unused E2EE keys
+router.post('/cleanup/e2ee', async (req: Request, res: Response) => {
+  try {
+    const results: Record<string, number> = {};
+
+    // 1. Remove stale device keys (not updated in 90+ days)
+    try {
+      const stale = await query(
+        `DELETE FROM user_e2ee_keys WHERE updated_at < NOW() - INTERVAL '90 days' RETURNING *`
+      );
+      results.staleDeviceKeys = stale.length;
+    } catch { results.staleDeviceKeys = 0; }
+
+    // 2. Remove orphaned device keys (user no longer exists)
+    try {
+      const orphaned = await query(
+        `DELETE FROM user_e2ee_keys WHERE user_id NOT IN (SELECT uid FROM users) RETURNING *`
+      );
+      results.orphanedDeviceKeys = orphaned.length;
+    } catch { results.orphanedDeviceKeys = 0; }
+
+    // 3. Remove orphaned public keys (user no longer exists)
+    try {
+      const orphanedPub = await query(
+        `DELETE FROM e2ee_public_keys WHERE uid NOT IN (SELECT uid FROM users) RETURNING *`
+      );
+      results.orphanedPublicKeys = orphanedPub.length;
+    } catch { results.orphanedPublicKeys = 0; }
+
+    // 4. Remove device keys for devices that no longer exist
+    try {
+      const noDevice = await query(
+        `DELETE FROM user_e2ee_keys k
+         WHERE NOT EXISTS (
+           SELECT 1 FROM user_devices d
+           WHERE d.user_id = k.user_id AND d.device_id = k.device_id
+         ) RETURNING *`
+      );
+      results.keysForMissingDevices = noDevice.length;
+    } catch { results.keysForMissingDevices = 0; }
+
+    // 5. Remove public keys for devices that no longer exist
+    try {
+      const noPubDevice = await query(
+        `DELETE FROM e2ee_public_keys pk
+         WHERE NOT EXISTS (
+           SELECT 1 FROM user_devices d
+           WHERE d.user_id = pk.uid AND d.device_id = pk.device_id
+         ) RETURNING *`
+      );
+      results.publicKeysForMissingDevices = noPubDevice.length;
+    } catch { results.publicKeysForMissingDevices = 0; }
+
+    // 6. Remove expired key exchange requests (older than 7 days)
+    try {
+      const expiredReqs = await query(
+        `DELETE FROM e2ee_key_requests WHERE created_at < NOW() - INTERVAL '7 days' RETURNING *`
+      );
+      results.expiredKeyRequests = expiredReqs.length;
+    } catch { results.expiredKeyRequests = 0; }
+
+    // 7. Remove expired key exchange responses (older than 7 days)
+    try {
+      const expiredResps = await query(
+        `DELETE FROM e2ee_key_responses WHERE created_at < NOW() - INTERVAL '7 days' RETURNING *`
+      );
+      results.expiredKeyResponses = expiredResps.length;
+    } catch { results.expiredKeyResponses = 0; }
+
+    const totalCleaned = Object.values(results).reduce((a, b) => a + b, 0);
+
+    console.log(`[Admin] E2EE cleanup: ${totalCleaned} items removed`, results);
+
+    res.json({
+      success: true,
+      totalCleaned,
+      breakdown: results,
+    });
+  } catch (error) {
+    console.error('Admin E2EE cleanup error:', error);
+    res.status(500).json({ error: 'Failed to cleanup E2EE keys' });
   }
 });
 

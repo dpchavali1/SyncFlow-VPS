@@ -7,7 +7,6 @@
 
 import Foundation
 import Combine
-// FirebaseDatabase - using FirebaseStubs.swift
 
 class VoicemailSyncService: ObservableObject {
     static let shared = VoicemailSyncService()
@@ -15,9 +14,8 @@ class VoicemailSyncService: ObservableObject {
     @Published var voicemails: [Voicemail] = []
     @Published var unreadCount: Int = 0
 
-    private let database = Database.database()
-    private var voicemailsHandle: DatabaseHandle?
     private var currentUserId: String?
+    private var cancellables = Set<AnyCancellable>()
 
     private init() {}
 
@@ -52,49 +50,33 @@ class VoicemailSyncService: ObservableObject {
     func startListening(userId: String) {
         currentUserId = userId
 
-        let voicemailsRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("voicemails")
-            .queryOrdered(byChild: "date")
-
-        voicemailsHandle = voicemailsRef.observe(.value) { [weak self] snapshot in
-            guard let self = self else { return }
-
-            var voicemails: [Voicemail] = []
-
-            for child in snapshot.children {
-                guard let childSnapshot = child as? DataSnapshot,
-                      let data = childSnapshot.value as? [String: Any] else { continue }
-
-                if let vm = self.parseVoicemail(id: childSnapshot.key, data: data) {
-                    voicemails.append(vm)
-                }
-            }
-
-            // Sort by date descending (newest first)
-            voicemails.sort { $0.date > $1.date }
-
-            DispatchQueue.main.async {
-                self.voicemails = voicemails
-                self.unreadCount = voicemails.filter { !$0.isRead }.count
-            }
+        // Fetch current voicemails
+        Task {
+            await fetchVoicemails()
         }
 
+        // Listen for real-time WebSocket updates
+        VPSService.shared.voicemailUpdated
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] data in
+                let eventType = data["eventType"] as? String ?? ""
+                if eventType == "voicemail_deleted" {
+                    if let id = data["id"] as? String {
+                        self?.voicemails.removeAll { $0.id == id }
+                        self?.updateUnreadCount()
+                    }
+                } else {
+                    // For added/updated, re-fetch the full list
+                    Task { await self?.fetchVoicemails() }
+                }
+            }
+            .store(in: &cancellables)
     }
 
     /// Stop listening
     func stopListening() {
-        guard let userId = currentUserId, let handle = voicemailsHandle else { return }
-
-        database.reference()
-            .child("users")
-            .child(userId)
-            .child("voicemails")
-            .removeObserver(withHandle: handle)
-
-        voicemailsHandle = nil
         currentUserId = nil
+        cancellables.removeAll()
         voicemails = []
         unreadCount = 0
     }
@@ -103,83 +85,32 @@ class VoicemailSyncService: ObservableObject {
 
     /// Mark a voicemail as read
     func markAsRead(_ voicemailId: String) async throws {
-        guard let userId = currentUserId else { return }
-
-        database.goOnline()
-
-        let voicemailRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("voicemails")
-            .child(voicemailId)
-            .child("isRead")
-
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            voicemailRef.setValue(true) { error, _ in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
-                }
+        try await VPSService.shared.markVoicemailRead(voicemailId: voicemailId)
+        await MainActor.run {
+            if let index = voicemails.firstIndex(where: { $0.id == voicemailId }) {
+                let vm = voicemails[index]
+                voicemails[index] = Voicemail(
+                    id: vm.id, number: vm.number, contactName: vm.contactName,
+                    duration: vm.duration, date: vm.date, isRead: true,
+                    transcription: vm.transcription, hasAudio: vm.hasAudio, syncedAt: vm.syncedAt
+                )
+                updateUnreadCount()
             }
         }
     }
 
     /// Delete a voicemail
     func deleteVoicemail(_ voicemailId: String) async throws {
-        guard let userId = currentUserId else { return }
-
-        database.goOnline()
-
-        let voicemailRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("voicemails")
-            .child(voicemailId)
-
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            voicemailRef.removeValue { error, _ in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
-                }
-            }
+        try await VPSService.shared.deleteVoicemail(voicemailId: voicemailId)
+        await MainActor.run {
+            voicemails.removeAll { $0.id == voicemailId }
+            updateUnreadCount()
         }
     }
 
     /// Call back the voicemail sender
     func callBack(_ voicemail: Voicemail, makeCall: (String) -> Void) {
         makeCall(voicemail.number)
-    }
-
-    // MARK: - Private Helpers
-
-    private func parseVoicemail(id: String, data: [String: Any]) -> Voicemail? {
-        guard let number = data["number"] as? String,
-              let duration = data["duration"] as? Int,
-              let dateMs = data["date"] as? Double else {
-            return nil
-        }
-
-        let date = Date(timeIntervalSince1970: dateMs / 1000)
-
-        var syncedAt: Date? = nil
-        if let syncedAtMs = data["syncedAt"] as? Double {
-            syncedAt = Date(timeIntervalSince1970: syncedAtMs / 1000)
-        }
-
-        return Voicemail(
-            id: id,
-            number: number,
-            contactName: data["contactName"] as? String,
-            duration: duration,
-            date: date,
-            isRead: data["isRead"] as? Bool ?? false,
-            transcription: data["transcription"] as? String,
-            hasAudio: data["hasAudio"] as? Bool ?? false,
-            syncedAt: syncedAt
-        )
     }
 
     /// Pause voicemail sync temporarily
@@ -192,5 +123,48 @@ class VoicemailSyncService: ObservableObject {
         if let userId = currentUserId {
             startListening(userId: userId)
         }
+    }
+
+    // MARK: - Private
+
+    private func fetchVoicemails() async {
+        do {
+            let rawVoicemails = try await VPSService.shared.getVoicemails()
+            let parsed = rawVoicemails.compactMap { parseVoicemail($0) }
+            await MainActor.run {
+                self.voicemails = parsed.sorted { $0.date > $1.date }
+                self.updateUnreadCount()
+            }
+        } catch {
+            print("[Voicemail] Error fetching voicemails: \(error)")
+        }
+    }
+
+    private func parseVoicemail(_ data: [String: Any]) -> Voicemail? {
+        guard let id = data["id"] as? String else { return nil }
+        let number = data["number"] as? String ?? data["phoneNumber"] as? String ?? ""
+        let contactName = data["contactName"] as? String
+        let duration = data["duration"] as? Int ?? 0
+        let dateMs = data["date"] as? Double ?? data["timestamp"] as? Double ?? 0
+        let isRead = data["isRead"] as? Bool ?? data["read"] as? Bool ?? false
+        let transcription = data["transcription"] as? String
+        let hasAudio = data["hasAudio"] as? Bool ?? false
+        let syncedMs = data["syncedAt"] as? Double
+
+        return Voicemail(
+            id: id,
+            number: number,
+            contactName: contactName,
+            duration: duration,
+            date: Date(timeIntervalSince1970: dateMs / 1000),
+            isRead: isRead,
+            transcription: transcription,
+            hasAudio: hasAudio,
+            syncedAt: syncedMs != nil ? Date(timeIntervalSince1970: syncedMs! / 1000) : nil
+        )
+    }
+
+    private func updateUnreadCount() {
+        unreadCount = voicemails.filter { !$0.isRead }.count
     }
 }

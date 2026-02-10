@@ -14,7 +14,7 @@
 //
 //  Key Responsibilities:
 //  - Maintains the source of truth for messages and conversations
-//  - Manages Firebase real-time listeners for data synchronization
+//  - Manages VPS real-time listeners for data synchronization
 //  - Groups messages into conversations with contact resolution
 //  - Handles read status, reactions, and pinned messages
 //  - Provides filtering (all, unread, archived, spam)
@@ -34,12 +34,12 @@
 //      |
 //      | Delegates data operations to
 //      v
-//  FirebaseService (network layer)
+//  VPSService (network layer)
 //  ```
 //
 //  Data Flow:
 //  1. View observes @Published properties (messages, conversations, etc.)
-//  2. Firebase listeners push updates to MessageStore
+//  2. VPS listeners push updates to MessageStore
 //  3. MessageStore processes data on background thread
 //  4. @Published properties updated on main thread, triggering UI refresh
 //
@@ -55,14 +55,14 @@
 //  ============================================================================
 //  DEPENDENCIES
 //  ============================================================================
-//  - FirebaseService: Real-time data synchronization
+//  - VPSService: Real-time data synchronization
 //  - PreferencesService: User preferences (pinned, archived, blocked)
 //  - NotificationService: System notification delivery
 //  - BatteryAwareServiceManager: Power-optimized processing
 //
 
 import Foundation
-// FirebaseDatabase - using FirebaseStubs.swift
+// VPS backend only
 import Combine
 
 // MARK: - Notification Names
@@ -76,7 +76,7 @@ extension Notification.Name {
 
 /// Central observable store for all messaging state in the SyncFlow macOS app.
 ///
-/// MessageStore manages the complete lifecycle of message data, from Firebase
+/// MessageStore manages the complete lifecycle of message data, from VPS
 /// synchronization through to UI-ready conversation objects. It serves as the
 /// single source of truth for the messaging UI.
 ///
@@ -147,28 +147,10 @@ class MessageStore: ObservableObject {
     /// Loading state for "load more" pagination requests.
     @Published var isLoadingMore = false
 
-    // MARK: - Firebase Listener Handles
-
-    /// Information needed to properly clean up a Firebase listener
-    private struct ListenerInfo {
-        let userId: String
-        let handle: DatabaseHandle
-    }
-
-    /// Handle for messages listener - must be removed on cleanup.
-    private var messageListener: ListenerInfo?
-
-    /// Array of handles for incremental sync (childAdded, childChanged, childRemoved)
-    private var incrementalSyncHandles: [DatabaseHandle]?
-
-    /// Handle for reactions listener.
-    private var reactionsListener: ListenerInfo?
-
-    /// Handle for read receipts listener.
-    private var readReceiptsListener: ListenerInfo?
+    // MARK: - Listener State
 
     /// Timer for polling spam messages from VPS.
-    private var spamPollingTimer: Timer?
+    // spamPollingTimer removed — spam sync is now real-time via WebSocket
     private var spamListenerUserId: String?
 
     // MARK: - Private State
@@ -246,8 +228,7 @@ class MessageStore: ObservableObject {
 
     // MARK: - Contacts State
 
-    /// Handle for contacts listener (optimized: child observers for delta-only sync).
-    private var contactsListenerHandles: (added: DatabaseHandle, changed: DatabaseHandle, removed: DatabaseHandle)?
+    /// User ID for contacts listener.
     private var contactsListenerUserId: String?
 
     /// Cached contacts from last sync.
@@ -267,9 +248,6 @@ class MessageStore: ObservableObject {
     private var pendingOutgoingMessages: [String: Message] = [:]
 
     // MARK: - Service Dependencies
-
-    /// Firebase service for data operations.
-    private let firebaseService = FirebaseService.shared
 
     /// Notification service for system alerts.
     private let notificationService = NotificationService.shared
@@ -417,7 +395,7 @@ class MessageStore: ObservableObject {
 
     /// Handles E2EE keys sync completion by re-decrypting cached messages locally.
     ///
-    /// BANDWIDTH OPTIMIZATION: Instead of re-fetching all messages from Firebase,
+    /// BANDWIDTH OPTIMIZATION: Instead of re-fetching all messages from VPS,
     /// this method only fetches encryption metadata for encrypted messages and
     /// decrypts them in-place. This uses minimal bandwidth (only nonce + envelope
     /// for encrypted messages, typically < 1KB total).
@@ -425,7 +403,7 @@ class MessageStore: ObservableObject {
     /// When E2EE keys are synced from Android, previously encrypted messages need to be
     /// decrypted using the new keys. This method:
     /// 1. Identifies encrypted messages in cache
-    /// 2. Fetches only their encryption metadata (nonce + envelope) from Firebase
+    /// 2. Fetches only their encryption metadata (nonce + envelope) from VPS
     /// 3. Decrypts them locally using new keys
     /// 4. Updates UI with decrypted messages
     @objc private func handleE2EEKeysUpdated(_ notification: Notification) {
@@ -436,46 +414,26 @@ class MessageStore: ObservableObject {
             return
         }
 
-        if isVPSMode {
-            Task {
-                do {
-                    let response = try await VPSService.shared.getMessages(limit: 500)
-                    let fetchedMessages = response.messages.map { self.convertVPSMessage($0) }
+        Task {
+            do {
+                let response = try await VPSService.shared.getMessages(limit: 500)
+                let fetchedMessages = response.messages.map { self.convertVPSMessage($0) }
 
-                    let encrypted = fetchedMessages.filter { $0.isEncrypted == true }
-                    let failed = encrypted.filter { $0.e2eeFailed == true }
-                    print("[MessageStore VPS] Re-decryption: \(encrypted.count - failed.count)/\(encrypted.count) decrypted, \(failed.count) failed")
+                let encrypted = fetchedMessages.filter { $0.isEncrypted == true }
+                let failed = encrypted.filter { $0.e2eeFailed == true }
+                print("[MessageStore VPS] Re-decryption: \(encrypted.count - failed.count)/\(encrypted.count) decrypted, \(failed.count) failed")
 
-                    await MainActor.run {
-                        let processedMessages = self.applyReadStatus(to: fetchedMessages)
-                        let mergeResult = self.mergeMessagesWithPendingOutgoing(remoteMessages: processedMessages)
-                        let newConversations = self.buildConversations(from: mergeResult.mergedMessages)
+                await MainActor.run {
+                    let processedMessages = self.applyReadStatus(to: fetchedMessages)
+                    let mergeResult = self.mergeMessagesWithPendingOutgoing(remoteMessages: processedMessages)
+                    let newConversations = self.buildConversations(from: mergeResult.mergedMessages)
 
-                        self.messages = mergeResult.mergedMessages
-                        self.conversations = newConversations
-                    }
-                } catch {
-                    print("[MessageStore VPS] Re-decryption fetch error: \(error.localizedDescription)")
+                    self.messages = mergeResult.mergedMessages
+                    self.conversations = newConversations
                 }
+            } catch {
+                print("[MessageStore VPS] Re-decryption fetch error: \(error.localizedDescription)")
             }
-        } else {
-            // Firebase mode: re-decrypt cached messages without re-fetching
-            IncrementalSyncManager.shared.redecryptCachedMessages(
-                userId: userId,
-                onProgress: { decryptedCount in
-                    print("[MessageStore] Re-decryption progress: \(decryptedCount) messages")
-                },
-                onComplete: { [weak self] updatedMessages in
-                    DispatchQueue.main.async {
-                        guard let self = self else { return }
-
-                        self.messages = updatedMessages
-                        self.updateConversations(from: updatedMessages)
-
-                        print("[MessageStore] ✅ Re-decryption complete! UI updated with \(updatedMessages.count) messages")
-                    }
-                }
-            )
         }
     }
 
@@ -508,14 +466,14 @@ class MessageStore: ObservableObject {
 
     /// Starts real-time synchronization for a user's messaging data.
     ///
-    /// This method sets up Firebase listeners for:
+    /// This method sets up VPS listeners for:
     /// - Messages (SMS/MMS synced from Android)
     /// - Message reactions (emoji responses)
     /// - Read receipts (cross-device read status)
     /// - Spam messages (filtered messages)
     /// - Contacts (for name resolution)
     ///
-    /// - Parameter userId: The Firebase user ID to listen for
+    /// - Parameter userId: The user ID to listen for
     ///
     /// ## Listener Lifecycle
     /// Listeners are automatically cleaned up if switching users. Call `stopListening()`
@@ -531,22 +489,7 @@ class MessageStore: ObservableObject {
             return
         }
 
-        // CRITICAL: Stop old listeners BEFORE updating currentUserId
-        // This prevents orphaned listeners when switching users
-        if let handles = incrementalSyncHandles, let oldUserId = currentUserId {
-            IncrementalSyncManager.shared.stopListening(userId: oldUserId, handles: handles)
-            incrementalSyncHandles = nil
-        }
-        if let listener = reactionsListener {
-            firebaseService.removeMessageReactionsListener(userId: listener.userId, handle: listener.handle)
-            reactionsListener = nil
-        }
-        if let listener = readReceiptsListener {
-            firebaseService.removeReadReceiptsListener(userId: listener.userId, handle: listener.handle)
-            readReceiptsListener = nil
-        }
-        spamPollingTimer?.invalidate()
-        spamPollingTimer = nil
+        // Stop old listeners before switching users
         spamListenerUserId = nil
         if currentUserId != nil {
             stopListeningForContacts()
@@ -559,166 +502,13 @@ class MessageStore: ObservableObject {
         loadedTimeRangeStart = nil
         canLoadMore = false
 
-        // VPS MODE: Use VPSService instead of Firebase
-        if isVPSMode {
-            print("[MessageStore] VPS mode active - using VPS for messages")
-            startListeningVPS(userId: userId)
-            return
-        }
-
-        // FIREBASE MODE (legacy): Use incremental sync
-        // BANDWIDTH OPTIMIZATION: Load cached messages first for instant display
-        // This prevents showing empty UI while waiting for network sync
-        let cachedMessages = IncrementalSyncManager.shared.getCachedMessages(userId: userId)
-        if !cachedMessages.isEmpty {
-            print("[MessageStore] Loaded \(cachedMessages.count) cached messages (instant display)")
-
-            // Display cached messages immediately
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-
-                let processedMessages = self.applyReadStatus(to: cachedMessages)
-                let mergeResult = self.mergeMessagesWithPendingOutgoing(remoteMessages: processedMessages)
-                let newConversations = self.buildConversations(from: mergeResult.mergedMessages)
-
-                self.messages = mergeResult.mergedMessages
-                self.conversations = newConversations
-                self.isLoading = false  // Show cached data immediately
-
-                print("[MessageStore] Displayed \(newConversations.count) cached conversations")
-            }
-        }
-
-        // Start incremental sync (only fetches deltas, not full message list)
-        // BANDWIDTH COMPARISON:
-        // - Old: Downloads all 200 messages (400KB) on EVERY change
-        // - New: Downloads only changed messages (2KB per change)
-        // - Savings: 99.5% bandwidth reduction
-        let lastSyncTimestamp = IncrementalSyncManager.shared.getLastSyncTimestamp(userId: userId)
-        let handles = IncrementalSyncManager.shared.listenToMessagesIncremental(
-            userId: userId,
-            lastSyncTimestamp: lastSyncTimestamp
-        ) { [weak self] delta in
-            guard let self = self else { return }
-
-            // Handle delta events (added/changed/removed)
-            // This only processes the single message that changed, not the entire message list
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-
-                var currentMessages = self.messages
-                var shouldNotify = false
-                var notificationMessage: Message?
-
-                switch delta {
-                case .added(let message):
-                    // Check if message already exists (prevent duplicates during initial sync)
-                    if !currentMessages.contains(where: { $0.id == message.id }) {
-                        currentMessages.append(message)
-                        print("[MessageStore] Added message: \(message.id)")
-
-                        // Only notify if not during initial load
-                        if !self.isLoading && message.isReceived {
-                            shouldNotify = true
-                            notificationMessage = message
-                        }
-                    }
-
-                case .changed(let message):
-                    // Update existing message
-                    if let index = currentMessages.firstIndex(where: { $0.id == message.id }) {
-                        currentMessages[index] = message
-                        print("[MessageStore] Updated message: \(message.id)")
-                    } else {
-                        // Message doesn't exist yet, add it
-                        currentMessages.append(message)
-                        print("[MessageStore] Added changed message (was missing): \(message.id)")
-                    }
-
-                case .removed(let messageId):
-                    // Remove message from list
-                    currentMessages.removeAll { $0.id == messageId }
-                    print("[MessageStore] Removed message: \(messageId)")
-                }
-
-                // Apply read status
-                let processedMessages = self.applyReadStatus(to: currentMessages)
-
-                // Merge with pending outgoing messages
-                let mergeResult = self.mergeMessagesWithPendingOutgoing(remoteMessages: processedMessages)
-
-                // Rebuild conversations
-                let newConversations = self.buildConversations(from: mergeResult.mergedMessages)
-
-                // Update state
-                self.messages = mergeResult.mergedMessages
-                self.conversations = newConversations
-                self.isLoading = false
-
-                // Remove matched pending messages
-                if !mergeResult.matchedPendingIds.isEmpty {
-                    self.pendingOutgoingQueue.sync {
-                        for id in mergeResult.matchedPendingIds {
-                            self.pendingOutgoingMessages.removeValue(forKey: id)
-                        }
-                    }
-                }
-
-                // Show notification for new message
-                if shouldNotify, let message = notificationMessage {
-                    self.notificationService.showMessageNotification(
-                        from: message.address,
-                        contactName: message.contactName,
-                        body: message.body,
-                        messageId: message.id
-                    )
-                }
-
-                // Update badge count
-                self.notificationService.setBadgeCount(self.totalUnreadCount)
-
-                print("[MessageStore] Now showing \(newConversations.count) conversations with \(mergeResult.mergedMessages.count) messages")
-            }
-        }
-
-        // Store listener handles for proper cleanup
-        // IncrementalSyncManager returns array of handles (childAdded, childChanged, childRemoved)
-        incrementalSyncHandles = handles
-
-        let reactionsHandle = firebaseService.listenToMessageReactions(userId: userId) { [weak self] reactions in
-            DispatchQueue.main.async {
-                self?.messageReactions = reactions
-            }
-        }
-        reactionsListener = ListenerInfo(userId: userId, handle: reactionsHandle)
-
-        let readReceiptsHandle = firebaseService.listenToReadReceipts(userId: userId) { [weak self] receipts in
-            DispatchQueue.main.async {
-                self?.readReceipts = receipts
-                self?.readReceiptsLoaded = true  // Mark that read receipts have been loaded
-                self?.messages = self?.applyReadStatus(to: self?.messages ?? []) ?? []
-                self?.updateConversations(from: self?.messages ?? [])
-                self?.notificationService.setBadgeCount(self?.totalUnreadCount ?? 0)
-            }
-        }
-        readReceiptsListener = ListenerInfo(userId: userId, handle: readReceiptsHandle)
-
-        // Use VPS REST API for spam messages
-        spamListenerUserId = userId
-        loadSpamMessagesFromVPS()
-        startSpamPolling()
-
-        startListeningForContacts(userId: userId)
+        print("[MessageStore] VPS mode active - using VPS for messages")
+        startListeningVPS(userId: userId)
     }
 
-    // MARK: - Stop Listening
-
-    /// Stops all Firebase listeners and resets state.
-    ///
-    /// Call this when:
     // MARK: - VPS Mode Support
 
-    /// Starts listening for messages using VPS backend instead of Firebase.
+    /// Starts listening for messages using VPS backend.
     /// This method:
     /// 1. Fetches initial messages from VPS REST API
     /// 2. Subscribes to WebSocket events for real-time updates
@@ -766,6 +556,16 @@ class MessageStore: ObservableObject {
                 guard let self = self else { return }
                 let message = self.convertVPSMessage(vpsMessage)
 
+                // Skip duplicate updates — avoid re-processing when nothing changed
+                // Compare by body + date + attachment count; deep attachment comparison
+                // fails because attachments are re-parsed from JSON each time
+                if let existing = self.messages.first(where: { $0.id == message.id }),
+                   existing.body == message.body,
+                   existing.date == message.date,
+                   existing.attachments?.count == message.attachments?.count {
+                    return
+                }
+
                 var currentMessages = self.messages
                 if let index = currentMessages.firstIndex(where: { $0.id == message.id }) {
                     currentMessages[index] = message
@@ -779,8 +579,6 @@ class MessageStore: ObservableObject {
 
                 self.messages = mergeResult.mergedMessages
                 self.conversations = newConversations
-
-                // Per-message logging removed to reduce log noise
             }
             .store(in: &vpsCancellables)
 
@@ -800,6 +598,17 @@ class MessageStore: ObservableObject {
                 self.conversations = newConversations
 
                 // Per-message logging removed to reduce log noise
+            }
+            .store(in: &vpsCancellables)
+
+        // Listen for delivery status changes (sent → delivered)
+        VPSService.shared.deliveryStatusChanged
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] (messageId, deliveryStatus) in
+                guard let self = self else { return }
+                if let index = self.messages.firstIndex(where: { $0.id == messageId }) {
+                    self.messages[index].deliveryStatus = deliveryStatus
+                }
             }
             .store(in: &vpsCancellables)
 
@@ -843,6 +652,11 @@ class MessageStore: ObservableObject {
 
         // Start contacts sync for VPS mode
         startListeningForContactsVPS(userId: userId)
+
+        // Load spam messages from VPS and listen for real-time updates via WebSocket
+        spamListenerUserId = userId
+        loadSpamMessagesFromVPS()
+        startSpamWebSocketListener()
     }
 
     /// Converts a VPSMessage to the local Message type
@@ -897,7 +711,7 @@ class MessageStore: ObservableObject {
                     encrypted = nil
                 }
 
-                return MmsAttachment(
+                let attachment = MmsAttachment(
                     id: (part["id"] as? String) ?? (part["partId"] as? String) ?? UUID().uuidString,
                     contentType: contentType,
                     fileName: fileName,
@@ -908,6 +722,7 @@ class MessageStore: ObservableObject {
                     inlineData: inlineData,
                     isInline: inlineData != nil
                 )
+                return attachment
             }
         }
 
@@ -973,7 +788,8 @@ class MessageStore: ObservableObject {
             attachments: attachments,
             e2eeFailed: decryptionFailed,
             e2eeFailureReason: failureReason,
-            isEncrypted: vpsMessage.encrypted
+            isEncrypted: vpsMessage.encrypted,
+            deliveryStatus: vpsMessage.deliveryStatus
         )
     }
 
@@ -1029,25 +845,8 @@ class MessageStore: ObservableObject {
     /// Failure to call this method results in memory leaks and unnecessary
     /// network traffic from orphaned listeners.
     func stopListening() {
-        // Cancel VPS subscriptions
+        // Cancel VPS subscriptions (includes spam WebSocket listener)
         vpsCancellables.removeAll()
-        // Stop incremental sync listeners (childAdded, childChanged, childRemoved)
-        if let handles = incrementalSyncHandles, let userId = currentUserId {
-            IncrementalSyncManager.shared.stopListening(userId: userId, handles: handles)
-            incrementalSyncHandles = nil
-        }
-
-        // Remove other listeners using stored userId/handle pairs
-        if let listener = reactionsListener {
-            firebaseService.removeMessageReactionsListener(userId: listener.userId, handle: listener.handle)
-            reactionsListener = nil
-        }
-        if let listener = readReceiptsListener {
-            firebaseService.removeReadReceiptsListener(userId: listener.userId, handle: listener.handle)
-            readReceiptsListener = nil
-        }
-        spamPollingTimer?.invalidate()
-        spamPollingTimer = nil
         spamListenerUserId = nil
         stopListeningForContacts()
 
@@ -1055,14 +854,13 @@ class MessageStore: ObservableObject {
         currentUserId = nil
         messages = []
         conversations = []
-        readReceiptsLoaded = false  // Reset flag when stopping
+        readReceiptsLoaded = false
         loadedTimeRangeStart = nil
         canLoadMore = false
     }
 
     // MARK: - Cleanup
 
-    /// Ensures all Firebase listeners are removed when MessageStore is deallocated
     deinit {
         stopListening()
         print("[MessageStore] Deinitialized - all listeners removed")
@@ -1080,46 +878,35 @@ class MessageStore: ObservableObject {
     /// - Updates `canLoadMore` based on whether more messages exist
     /// - Merges with existing messages (deduplicated)
     func loadMoreMessages() {
-        guard let userId = currentUserId, !isLoadingMore, canLoadMore,
-              let oldestTimestamp = loadedTimeRangeStart else {
-            return
-        }
+        guard !isLoadingMore, canLoadMore else { return }
 
         isLoadingMore = true
 
-        // Calculate new time range (30 more days back)
-        let endTime = oldestTimestamp * 1000  // Convert to milliseconds
-        let startTime = (oldestTimestamp - Double(loadMoreDays * 24 * 60 * 60)) * 1000
+        // Use oldest message timestamp as cursor for VPS pagination
+        let oldestDate = messages.min(by: { $0.date < $1.date })?.date
 
         Task {
             do {
-                let olderMessages = try await firebaseService.loadMessagesInTimeRange(
-                    userId: userId,
-                    startTime: startTime,
-                    endTime: endTime
+                let response = try await VPSService.shared.getMessages(
+                    limit: 200,
+                    before: oldestDate.map { Int64($0) }
                 )
 
-                await MainActor.run {
+                let olderMessages = response.messages.map { self.convertVPSMessage($0) }
 
-                    // Merge with existing messages
-                    var allMessages = self.messages + olderMessages
-                    allMessages = Array(Set(allMessages))  // Deduplicate
-                    allMessages.sort { $0.date > $1.date }  // Sort newest first
+                await MainActor.run {
+                    let existingIds = Set(self.messages.map { $0.id })
+                    let newMessages = olderMessages.filter { !existingIds.contains($0.id) }
+
+                    var allMessages = self.messages + newMessages
+                    allMessages.sort { $0.date > $1.date }
 
                     self.messages = self.applyReadStatus(to: allMessages)
                     self.updateConversations(from: self.messages)
-
-                    // Update pagination state
-                    if let newOldest = olderMessages.min(by: { $0.date < $1.date }) {
-                        self.loadedTimeRangeStart = newOldest.date / 1000
-                        // Check if we hit the time range boundary (more messages might exist)
-                        self.canLoadMore = abs(newOldest.date / 1000 - startTime / 1000) < (24 * 60 * 60)
-                    } else {
-                        // No more messages found
-                        self.canLoadMore = false
-                    }
-
+                    self.canLoadMore = response.hasMore
                     self.isLoadingMore = false
+
+                    print("[MessageStore] Loaded \(newMessages.count) more messages via VPS pagination")
                 }
             } catch {
                 await MainActor.run {
@@ -1138,7 +925,7 @@ class MessageStore: ObservableObject {
     /// Read status is determined by checking (in order):
     /// 1. Sent messages (type == 2) are always read
     /// 2. Local macOS read tracking (UserDefaults)
-    /// 3. Android read receipts synced via Firebase
+    /// 3. Android read receipts synced via VPS
     /// 4. Default to read if read receipts haven't loaded yet
     ///
     /// - Parameter messages: Array of messages to update
@@ -1185,7 +972,7 @@ class MessageStore: ObservableObject {
 
     /// Marks all messages in a conversation as read.
     ///
-    /// Updates both local state (UserDefaults) and syncs to Firebase
+    /// Updates both local state (UserDefaults) and syncs to VPS
     /// so other devices know the messages have been read.
     ///
     /// - Parameter conversation: The conversation to mark as read
@@ -1195,17 +982,11 @@ class MessageStore: ObservableObject {
         let unreadMessageIds = conversationMessages.filter { $0.isReceived && !$0.isRead }.map { $0.id }
         preferences.markConversationAsRead(conversation.address, messageIds: unreadMessageIds)
 
-        if let userId = currentUserId, !unreadMessageIds.isEmpty {
-            let normalizedAddress = normalizePhoneNumber(conversation.address)
-            let deviceName = Host.current().localizedName ?? "Mac"
+        if !unreadMessageIds.isEmpty {
             Task {
-                try? await firebaseService.markMessagesRead(
-                    userId: userId,
-                    messageIds: unreadMessageIds,
-                    conversationAddress: normalizedAddress,
-                    readBy: "macos",
-                    readDeviceName: deviceName
-                )
+                for messageId in unreadMessageIds {
+                    try? await VPSService.shared.markMessageRead(messageId: messageId)
+                }
             }
         }
 
@@ -1416,12 +1197,12 @@ class MessageStore: ObservableObject {
     /// Implements optimistic UI update:
     /// 1. Creates a pending message with temporary ID
     /// 2. Immediately adds to UI for instant feedback
-    /// 3. Sends to Firebase for Android to deliver
+    /// 3. Sends to VPS for Android to deliver
     /// 4. Matches with confirmed message when sync returns
     /// 5. Removes pending message once confirmed
     ///
     /// - Parameters:
-    ///   - userId: The Firebase user ID
+    ///   - userId: The user ID
     ///   - address: Recipient phone number
     ///   - body: Message text content
     /// - Throws: Error if send fails (rolls back optimistic update)
@@ -1438,12 +1219,16 @@ class MessageStore: ObservableObject {
             self.updateConversations(from: self.messages)
         }
 
-        _ = pendingOutgoingQueue.sync {
+        pendingOutgoingQueue.sync {
             pendingOutgoingMessages[pendingMessage.id] = pendingMessage
         }
 
         do {
-            try await firebaseService.sendMessage(userId: userId, to: address, body: body)
+            let outgoingId = try await VPSService.shared.sendMessage(address: address, body: body)
+
+            // Immediately sync an encrypted copy to user_messages so the message
+            // is never stored as plain text on the server
+            syncEncryptedSentMessage(id: outgoingId, address: address, body: body, isMms: false)
         } catch {
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }
@@ -1451,7 +1236,7 @@ class MessageStore: ObservableObject {
                 self.updateConversations(from: self.messages)
             }
 
-            pendingOutgoingQueue.sync {
+            _ = pendingOutgoingQueue.sync {
                 pendingOutgoingMessages.removeValue(forKey: pendingMessage.id)
             }
 
@@ -1521,60 +1306,41 @@ class MessageStore: ObservableObject {
     }
 
     func setReaction(messageId: String, reaction: String?) {
-        guard let userId = currentUserId else { return }
-
         if let reaction = reaction, !reaction.isEmpty {
             messageReactions[messageId] = reaction
         } else {
             messageReactions.removeValue(forKey: messageId)
         }
-
-        Task {
-            try? await firebaseService.setMessageReaction(
-                userId: userId,
-                messageId: messageId,
-                reaction: reaction
-            )
-        }
+        // Reactions are stored locally only (VPS does not have a reactions endpoint)
     }
 
     /// Delete a message
     func deleteMessage(_ message: Message) {
-        guard let userId = currentUserId else { return }
-
         // Optimistically remove from local state
         messages.removeAll { $0.id == message.id }
         updateConversations(from: messages)
 
-        // Also remove any reaction
         messageReactions.removeValue(forKey: message.id)
-
-        // Also unpin if pinned
         pinnedMessages.remove(message.id)
         savePinnedMessages()
 
-        // Delete from Firebase
         Task {
             do {
-                try await firebaseService.deleteMessages(userId: userId, messageIds: [message.id])
+                try await VPSService.shared.deleteMessages(messageIds: [message.id])
             } catch {
                 print("Failed to delete message: \(error)")
-                // Could re-add message on failure, but Firebase listener will sync anyway
             }
         }
     }
 
     /// Delete multiple messages
     func deleteMessages(_ messagesToDelete: [Message]) {
-        guard let userId = currentUserId else { return }
         let ids = Set(messagesToDelete.map { $0.id })
         if ids.isEmpty { return }
 
-        // Optimistically remove from local state
         messages.removeAll { ids.contains($0.id) }
         updateConversations(from: messages)
 
-        // Clean related local state
         ids.forEach { id in
             messageReactions.removeValue(forKey: id)
             readReceipts.removeValue(forKey: id)
@@ -1582,10 +1348,9 @@ class MessageStore: ObservableObject {
         pinnedMessages.subtract(ids)
         savePinnedMessages()
 
-        // Delete from Firebase
         Task {
             do {
-                try await firebaseService.deleteMessages(userId: userId, messageIds: Array(ids))
+                try await VPSService.shared.deleteMessages(messageIds: Array(ids))
             } catch {
                 print("Failed to delete messages: \(error)")
             }
@@ -1635,20 +1400,76 @@ class MessageStore: ObservableObject {
 
     func sendMmsMessage(userId: String, to address: String, body: String, attachment: SelectedAttachment) async throws {
         do {
-            try await firebaseService.sendMmsMessage(
-                userId: userId,
-                to: address,
-                body: body,
-                attachmentData: attachment.data,
+            // Upload attachment to R2 via VPS presigned URL
+            let uploadResponse = try await VPSService.shared.getFileUploadUrl(
                 fileName: attachment.fileName,
                 contentType: attachment.contentType,
-                attachmentType: attachment.type
+                fileSize: Int64(attachment.data.count)
             )
+
+            // PUT file data to presigned URL
+            var uploadRequest = URLRequest(url: URL(string: uploadResponse.uploadUrl)!)
+            uploadRequest.httpMethod = "PUT"
+            uploadRequest.setValue(attachment.contentType, forHTTPHeaderField: "Content-Type")
+            uploadRequest.httpBody = attachment.data
+            let (_, uploadHttpResponse) = try await URLSession.shared.data(for: uploadRequest)
+            guard let httpResp = uploadHttpResponse as? HTTPURLResponse, (200...299).contains(httpResp.statusCode) else {
+                throw VPSError.invalidResponse
+            }
+
+            // Confirm upload
+            try await VPSService.shared.confirmFileUpload(fileKey: uploadResponse.fileKey, fileSize: Int64(attachment.data.count))
+
+            // Send MMS message via VPS
+            let outgoingId = try await VPSService.shared.sendMmsMessage(
+                address: address,
+                body: body,
+                attachments: [[
+                    "fileKey": uploadResponse.fileKey,
+                    "contentType": attachment.contentType,
+                    "fileName": attachment.fileName
+                ]]
+            )
+
+            // Immediately sync an encrypted copy to user_messages
+            syncEncryptedSentMessage(id: outgoingId, address: address, body: body, isMms: true)
         } catch {
             DispatchQueue.main.async {
                 self.error = error
             }
             throw error
+        }
+    }
+
+    /// Encrypt the sent message body and sync to user_messages so the server
+    /// never holds plain text. When Android later syncs the real sent message
+    /// (with the SMS provider ID), the Mac deduplicates via pending-message matching.
+    private func syncEncryptedSentMessage(id: String, address: String, body: String, isMms: Bool) {
+        Task {
+            guard let encrypted = E2EEManager.shared.encryptForSync(body) else {
+                return
+            }
+
+            do {
+                let syncPayload: [String: Any] = [
+                    "id": id,
+                    "threadId": 0,
+                    "address": address,
+                    "body": "",
+                    "date": Int(Date().timeIntervalSince1970 * 1000),
+                    "type": 2,
+                    "read": true,
+                    "isMms": isMms,
+                    "encrypted": true,
+                    "encryptedBody": encrypted.encryptedBody,
+                    "encryptedNonce": encrypted.encryptedNonce,
+                    "keyMap": encrypted.keyMap
+                ]
+
+                try await VPSService.shared.syncSentMessage(syncPayload)
+            } catch {
+                print("[MessageStore] Failed to sync encrypted sent message: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -1894,11 +1715,14 @@ class MessageStore: ObservableObject {
                     )
                 }
                 await MainActor.run {
+                    let previousCount = self.spamMessages.count
                     self.spamMessages = mapped.sorted { $0.date > $1.date }
                     if self.selectedSpamAddress == nil {
                         self.selectedSpamAddress = self.spamMessages.first?.address
                     }
-                    print("[MessageStore VPS] Loaded \(mapped.count) spam messages")
+                    if mapped.count != previousCount {
+                        print("[MessageStore VPS] Loaded \(mapped.count) spam messages")
+                    }
                 }
             } catch {
                 print("[MessageStore VPS] Error loading spam: \(error.localizedDescription)")
@@ -1906,11 +1730,13 @@ class MessageStore: ObservableObject {
         }
     }
 
-    private func startSpamPolling() {
-        spamPollingTimer?.invalidate()
-        spamPollingTimer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
-            self?.loadSpamMessagesFromVPS()
-        }
+    private func startSpamWebSocketListener() {
+        VPSService.shared.spamUpdated
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.loadSpamMessagesFromVPS()
+            }
+            .store(in: &vpsCancellables)
     }
 
     // MARK: - Search
@@ -2100,48 +1926,12 @@ class MessageStore: ObservableObject {
     // MARK: - Contacts lookup
 
     private func startListeningForContacts(userId: String) {
-        // BANDWIDTH OPTIMIZATION: Use child observers for delta-only sync (~95% bandwidth reduction)
-        // Instead of fetching all contacts on every change, only receives individual changes
+        // VPS contacts are loaded via REST + WebSocket push
         contactsListenerUserId = userId
-        contactsListenerHandles = firebaseService.listenToContactsOptimized(
-            userId: userId,
-            onAdded: { [weak self] contact in
-                DispatchQueue.main.async {
-                    guard let self = self else { return }
-                    // Add new contact, avoiding duplicates
-                    if !self.latestContacts.contains(where: { $0.id == contact.id }) {
-                        self.latestContacts.append(contact)
-                        self.latestContacts.sort { $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending }
-                        self.rebuildContactLookup()
-                    }
-                }
-            },
-            onChanged: { [weak self] contact in
-                DispatchQueue.main.async {
-                    guard let self = self else { return }
-                    // Update existing contact
-                    if let index = self.latestContacts.firstIndex(where: { $0.id == contact.id }) {
-                        self.latestContacts[index] = contact
-                        self.rebuildContactLookup()
-                    }
-                }
-            },
-            onRemoved: { [weak self] contactId in
-                DispatchQueue.main.async {
-                    guard let self = self else { return }
-                    // Remove deleted contact
-                    self.latestContacts.removeAll { $0.id == contactId }
-                    self.rebuildContactLookup()
-                }
-            }
-        )
+        // Handled by startListeningForContactsVPS in the VPS listening path
     }
 
     private func stopListeningForContacts() {
-        if let handles = contactsListenerHandles, let userId = contactsListenerUserId {
-            firebaseService.removeContactsOptimizedListeners(userId: userId, handles: handles)
-        }
-        contactsListenerHandles = nil
         contactsListenerUserId = nil
         latestContacts = []
         contactNameLookup = [:]

@@ -6,7 +6,6 @@
 //
 
 import Foundation
-// FirebaseDatabase - using FirebaseStubs.swift
 import Combine
 
 @MainActor
@@ -21,85 +20,36 @@ class GroupMessagingViewModel: ObservableObject {
 
     // MARK: - Private Properties
 
-    private let database = Database.database()
-    private var groupsHandle: DatabaseHandle?
-    private var contactsHandle: DatabaseHandle?
     private var currentGroupId: String?
 
     private var userId: String? {
-        FirebaseService.shared.getCurrentUser()
+        UserDefaults.standard.string(forKey: "syncflow_user_id")
     }
 
     // MARK: - Initialization
 
     init() {
-        Task {
-            await startListening()
-        }
+        // Group messaging not yet implemented via VPS
     }
 
     deinit {
-        let db = database
-        let uid = FirebaseService.shared.getCurrentUser()
-        let gHandle = groupsHandle
-        let cHandle = contactsHandle
-        let cGroupId = currentGroupId
-
-        if let userId = uid {
-            if let handle = gHandle {
-                db.reference().child("users").child(userId).child("friend_groups").removeObserver(withHandle: handle)
-            }
-            if let handle = cHandle, let groupId = cGroupId {
-                db.reference().child("users").child(userId).child("friend_groups").child(groupId).child("contacts").removeObserver(withHandle: handle)
-            }
-        }
+        // No listeners to clean up
     }
 
     // MARK: - Listeners
 
     func startListening() async {
-        guard let userId = userId else { return }
-
-        let groupsRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("friend_groups")
-
-        groupsHandle = groupsRef.observe(.value) { [weak self] snapshot in
-            Task { @MainActor in
-                guard let self = self else { return }
-
-                guard snapshot.exists(),
-                      let groupsDict = snapshot.value as? [String: [String: Any]] else {
-                    self.groups = []
-                    return
-                }
-
-                self.groups = groupsDict.compactMap { (id, data) in
-                    ContactGroup.from(data, id: id)
-                }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-            }
-        }
+        // Group messaging listeners not yet implemented via VPS
     }
 
     func stopListening() {
-        guard let userId = userId else { return }
-
-        if let handle = groupsHandle {
-            database.reference()
-                .child("users")
-                .child(userId)
-                .child("friend_groups")
-                .removeObserver(withHandle: handle)
-        }
-
-        stopListeningToContacts()
+        // No-op
     }
 
     // MARK: - Group Management
 
     func createGroup(name: String) async throws {
-        guard let userId = userId else {
+        guard userId != nil else {
             throw GroupError.notAuthenticated
         }
 
@@ -107,45 +57,21 @@ class GroupMessagingViewModel: ObservableObject {
             throw GroupError.invalidGroupName
         }
 
-        isLoading = true
-        defer { isLoading = false }
-
-        let groupRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("friend_groups")
-            .childByAutoId()
-
-        let groupData: [String: Any] = [
-            "name": name.trimmingCharacters(in: .whitespaces),
-            "created_at": ServerValue.timestamp(),
-            "contact_count": 0
-        ]
-
-        try await groupRef.setValue(groupData)
-        successMessage = "Group '\(name)' created"
+        // Group creation not yet implemented via VPS
+        errorMessage = "Group messaging is not yet available"
     }
 
     func deleteGroup(_ group: ContactGroup) async throws {
-        guard let userId = userId else {
+        guard userId != nil else {
             throw GroupError.notAuthenticated
         }
 
-        isLoading = true
-        defer { isLoading = false }
-
-        let groupRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("friend_groups")
-            .child(group.id)
-
-        try await groupRef.removeValue()
-        successMessage = "Group deleted"
+        // Group deletion not yet implemented via VPS
+        errorMessage = "Group messaging is not yet available"
     }
 
     func renameGroup(_ group: ContactGroup, to newName: String) async throws {
-        guard let userId = userId else {
+        guard userId != nil else {
             throw GroupError.notAuthenticated
         }
 
@@ -153,76 +79,26 @@ class GroupMessagingViewModel: ObservableObject {
             throw GroupError.invalidGroupName
         }
 
-        isLoading = true
-        defer { isLoading = false }
-
-        let groupRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("friend_groups")
-            .child(group.id)
-            .child("name")
-
-        try await groupRef.setValue(newName.trimmingCharacters(in: .whitespaces))
-        successMessage = "Group renamed"
+        // Group rename not yet implemented via VPS
+        errorMessage = "Group messaging is not yet available"
     }
 
     // MARK: - Contact Management
 
     func loadGroupContacts(for group: ContactGroup) async throws {
-        guard let userId = userId else {
+        guard userId != nil else {
             throw GroupError.notAuthenticated
         }
 
-        if currentGroupId != group.id {
-            stopListeningToContacts()
-            currentGroupId = group.id
-        }
-
-        isLoading = true
-
-        let contactsRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("friend_groups")
-            .child(group.id)
-            .child("contacts")
-
-        contactsHandle = contactsRef.observe(.value) { [weak self] snapshot in
-            Task { @MainActor in
-                guard let self = self else { return }
-                self.isLoading = false
-
-                guard snapshot.exists(),
-                      let contactsDict = snapshot.value as? [String: [String: Any]] else {
-                    self.groupContacts = []
-                    return
-                }
-
-                self.groupContacts = contactsDict.compactMap { (id, data) in
-                    GroupContact.from(data, id: id)
-                }.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-            }
-        }
+        // Group contacts not yet implemented via VPS
     }
 
     func stopListeningToContacts() {
-        guard let userId = userId, let groupId = currentGroupId, let handle = contactsHandle else { return }
-
-        database.reference()
-            .child("users")
-            .child(userId)
-            .child("friend_groups")
-            .child(groupId)
-            .child("contacts")
-            .removeObserver(withHandle: handle)
-
-        contactsHandle = nil
         currentGroupId = nil
     }
 
     func addContactToGroup(groupId: String, name: String, phone: String) async throws {
-        guard let userId = userId else {
+        guard userId != nil else {
             throw GroupError.notAuthenticated
         }
 
@@ -234,107 +110,33 @@ class GroupMessagingViewModel: ObservableObject {
             throw GroupError.invalidPhoneNumber
         }
 
-        isLoading = true
-        defer { isLoading = false }
-
-        let normalizedPhone = normalizePhoneNumber(phone)
-        let contactId = normalizedPhone.replacingOccurrences(of: "+", with: "")
-
-        let contactRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("friend_groups")
-            .child(groupId)
-            .child("contacts")
-            .child(contactId)
-
-        let contactData: [String: Any] = [
-            "name": name.trimmingCharacters(in: .whitespaces),
-            "phone": normalizedPhone,
-            "added_at": ServerValue.timestamp()
-        ]
-
-        try await contactRef.setValue(contactData)
-        try await updateContactCount(groupId: groupId)
-        successMessage = "Contact added"
+        // Not yet implemented via VPS
+        errorMessage = "Group messaging is not yet available"
     }
 
     func addContactsToGroup(groupId: String, contacts: [GroupContact]) async throws {
-        guard let userId = userId else {
+        guard userId != nil else {
             throw GroupError.notAuthenticated
         }
 
-        isLoading = true
-        defer { isLoading = false }
-
-        var updates: [String: Any] = [:]
-
-        for contact in contacts {
-            let normalizedPhone = normalizePhoneNumber(contact.phone)
-            let contactId = normalizedPhone.replacingOccurrences(of: "+", with: "")
-            let path = "users/\(userId)/friend_groups/\(groupId)/contacts/\(contactId)"
-
-            updates[path] = [
-                "name": contact.name,
-                "phone": normalizedPhone,
-                "added_at": ServerValue.timestamp()
-            ]
-        }
-
-        try await database.reference().updateChildValues(updates)
-        try await updateContactCount(groupId: groupId)
-        successMessage = "\(contacts.count) contacts added"
+        // Not yet implemented via VPS
+        errorMessage = "Group messaging is not yet available"
     }
 
     func removeContactFromGroup(groupId: String, contactId: String) async throws {
-        guard let userId = userId else {
+        guard userId != nil else {
             throw GroupError.notAuthenticated
         }
 
-        isLoading = true
-        defer { isLoading = false }
-
-        let contactRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("friend_groups")
-            .child(groupId)
-            .child("contacts")
-            .child(contactId)
-
-        try await contactRef.removeValue()
-        try await updateContactCount(groupId: groupId)
-        successMessage = "Contact removed"
-    }
-
-    private func updateContactCount(groupId: String) async throws {
-        guard let userId = userId else { return }
-
-        let contactsRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("friend_groups")
-            .child(groupId)
-            .child("contacts")
-
-        let snapshot = try await contactsRef.getData()
-        let count = Int(snapshot.childrenCount)
-
-        let countRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("friend_groups")
-            .child(groupId)
-            .child("contact_count")
-
-        try await countRef.setValue(count)
+        // Not yet implemented via VPS
+        errorMessage = "Group messaging is not yet available"
     }
 
     // MARK: - Send Group Message
 
-    /// Sends a message to all contacts in a group using existing SMS infrastructure
+    /// Sends a message to all contacts in a group using VPS
     func sendGroupMessage(group: ContactGroup, message: String) async throws {
-        guard let userId = userId else {
+        guard userId != nil else {
             throw GroupError.notAuthenticated
         }
 
@@ -342,38 +144,18 @@ class GroupMessagingViewModel: ObservableObject {
             throw GroupError.emptyMessage
         }
 
-        // Load contacts if not already loaded
-        let contactsRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("friend_groups")
-            .child(group.id)
-            .child("contacts")
-
-        let snapshot = try await contactsRef.getData()
-
-        guard snapshot.exists(),
-              let contactsDict = snapshot.value as? [String: [String: Any]] else {
-            throw GroupError.emptyGroup
-        }
-
-        let contacts = contactsDict.compactMap { (id, data) -> GroupContact? in
-            GroupContact.from(data, id: id)
-        }
-
-        guard !contacts.isEmpty else {
+        guard !groupContacts.isEmpty else {
             throw GroupError.emptyGroup
         }
 
         isLoading = true
         defer { isLoading = false }
 
-        // Send message to each contact using FirebaseService
-        for contact in contacts {
+        // Send message to each contact using VPS
+        for contact in groupContacts {
             do {
-                try await FirebaseService.shared.sendMessage(
-                    userId: userId,
-                    to: contact.phone,
+                try await VPSService.shared.sendMessage(
+                    address: contact.phone,
                     body: message
                 )
             } catch {
@@ -382,7 +164,7 @@ class GroupMessagingViewModel: ObservableObject {
             }
         }
 
-        successMessage = "Message sent to \(contacts.count) contacts"
+        successMessage = "Message sent to \(groupContacts.count) contacts"
     }
 
     // MARK: - Helper Methods

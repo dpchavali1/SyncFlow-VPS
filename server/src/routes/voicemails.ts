@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { query, queryOne } from '../services/database';
 import { authenticate } from '../middleware/auth';
 import { apiRateLimit } from '../middleware/rateLimit';
+import { normalizePhoneNumber } from '../utils/phoneNumber';
 
 const router = Router();
 
@@ -66,7 +67,7 @@ router.post('/', async (req: Request, res: Response) => {
        ON CONFLICT (id) DO UPDATE SET
          transcription = COALESCE(EXCLUDED.transcription, user_voicemails.transcription),
          is_read = EXCLUDED.is_read`,
-      [voicemailId, userId, body.phoneNumber, body.duration,
+      [voicemailId, userId, normalizePhoneNumber(body.phoneNumber), body.duration,
        body.storageUrl, body.transcription, body.date, body.isRead]
     );
 

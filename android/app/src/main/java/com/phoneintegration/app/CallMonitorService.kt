@@ -197,6 +197,8 @@ class CallMonitorService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "CallMonitorService started")
+        // Poll for pending call requests on each start (handles FCM wake-up + missed WebSocket events)
+        pollPendingCallRequests()
         return START_STICKY
     }
 
@@ -586,6 +588,22 @@ class CallMonitorService : Service() {
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error in call requests listener", e)
+            }
+        }
+    }
+
+    private fun pollPendingCallRequests() {
+        serviceScope.launch(Dispatchers.IO) {
+            try {
+                val requests = vpsSyncService.getCallRequests()
+                for (request in requests) {
+                    if (request.status == "pending") {
+                        Log.d(TAG, "Found pending call request from poll: ${request.phoneNumber}")
+                        processCallRequest(request)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error polling pending call requests", e)
             }
         }
     }

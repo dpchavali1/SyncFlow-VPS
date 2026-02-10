@@ -226,23 +226,8 @@ class PhotoSyncService(context: Context) {
      * @return true if user has premium access, false otherwise
      */
     private suspend fun hasPremiumAccess(): Boolean {
-        if (!vpsClient.isAuthenticated) return false
-
-        return try {
-            val subscription = vpsClient.getUserSubscription()
-            val planRaw = (subscription["plan"] as? String)?.lowercase()
-            val planExpiresAt = subscription["planExpiresAt"] as? Long
-            val now = System.currentTimeMillis()
-
-            when (planRaw) {
-                "lifetime", "3year" -> true
-                "monthly", "yearly", "paid" -> planExpiresAt?.let { it > now } ?: true
-                else -> false // Trial users and free users don't have access
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error checking premium status", e)
-            false
-        }
+        // Photo sync is available to all users (limited by storage quota on server)
+        return vpsClient.isAuthenticated
     }
 
     // -------------------------------------------------------------------------

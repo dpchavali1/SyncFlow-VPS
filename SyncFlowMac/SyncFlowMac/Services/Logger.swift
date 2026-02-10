@@ -15,14 +15,14 @@ enum Logger {
 
     // Log categories
     private static let general = OSLog(subsystem: subsystem, category: "general")
-    private static let firebase = OSLog(subsystem: subsystem, category: "firebase")
+    private static let vps = OSLog(subsystem: subsystem, category: "vps")
     private static let calls = OSLog(subsystem: subsystem, category: "calls")
     private static let sync = OSLog(subsystem: subsystem, category: "sync")
     private static let webrtc = OSLog(subsystem: subsystem, category: "webrtc")
 
     enum Category {
         case general
-        case firebase
+        case vps
         case calls
         case sync
         case webrtc
@@ -30,7 +30,7 @@ enum Logger {
         var log: OSLog {
             switch self {
             case .general: return Logger.general
-            case .firebase: return Logger.firebase
+            case .vps: return Logger.vps
             case .calls: return Logger.calls
             case .sync: return Logger.sync
             case .webrtc: return Logger.webrtc

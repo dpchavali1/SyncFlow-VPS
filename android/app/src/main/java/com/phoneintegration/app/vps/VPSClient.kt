@@ -8,10 +8,13 @@
 package com.phoneintegration.app.vps
 
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
+import android.os.Build
 import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.phoneintegration.app.SimManager
 import com.google.gson.FieldNamingPolicy
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
@@ -135,7 +138,9 @@ data class VPSOutgoingMessage(
     val address: String,
     val body: String,
     val timestamp: Long,
-    val simSubscriptionId: Int? = null
+    val simSubscriptionId: Int? = null,
+    val isMms: Boolean = false,
+    val attachments: List<Map<String, Any?>>? = null
 )
 
 data class VPSCallRequest(
@@ -191,6 +196,7 @@ data class VPSUsageData(
     val monthlyUploadBytes: Long,
     val monthlyMmsBytes: Long,
     val monthlyFileBytes: Long,
+    val monthlyPhotoBytes: Long = 0,
     val lastUpdatedAt: Long?
 )
 
@@ -333,17 +339,35 @@ data class VPSBlocklistResponse(
     val blocklist: List<VPSBlocklistEntry>
 )
 
+// Response wrappers to avoid Gson type erasure with Map<String, List<T>>
+data class VPSOutgoingMessagesResponse(val messages: List<VPSOutgoingMessage> = emptyList())
+data class VPSCallRequestsResponse(val requests: List<VPSCallRequest> = emptyList())
+data class VPSCallCommandsResponse(val commands: List<VPSCallCommand> = emptyList())
+data class VPSReadReceiptsResponse(val receipts: List<VPSReadReceipt> = emptyList())
+data class VPSContinuityStatesResponse(val states: List<VPSContinuityState> = emptyList())
+data class VPSMediaCommandsResponse(val commands: List<VPSMediaCommand> = emptyList())
+data class VPSDndCommandsResponse(val commands: List<VPSDndCommand> = emptyList())
+data class VPSSharedLinksResponse(val links: List<VPSSharedLink> = emptyList())
+data class VPSHotspotCommandsResponse(val commands: List<VPSHotspotCommand> = emptyList())
+data class VPSFindPhoneRequestsResponse(val requests: List<VPSFindPhoneRequest> = emptyList())
+data class VPSScheduledMessagesResponse(val messages: List<VPSScheduledMessage> = emptyList())
+
 // File transfer
 data class VPSFileTransfer(
     val id: String,
-    val fileName: String,
-    val fileSize: Long,
-    val contentType: String,
+    val fileName: String = "",
+    val fileSize: Long = 0,
+    val contentType: String? = null,
     val downloadUrl: String? = null,
     val r2Key: String? = null,
-    val source: String,
-    val status: String,
-    val timestamp: Long
+    val source: String? = null,
+    val status: String? = null,
+    val timestamp: Long = 0
+)
+
+// File transfers response wrapper (needed for Gson to properly deserialize nested generics)
+data class VPSFileTransfersResponse(
+    val transfers: List<VPSFileTransfer> = emptyList()
 )
 
 // Upload URL response
@@ -363,6 +387,14 @@ data class VPSRemoteContact(
     val androidContactId: Long? = null,
     val sync: Map<String, Any>? = null
 )
+
+// ==================== WebRTC Signal Listener ====================
+
+interface WebRTCSignalListener {
+    fun onWebRTCSignal(callId: String, signalType: String, signalData: Any, fromDevice: String)
+    fun onIncomingSyncFlowCall(callId: String, callerId: String, callerName: String, callType: String)
+    fun onSyncFlowCallStatus(callId: String, status: String)
+}
 
 // ==================== WebSocket Listener ====================
 
@@ -446,6 +478,7 @@ class VPSClient private constructor(
 
     private var webSocket: WebSocket? = null
     private var wsListener: VPSWebSocketListener? = null
+    var webrtcSignalListener: WebRTCSignalListener? = null
     private val subscriptions = mutableSetOf<String>()
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -460,6 +493,23 @@ class VPSClient private constructor(
         refreshToken = prefs.getString("refreshToken", null)
         _userId = prefs.getString("userId", null)
         _deviceId = prefs.getString("deviceId", null)
+
+        // Register FCM token if already authenticated (restored session)
+        if (isAuthenticated) {
+            com.google.firebase.messaging.FirebaseMessaging.getInstance().token
+                .addOnSuccessListener { fcmToken ->
+                    scope.launch {
+                        try {
+                            registerFcmToken(fcmToken)
+                        } catch (e: Exception) {
+                            Log.w(TAG, "FCM token registration failed: ${e.message}")
+                        }
+                    }
+                }
+                .addOnFailureListener { e ->
+                    Log.w(TAG, "FCM token fetch failed: ${e.message}")
+                }
+        }
 
         // Keep base URL in sync with settings
         scope.launch {
@@ -524,6 +574,25 @@ class VPSClient private constructor(
         val response = post<VPSAuthResponse>("/api/auth/firebase", body, skipAuth = true)
         saveTokens(response.accessToken, response.refreshToken, response.userId, response.deviceId)
         Log.i(TAG, "Authenticated with Firebase UID: ${response.userId}")
+
+        // Auto-register phone numbers from SIM for call lookup (fire-and-forget)
+        scope.launch { autoRegisterPhoneNumbers() }
+
+        // Register FCM token for push notifications (fire-and-forget)
+        com.google.firebase.messaging.FirebaseMessaging.getInstance().token
+            .addOnSuccessListener { fcmToken ->
+                scope.launch {
+                    try {
+                        registerFcmToken(fcmToken)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "FCM token registration failed: ${e.message}")
+                    }
+                }
+            }
+            .addOnFailureListener { e ->
+                Log.w(TAG, "FCM token fetch failed: ${e.message}")
+            }
+
         VPSUser(response.userId, response.deviceId)
     }
 
@@ -630,8 +699,8 @@ class VPSClient private constructor(
         }
 
     suspend fun getOutgoingMessages(): List<VPSOutgoingMessage> = withContext(Dispatchers.IO) {
-        val response: Map<String, List<VPSOutgoingMessage>> = get("/api/messages/outgoing")
-        response["messages"] ?: emptyList()
+        val response: VPSOutgoingMessagesResponse = get("/api/messages/outgoing")
+        response.messages
     }
 
     suspend fun updateOutgoingStatus(id: String, status: String, error: String? = null): Unit =
@@ -639,6 +708,11 @@ class VPSClient private constructor(
             val body = mutableMapOf<String, Any>("status" to status)
             error?.let { body["error"] = it }
             put("/api/messages/outgoing/$id/status", body)
+        }
+
+    suspend fun updateMessageDeliveryStatus(id: String, status: String): Unit =
+        withContext(Dispatchers.IO) {
+            put("/api/messages/$id/delivery-status", mapOf("status" to status))
         }
 
     suspend fun markMessageRead(id: String): Unit = withContext(Dispatchers.IO) {
@@ -693,6 +767,11 @@ class VPSClient private constructor(
                 if (callDateValue != null && !updated.containsKey("callDate")) {
                     updated = updated + mapOf("callDate" to callDateValue)
                 }
+                // Normalize phone number to E.164
+                val phone = updated["phoneNumber"] as? String
+                if (phone != null) {
+                    updated = updated + mapOf("phoneNumber" to com.phoneintegration.app.PhoneNumberUtils.toE164(phone))
+                }
                 val typeValue = call["callType"]
                 val normalizedType = when (typeValue) {
                     is String -> typeValue
@@ -710,14 +789,14 @@ class VPSClient private constructor(
 
     suspend fun requestCall(phoneNumber: String, simSubscriptionId: Int? = null): Map<String, String> =
         withContext(Dispatchers.IO) {
-            val body = mutableMapOf<String, Any>("phoneNumber" to phoneNumber)
+            val body = mutableMapOf<String, Any>("phoneNumber" to com.phoneintegration.app.PhoneNumberUtils.toE164(phoneNumber))
             simSubscriptionId?.let { body["simSubscriptionId"] = it }
             post("/api/calls/request", body)
         }
 
     suspend fun getCallRequests(): List<VPSCallRequest> = withContext(Dispatchers.IO) {
-        val response: Map<String, List<VPSCallRequest>> = get("/api/calls/requests")
-        response["requests"] ?: emptyList()
+        val response: VPSCallRequestsResponse = get("/api/calls/requests")
+        response.requests
     }
 
     suspend fun updateCallRequestStatus(id: String, status: String): Unit =
@@ -730,7 +809,7 @@ class VPSClient private constructor(
     suspend fun syncActiveCall(call: VPSActiveCall): Unit = withContext(Dispatchers.IO) {
         post<Map<String, Any>>("/api/calls/active", mapOf(
             "id" to call.id,
-            "phoneNumber" to call.phoneNumber,
+            "phoneNumber" to com.phoneintegration.app.PhoneNumberUtils.toE164(call.phoneNumber),
             "contactName" to (call.contactName ?: ""),
             "state" to call.state,
             "callType" to call.callType,
@@ -749,8 +828,8 @@ class VPSClient private constructor(
 
     suspend fun getCallCommands(): List<VPSCallCommand> = withContext(Dispatchers.IO) {
         try {
-            val response: Map<String, List<VPSCallCommand>> = get("/api/calls/commands")
-            response["commands"] ?: emptyList()
+            val response: VPSCallCommandsResponse = get("/api/calls/commands")
+            response.commands
         } catch (e: Exception) {
             Log.e(TAG, "Error getting call commands: ${e.message}")
             emptyList()
@@ -765,6 +844,104 @@ class VPSClient private constructor(
                 Log.e(TAG, "Error marking call command processed: ${e.message}")
             }
         }
+
+    // ==================== SyncFlow Calls & WebRTC Signaling ====================
+
+    suspend fun getTurnCredentials(): Map<String, Any> = withContext(Dispatchers.IO) {
+        get("/api/calls/turn-credentials")
+    }
+
+    suspend fun createSyncFlowCall(calleeId: String, calleeName: String, callType: String): Map<String, Any> =
+        withContext(Dispatchers.IO) {
+            post("/api/calls/syncflow", mapOf(
+                "calleeId" to com.phoneintegration.app.PhoneNumberUtils.toE164(calleeId),
+                "calleeName" to calleeName,
+                "callerName" to (android.os.Build.MODEL ?: "Android"),
+                "callerPlatform" to "android",
+                "callType" to callType
+            ))
+        }
+
+    suspend fun updateSyncFlowCallStatus(callId: String, status: String): Unit =
+        withContext(Dispatchers.IO) {
+            put("/api/calls/syncflow/$callId/status", mapOf("status" to status))
+        }
+
+    /**
+     * Get pending ringing SyncFlow calls where the current user is the callee.
+     * Used as fallback when FCM push notifications fail to wake the app.
+     */
+    suspend fun getPendingSyncFlowCalls(): List<Map<String, Any>> = withContext(Dispatchers.IO) {
+        try {
+            val type = object : TypeToken<Map<String, List<Map<String, Any>>>>() {}.type
+            val body = executeRequestInternal(
+                Request.Builder()
+                    .url("${baseUrl}/api/calls/syncflow/pending")
+                    .apply { accessToken?.let { addHeader("Authorization", "Bearer $it") } }
+                    .build(),
+                allowRetry = true
+            )
+            val response: Map<String, List<Map<String, Any>>> = gson.fromJson(body ?: "{}", type)
+            response["calls"] ?: emptyList()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting pending SyncFlow calls: ${e.message}")
+            emptyList()
+        }
+    }
+
+    suspend fun getSyncFlowCallStatus(callId: String): String? = withContext(Dispatchers.IO) {
+        try {
+            val response: Map<String, Any> = get("/api/calls/syncflow/$callId")
+            response["status"] as? String
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting call status: ${e.message}")
+            null
+        }
+    }
+
+    suspend fun sendSignal(callId: String, signalType: String, signalData: Any, toDevice: String? = null): Unit =
+        withContext(Dispatchers.IO) {
+            val body = mutableMapOf<String, Any>(
+                "callId" to callId,
+                "signalType" to signalType,
+                "signalData" to signalData
+            )
+            toDevice?.let { body["toDevice"] = it }
+            post<Map<String, Any>>("/api/calls/signaling", body)
+        }
+
+    suspend fun getSignals(callId: String): List<Map<String, Any>> = withContext(Dispatchers.IO) {
+        try {
+            val type = object : TypeToken<Map<String, List<Map<String, Any>>>>() {}.type
+            val body = executeRequestInternal(
+                Request.Builder()
+                    .url("${baseUrl}/api/calls/signaling/$callId")
+                    .apply { accessToken?.let { addHeader("Authorization", "Bearer $it") } }
+                    .build(),
+                allowRetry = true
+            )
+            val response: Map<String, List<Map<String, Any>>> = gson.fromJson(body ?: "{}", type)
+            response["signals"] ?: emptyList()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error getting signals: ${e.message}")
+            emptyList()
+        }
+    }
+
+    suspend fun deleteSignals(callId: String): Unit = withContext(Dispatchers.IO) {
+        delete("/api/calls/signaling/$callId")
+    }
+
+    fun sendWebSocketSignal(callId: String, signalType: String, signalData: Any, toDevice: String? = null) {
+        val msg = mutableMapOf<String, Any>(
+            "type" to "webrtc_signal",
+            "callId" to callId,
+            "signalType" to signalType,
+            "signalData" to signalData
+        )
+        toDevice?.let { msg["toDevice"] = it }
+        webSocket?.send(gson.toJson(msg))
+    }
 
     // ==================== Devices ====================
 
@@ -836,6 +1013,7 @@ class VPSClient private constructor(
                     monthlyUploadBytes = 0,
                     monthlyMmsBytes = 0,
                     monthlyFileBytes = 0,
+                    monthlyPhotoBytes = 0,
                     lastUpdatedAt = null
                 )
             )
@@ -844,7 +1022,7 @@ class VPSClient private constructor(
 
     suspend fun clearMmsData(): VPSClearMmsResult = withContext(Dispatchers.IO) {
         try {
-            post("/api/mms/clear", null)
+            post("/api/usage/reset-storage", null)
         } catch (e: Exception) {
             Log.e(TAG, "Error clearing MMS data: ${e.message}")
             VPSClearMmsResult(success = false, deletedFiles = 0, freedBytes = 0)
@@ -892,11 +1070,49 @@ class VPSClient private constructor(
 
     suspend fun registerPhoneNumber(phoneNumber: String): VPSRegisterPhoneResult = withContext(Dispatchers.IO) {
         try {
-            post("/api/calls/register", mapOf("phoneNumber" to phoneNumber))
+            post("/api/calls/register", mapOf("phoneNumber" to com.phoneintegration.app.PhoneNumberUtils.toE164(phoneNumber)))
         } catch (e: Exception) {
             Log.e(TAG, "Error registering phone: ${e.message}")
             VPSRegisterPhoneResult(success = false, error = e.message)
         }
+    }
+
+    /**
+     * Auto-register phone numbers from SIM cards for call lookup.
+     * Safe to call multiple times — the server uses ON CONFLICT DO UPDATE.
+     */
+    suspend fun autoRegisterPhoneNumbers() {
+        try {
+            val simManager = SimManager(context)
+            val sims = simManager.getActiveSims()
+            for (sim in sims) {
+                val phone = sim.phoneNumber
+                if (!phone.isNullOrEmpty() && phone != "Unknown") {
+                    try {
+                        registerPhoneNumber(phone)
+                        Log.d(TAG, "Auto-registered phone $phone for call lookup")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to auto-register phone $phone: ${e.message}")
+                    }
+                }
+            }
+            if (sims.isEmpty() || sims.all { it.phoneNumber.isNullOrEmpty() || it.phoneNumber == "Unknown" }) {
+                Log.w(TAG, "No phone numbers available from SIM to auto-register")
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Auto phone registration failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Register FCM token with the VPS server for push notifications.
+     */
+    suspend fun registerFcmToken(token: String) = withContext(Dispatchers.IO) {
+        post<Map<String, Any>>("/api/devices/fcm-token", mapOf(
+            "token" to token,
+            "platform" to "android"
+        ))
+        Log.d(TAG, "FCM token registered with VPS server")
     }
 
     /**
@@ -948,8 +1164,8 @@ class VPSClient private constructor(
 
     suspend fun getReadReceipts(): List<VPSReadReceipt> = withContext(Dispatchers.IO) {
         try {
-            val response: Map<String, List<VPSReadReceipt>> = get("/api/read-receipts")
-            response["receipts"] ?: emptyList()
+            val response: VPSReadReceiptsResponse = get("/api/read-receipts")
+            response.receipts
         } catch (e: Exception) {
             Log.e(TAG, "Error getting read receipts: ${e.message}")
             emptyList()
@@ -1021,8 +1237,8 @@ class VPSClient private constructor(
 
     suspend fun getContinuityStates(): List<VPSContinuityState> = withContext(Dispatchers.IO) {
         try {
-            val response: Map<String, List<VPSContinuityState>> = get("/api/continuity")
-            response["states"] ?: emptyList()
+            val response: VPSContinuityStatesResponse = get("/api/continuity")
+            response.states
         } catch (e: Exception) {
             Log.e(TAG, "Error getting continuity states: ${e.message}")
             emptyList()
@@ -1070,8 +1286,8 @@ class VPSClient private constructor(
 
     suspend fun getMediaCommands(): List<VPSMediaCommand> = withContext(Dispatchers.IO) {
         try {
-            val response: Map<String, List<VPSMediaCommand>> = get("/api/media/commands")
-            response["commands"] ?: emptyList()
+            val response: VPSMediaCommandsResponse = get("/api/media/commands")
+            response.commands
         } catch (e: Exception) {
             Log.e(TAG, "Error getting media commands: ${e.message}")
             emptyList()
@@ -1098,8 +1314,8 @@ class VPSClient private constructor(
 
     suspend fun getDndCommands(): List<VPSDndCommand> = withContext(Dispatchers.IO) {
         try {
-            val response: Map<String, List<VPSDndCommand>> = get("/api/dnd/commands")
-            response["commands"] ?: emptyList()
+            val response: VPSDndCommandsResponse = get("/api/dnd/commands")
+            response.commands
         } catch (e: Exception) {
             Log.e(TAG, "Error getting DND commands: ${e.message}")
             emptyList()
@@ -1145,8 +1361,8 @@ class VPSClient private constructor(
 
     suspend fun getSharedLinks(): List<VPSSharedLink> = withContext(Dispatchers.IO) {
         try {
-            val response: Map<String, List<VPSSharedLink>> = get("/api/links/shared")
-            response["links"] ?: emptyList()
+            val response: VPSSharedLinksResponse = get("/api/links/shared")
+            response.links
         } catch (e: Exception) {
             Log.e(TAG, "Error getting shared links: ${e.message}")
             emptyList()
@@ -1165,8 +1381,8 @@ class VPSClient private constructor(
 
     suspend fun getHotspotCommands(): List<VPSHotspotCommand> = withContext(Dispatchers.IO) {
         try {
-            val response: Map<String, List<VPSHotspotCommand>> = get("/api/hotspot/commands")
-            response["commands"] ?: emptyList()
+            val response: VPSHotspotCommandsResponse = get("/api/hotspot/commands")
+            response.commands
         } catch (e: Exception) {
             Log.e(TAG, "Error getting hotspot commands: ${e.message}")
             emptyList()
@@ -1193,8 +1409,8 @@ class VPSClient private constructor(
 
     suspend fun getFindPhoneRequests(): List<VPSFindPhoneRequest> = withContext(Dispatchers.IO) {
         try {
-            val response: Map<String, List<VPSFindPhoneRequest>> = get("/api/find-phone/requests")
-            response["requests"] ?: emptyList()
+            val response: VPSFindPhoneRequestsResponse = get("/api/find-phone/requests")
+            response.requests
         } catch (e: Exception) {
             Log.e(TAG, "Error getting find phone requests: ${e.message}")
             emptyList()
@@ -1240,7 +1456,15 @@ class VPSClient private constructor(
 
     suspend fun getDeviceMessages(deviceId: String): List<Map<String, Any>> = withContext(Dispatchers.IO) {
         try {
-            val response: Map<String, List<Map<String, Any>>> = get("/api/device-data/$deviceId/messages")
+            val type = object : TypeToken<Map<String, List<Map<String, Any>>>>() {}.type
+            val body = executeRequestInternal(
+                Request.Builder()
+                    .url("${baseUrl}/api/device-data/$deviceId/messages")
+                    .apply { accessToken?.let { addHeader("Authorization", "Bearer $it") } }
+                    .build(),
+                allowRetry = true
+            )
+            val response: Map<String, List<Map<String, Any>>> = gson.fromJson(body ?: "{}", type)
             response["messages"] ?: emptyList()
         } catch (e: Exception) {
             Log.e(TAG, "Error getting device messages: ${e.message}")
@@ -1344,8 +1568,8 @@ class VPSClient private constructor(
 
     suspend fun getScheduledMessages(): List<VPSScheduledMessage> = withContext(Dispatchers.IO) {
         try {
-            val response: Map<String, List<VPSScheduledMessage>> = get("/api/scheduled-messages")
-            response["messages"] ?: emptyList()
+            val response: VPSScheduledMessagesResponse = get("/api/scheduled-messages")
+            response.messages
         } catch (e: Exception) {
             Log.e(TAG, "Error getting scheduled messages: ${e.message}")
             emptyList()
@@ -1376,8 +1600,8 @@ class VPSClient private constructor(
 
     suspend fun getFileTransfers(): List<VPSFileTransfer> = withContext(Dispatchers.IO) {
         try {
-            val response: Map<String, List<VPSFileTransfer>> = get("/api/file-transfers")
-            response["transfers"] ?: emptyList()
+            val response: VPSFileTransfersResponse = get("/api/file-transfers")
+            response.transfers
         } catch (e: Exception) {
             Log.e(TAG, "Error getting file transfers: ${e.message}")
             emptyList()
@@ -1485,7 +1709,15 @@ class VPSClient private constructor(
     suspend fun getRemoteContacts(pendingOnly: Boolean = true): List<Map<String, Any?>> = withContext(Dispatchers.IO) {
         try {
             val params = if (pendingOnly) "?pendingAndroidSync=true" else ""
-            val response: Map<String, List<Map<String, Any?>>> = get("/api/contacts/remote$params")
+            val type = object : TypeToken<Map<String, List<Map<String, Any?>>>>() {}.type
+            val body = executeRequestInternal(
+                Request.Builder()
+                    .url("${baseUrl}/api/contacts/remote$params")
+                    .apply { accessToken?.let { addHeader("Authorization", "Bearer $it") } }
+                    .build(),
+                allowRetry = true
+            )
+            val response: Map<String, List<Map<String, Any?>>> = gson.fromJson(body ?: "{}", type)
             response["contacts"] ?: emptyList()
         } catch (e: Exception) {
             Log.e(TAG, "Error getting remote contacts: ${e.message}")
@@ -1522,7 +1754,15 @@ class VPSClient private constructor(
 
     suspend fun getSyncedPhotoIds(): List<Long> = withContext(Dispatchers.IO) {
         try {
-            val response: Map<String, List<Long>> = get("/api/photos/synced-ids")
+            val type = object : TypeToken<Map<String, List<Long>>>() {}.type
+            val body = executeRequestInternal(
+                Request.Builder()
+                    .url("${baseUrl}/api/photos/synced-ids")
+                    .apply { accessToken?.let { addHeader("Authorization", "Bearer $it") } }
+                    .build(),
+                allowRetry = true
+            )
+            val response: Map<String, List<Long>> = gson.fromJson(body ?: "{}", type)
             response["ids"] ?: emptyList()
         } catch (e: Exception) {
             Log.e(TAG, "Error getting synced photo IDs: ${e.message}")
@@ -1532,7 +1772,15 @@ class VPSClient private constructor(
 
     suspend fun getPhotos(): List<Map<String, Any?>> = withContext(Dispatchers.IO) {
         try {
-            val response: Map<String, List<Map<String, Any?>>> = get("/api/photos")
+            val type = object : TypeToken<Map<String, List<Map<String, Any?>>>>() {}.type
+            val body = executeRequestInternal(
+                Request.Builder()
+                    .url("${baseUrl}/api/photos")
+                    .apply { accessToken?.let { addHeader("Authorization", "Bearer $it") } }
+                    .build(),
+                allowRetry = true
+            )
+            val response: Map<String, List<Map<String, Any?>>> = gson.fromJson(body ?: "{}", type)
             response["photos"] ?: emptyList()
         } catch (e: Exception) {
             Log.e(TAG, "Error getting photos: ${e.message}")
@@ -1671,7 +1919,12 @@ class VPSClient private constructor(
             Log.w(TAG, "Cannot connect WebSocket: not authenticated")
             return
         }
-        wsListener = listener
+        // Only update wsListener if a non-null listener is provided.
+        // Passing null (e.g. from SyncFlowCallService.ensureWebSocketConnected)
+        // must NOT clobber the listener set by VPSSyncService.
+        if (listener != null) {
+            wsListener = listener
+        }
 
         val wsUrl = buildWsUrl(token) ?: run {
             Log.w(TAG, "Cannot connect WebSocket: invalid base URL")
@@ -1754,6 +2007,70 @@ class VPSClient private constructor(
     }
 
     private fun handleWebSocketMessage(type: String, data: Map<*, *>) {
+        // Handle call-related messages FIRST — these use webrtcSignalListener,
+        // NOT wsListener, so they must not be gated behind wsListener != null.
+        when (type) {
+            "webrtc_signal" -> {
+                val payload = extractDataPayload(data) as? Map<*, *> ?: return
+                val callId = payload["callId"] as? String ?: return
+                val signalType = payload["signalType"] as? String ?: return
+                val signalData = payload["signalData"] ?: return
+                val fromDevice = payload["fromDevice"] as? String ?: ""
+                Log.d(TAG, "WebRTC signal received: type=$signalType, callId=$callId, from=$fromDevice")
+                webrtcSignalListener?.onWebRTCSignal(callId, signalType, signalData, fromDevice)
+                return
+            }
+            "syncflow_call_incoming" -> {
+                val payload = extractDataPayload(data) as? Map<*, *> ?: return
+                val callId = payload["callId"] as? String ?: return
+                val callerId = payload["callerId"] as? String ?: ""
+                val callerName = payload["callerName"] as? String ?: "Unknown"
+                val callType = payload["callType"] as? String ?: "audio"
+                Log.d(TAG, "Incoming SyncFlow call: callId=$callId, from=$callerName, listenerSet=${webrtcSignalListener != null}")
+                if (webrtcSignalListener != null) {
+                    webrtcSignalListener?.onIncomingSyncFlowCall(callId, callerId, callerName, callType)
+                } else {
+                    // Service not running — start it directly so the call isn't silently dropped
+                    Log.w(TAG, "webrtcSignalListener is null, starting SyncFlowCallService directly")
+                    val intent = Intent(context, com.phoneintegration.app.SyncFlowCallService::class.java).apply {
+                        action = com.phoneintegration.app.SyncFlowCallService.ACTION_INCOMING_USER_CALL
+                        putExtra(com.phoneintegration.app.SyncFlowCallService.EXTRA_CALL_ID, callId)
+                        putExtra(com.phoneintegration.app.SyncFlowCallService.EXTRA_CALLER_NAME, callerName)
+                        putExtra(com.phoneintegration.app.SyncFlowCallService.EXTRA_CALLER_PHONE, callerId)
+                        putExtra(com.phoneintegration.app.SyncFlowCallService.EXTRA_IS_VIDEO, callType == "video")
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        context.startForegroundService(intent)
+                    } else {
+                        context.startService(intent)
+                    }
+                }
+                return
+            }
+            "syncflow_call_status" -> {
+                val payload = extractDataPayload(data) as? Map<*, *> ?: return
+                val callId = payload["callId"] as? String ?: return
+                val status = payload["status"] as? String ?: return
+                Log.d(TAG, "SyncFlow call status: callId=$callId, status=$status")
+                webrtcSignalListener?.onSyncFlowCallStatus(callId, status)
+
+                // Also dismiss incoming call notification if the call ended/was answered elsewhere
+                if (status in listOf("ended", "rejected", "missed", "failed", "active")) {
+                    val dismissIntent = Intent(context, com.phoneintegration.app.SyncFlowCallService::class.java).apply {
+                        action = com.phoneintegration.app.SyncFlowCallService.ACTION_DISMISS_CALL_NOTIFICATION
+                        putExtra(com.phoneintegration.app.SyncFlowCallService.EXTRA_CALL_ID, callId)
+                    }
+                    try {
+                        context.startService(dismissIntent)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to dismiss call notification: ${e.message}")
+                    }
+                }
+                return
+            }
+        }
+
+        // All other message types require wsListener
         val listener = wsListener ?: return
         when (type) {
             "message_added", "message_insert" -> {

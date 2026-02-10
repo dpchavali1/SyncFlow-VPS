@@ -10,6 +10,10 @@ import android.net.Uri
 import android.telephony.SmsManager
 import android.util.Log
 import android.widget.Toast
+import com.phoneintegration.app.vps.VPSClient
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 class MmsSentReceiver : BroadcastReceiver() {
 
@@ -25,11 +29,12 @@ class MmsSentReceiver : BroadcastReceiver() {
         var mmsId = intent.getLongExtra("mms_id", -1)
         val threadId = intent.getLongExtra("thread_id", -1)
         val contentUriRaw = intent.getStringExtra("content_uri")
+        val outgoingId = intent.getStringExtra("outgoing_id")
         if (mmsId <= 0 && !contentUriRaw.isNullOrBlank()) {
             mmsId = runCatching { ContentUris.parseId(Uri.parse(contentUriRaw)) }
                 .getOrDefault(-1)
         }
-        Log.d(TAG, "MMS ID: $mmsId, Thread ID: $threadId, content_uri=$contentUriRaw")
+        Log.d(TAG, "MMS ID: $mmsId, Thread ID: $threadId, content_uri=$contentUriRaw, outgoingId=$outgoingId")
 
         val result = resultCode
         Log.d(TAG, "Result code: $result")
@@ -56,21 +61,27 @@ class MmsSentReceiver : BroadcastReceiver() {
         when (result) {
             Activity.RESULT_OK -> {
                 Toast.makeText(context, "MMS sent successfully!", Toast.LENGTH_SHORT).show()
-                Log.d(TAG, "✓ MMS successfully sent")
+                Log.d(TAG, "MMS successfully sent")
 
                 // Move MMS from outbox to sent folder
                 if (mmsId > 0) {
                     moveMmsToSent(context, mmsId)
                 }
+
+                // Sync sent status to VPS for the synced message
+                syncDeliveryStatus(context, outgoingId, "sent")
             }
             else -> {
                 Toast.makeText(context, "MMS failed: $resultMessage", Toast.LENGTH_LONG).show()
-                Log.e(TAG, "✗ MMS send failed: $resultMessage")
+                Log.e(TAG, "MMS send failed: $resultMessage")
 
                 // Move to failed folder or delete from outbox
                 if (mmsId > 0) {
                     moveMmsToFailed(context, mmsId)
                 }
+
+                // Sync failed status to VPS
+                syncDeliveryStatus(context, outgoingId, "failed")
             }
         }
     }
@@ -115,6 +126,30 @@ class MmsSentReceiver : BroadcastReceiver() {
             Log.d(TAG, "Moved MMS $mmsId to failed folder: $updated rows updated")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to move MMS to failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Sync delivery status to VPS server so Mac/Web can show status indicators.
+     */
+    private fun syncDeliveryStatus(context: Context, outgoingId: String?, status: String) {
+        if (outgoingId.isNullOrEmpty()) return
+
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                val vpsClient = VPSClient.getInstance(context)
+
+                // Look up synced message ID from mapping
+                val prefs = context.getSharedPreferences("delivery_mappings", Context.MODE_PRIVATE)
+                val syncedMessageId = prefs.getString(outgoingId, null)
+
+                if (!syncedMessageId.isNullOrEmpty()) {
+                    vpsClient.updateMessageDeliveryStatus(syncedMessageId, status)
+                    Log.d(TAG, "Synced MMS delivery status: $syncedMessageId -> $status")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to sync MMS delivery status: ${e.message}")
+            }
         }
     }
 }

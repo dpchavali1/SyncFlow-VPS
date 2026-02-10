@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react'
-import { Send, MoreVertical, MessageSquare, Brain, Loader2, Info, X, Image as ImageIcon, Paperclip, AlertTriangle } from 'lucide-react'
+import { Send, MoreVertical, MessageSquare, Brain, Loader2, Info, X, Image as ImageIcon, Paperclip, AlertTriangle, Check, CheckCheck, Clock, AlertCircle } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { markMessagesRead, sendSmsFromWeb, sendMmsFromWeb, uploadMmsImage, waitForAuth } from '@/lib/firebase'
 import vpsService from '@/lib/vps'
@@ -151,13 +151,24 @@ const MessageBubble = memo(function MessageBubble({ msg, isSent, readReceipt }: 
             </div>
           )}
         </div>
-        <p
-          className={`text-xs text-gray-500 dark:text-gray-400 mt-1 ${
-            isSent ? 'text-right' : 'text-left'
+        <div
+          className={`flex items-center gap-1 text-xs text-gray-500 dark:text-gray-400 mt-1 ${
+            isSent ? 'justify-end' : 'justify-start'
           }`}
         >
-          {timestamp}
-        </p>
+          <span>{timestamp}</span>
+          {isSent && (
+            msg.id.startsWith('optimistic_') || msg.deliveryStatus === 'sending' ? (
+              <Clock className="w-3 h-3 text-gray-400" />
+            ) : msg.deliveryStatus === 'delivered' ? (
+              <CheckCheck className="w-3.5 h-3.5 text-blue-500" />
+            ) : msg.deliveryStatus === 'failed' ? (
+              <AlertCircle className="w-3 h-3 text-red-500" />
+            ) : (
+              <Check className="w-3 h-3 text-gray-400" />
+            )
+          )}
+        </div>
         {/* E2EE failure warning */}
         {msg.e2eeFailed && (
           <div className={`flex items-center gap-1 mt-1 text-xs text-amber-600 dark:text-amber-400 ${isSent ? 'justify-end' : 'justify-start'}`}>
@@ -293,9 +304,29 @@ export default function MessageView({ onOpenAI }: MessageViewProps) {
 
     if (unreadIds.length === 0) return
 
-    markMessagesRead(userId, unreadIds, selectedConversation).catch((error) => {
-      console.error('Failed to mark messages read:', error)
-    })
+    // Optimistically update local readReceipts so unread badges disappear immediately
+    const now = Date.now()
+    const updatedReceipts = { ...readReceipts }
+    for (const id of unreadIds) {
+      updatedReceipts[id] = {
+        messageId: id,
+        readAt: now,
+        readBy: 'web',
+        conversationAddress: selectedConversation,
+      }
+    }
+    useAppStore.getState().setReadReceipts(updatedReceipts)
+
+    // Use VPS service if authenticated, otherwise fall back to Firebase
+    if (vpsService.isAuthenticated) {
+      Promise.all(unreadIds.map((id) => vpsService.markMessageRead(id))).catch((error) => {
+        console.error('Failed to mark messages read:', error)
+      })
+    } else {
+      markMessagesRead(userId, unreadIds, selectedConversation).catch((error) => {
+        console.error('Failed to mark messages read:', error)
+      })
+    }
   }, [userId, selectedConversation, conversationMessages, readReceipts, activeFolder])
 
   const handleImageSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -341,8 +372,49 @@ export default function MessageView({ onOpenAI }: MessageViewProps) {
     setSendError(null)
 
     try {
-      if (selectedImages.length > 0) {
-        // Upload images and send as MMS
+      if (vpsService.isAuthenticated) {
+        // VPS mode: use VPS service to send
+        if (selectedImages.length > 0) {
+          setIsUploading(true)
+          const attachments = await Promise.all(
+            selectedImages.map(async (img) => {
+              const { uploadUrl, fileKey } = await vpsService.getFileUploadUrl(
+                img.file.name,
+                img.file.type,
+                img.file.size
+              )
+              await fetch(uploadUrl, {
+                method: 'PUT',
+                headers: { 'Content-Type': img.file.type },
+                body: img.file,
+              })
+              await vpsService.confirmFileUpload(fileKey, img.file.size)
+              return { fileKey, contentType: img.file.type, fileName: img.file.name }
+            })
+          )
+          setIsUploading(false)
+          await vpsService.sendMmsMessage(effectiveSendAddress, newMessage.trim(), attachments)
+          selectedImages.forEach((img) => URL.revokeObjectURL(img.preview))
+          setSelectedImages([])
+        } else {
+          await vpsService.sendMessage(effectiveSendAddress, newMessage.trim())
+        }
+        // Optimistic update: show sent message immediately in conversation
+        const store = useAppStore.getState()
+        store.setMessages(
+          [...store.messages, {
+            id: `optimistic_${Date.now()}`,
+            address: effectiveSendAddress,
+            body: newMessage.trim(),
+            date: Date.now(),
+            type: 2,
+            read: true,
+            isMms: selectedImages.length > 0,
+            attachments: [],
+          }].sort((a, b) => b.date - a.date)
+        )
+      } else if (selectedImages.length > 0) {
+        // Firebase mode: Upload images and send as MMS
         setIsUploading(true)
         const uploadedAttachments = await Promise.all(
           selectedImages.map((img) => uploadMmsImage(userId, img.file))
@@ -355,7 +427,7 @@ export default function MessageView({ onOpenAI }: MessageViewProps) {
         selectedImages.forEach((img) => URL.revokeObjectURL(img.preview))
         setSelectedImages([])
       } else {
-        // Send as regular SMS
+        // Firebase mode: Send as regular SMS
         await sendSmsFromWeb(userId, effectiveSendAddress, newMessage.trim())
       }
       setNewMessage('')

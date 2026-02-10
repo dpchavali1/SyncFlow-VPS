@@ -72,6 +72,46 @@ export class PhoneNumberNormalizer {
   }
 
   /**
+   * Convert phone number to E.164 format for server communication.
+   * Rules:
+   * - 10 digits → +1XXXXXXXXXX (US)
+   * - 11 digits starting with 1 → +1XXXXXXXXXX (US)
+   * - Already starts with + → keep as-is
+   * - Short codes (<=6 digits), emails, alphanumeric sender IDs → unchanged
+   */
+  static toE164(phoneNumber: string | null | undefined): string {
+    if (!phoneNumber || phoneNumber.trim() === '') return phoneNumber ?? ''
+
+    const trimmed = phoneNumber.trim()
+
+    // Leave emails unchanged
+    if (trimmed.includes('@')) return trimmed
+
+    // Leave alphanumeric sender IDs unchanged
+    if (/[a-zA-Z]/.test(trimmed)) return trimmed
+
+    // Strip everything except digits and '+'
+    const stripped = trimmed.replace(/[^0-9+]/g, '')
+    if (stripped === '' || stripped === '+') return trimmed
+
+    const digitsOnly = stripped.replace(/\+/g, '')
+
+    // Short codes (<=6 digits)
+    if (digitsOnly.length <= 6) return digitsOnly
+
+    // Already has '+' prefix → keep as-is
+    if (stripped.startsWith('+')) return stripped
+
+    // 10 digits → US number
+    if (digitsOnly.length === 10) return `+1${digitsOnly}`
+
+    // 11 digits starting with '1' → US number
+    if (digitsOnly.length === 11 && digitsOnly.startsWith('1')) return `+${digitsOnly}`
+
+    return digitsOnly
+  }
+
+  /**
    * Check if two phone numbers are the same person
    */
   static isSameContact(phone1: string | null | undefined, phone2: string | null | undefined): boolean {

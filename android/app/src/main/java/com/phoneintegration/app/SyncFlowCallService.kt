@@ -17,6 +17,7 @@ import android.media.MediaPlayer
 import android.media.RingtoneManager
 import android.os.Build
 import android.os.IBinder
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -71,6 +72,27 @@ class SyncFlowCallService : Service() {
         // Observable state for pending incoming call (null = no incoming call)
         private val _pendingIncomingCallFlow = kotlinx.coroutines.flow.MutableStateFlow<SyncFlowCall?>(null)
         val pendingIncomingCallFlow: kotlinx.coroutines.flow.StateFlow<SyncFlowCall?> = _pendingIncomingCallFlow
+
+        // Track recently handled call IDs to prevent duplicate notifications
+        // (e.g., FCM arriving after WebSocket already handled the call)
+        private val recentlyHandledCallIds = LinkedHashSet<String>()
+        private const val MAX_RECENT_CALL_IDS = 20
+
+        fun markCallHandled(callId: String) {
+            synchronized(recentlyHandledCallIds) {
+                recentlyHandledCallIds.add(callId)
+                // Trim old entries to prevent unbounded growth
+                while (recentlyHandledCallIds.size > MAX_RECENT_CALL_IDS) {
+                    recentlyHandledCallIds.iterator().let { it.next(); it.remove() }
+                }
+            }
+        }
+
+        fun wasCallRecentlyHandled(callId: String): Boolean {
+            synchronized(recentlyHandledCallIds) {
+                return callId in recentlyHandledCallIds
+            }
+        }
 
         fun getCallManager(): SyncFlowCallManager? = _callManager
 
@@ -139,6 +161,7 @@ class SyncFlowCallService : Service() {
     private var pendingPermissionCallerName: String? = null
     private var idleTimeoutJob: Job? = null
     private var isCallActive = false
+    private var lastWsConnectAttemptMs: Long = 0
 
     // Ringtone for incoming calls
     private var ringtonePlayer: MediaPlayer? = null
@@ -162,14 +185,20 @@ class SyncFlowCallService : Service() {
         // Start polling for calls if authenticated
         if (vpsClient.isAuthenticated) {
             Log.d(TAG, "VPS authenticated in service, starting call polling")
+            ensureWebSocketConnected("service_create")
             startListeningForCalls()
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // MUST call startForeground() immediately for ANY action started via startForegroundService().
+        // Without this, early returns in action handlers would crash with
+        // ForegroundServiceDidNotStartInTimeException on Android O+.
+        startForegroundNotification()
+
         when (intent?.action) {
             ACTION_START_SERVICE -> {
-                startForegroundNotification()
+                ensureWebSocketConnected("service_start")
                 startListeningForCalls()
                 updateDeviceOnlineStatus(true)
                 startIdleTimeout() // Start idle timeout to auto-stop when no calls
@@ -187,6 +216,7 @@ class SyncFlowCallService : Service() {
                 if (callId != null) {
                     isCallActive = true
                     cancelIdleTimeout() // Keep service alive during call
+                    ensureWebSocketConnected("answer_call")
                     answerCall(callId, withVideo)
                 }
             }
@@ -209,6 +239,7 @@ class SyncFlowCallService : Service() {
                 if (calleeDeviceId != null && calleeName != null) {
                     isCallActive = true
                     cancelIdleTimeout() // Keep service alive during call
+                    ensureWebSocketConnected("start_call")
                     startCall(calleeDeviceId, calleeName, isVideo)
                 }
             }
@@ -221,7 +252,24 @@ class SyncFlowCallService : Service() {
 
                 Log.d(TAG, "Incoming user call: callId=$callId, caller=$callerName")
 
+                // Guard: ignore duplicate notifications for the same call
+                // This handles: same WebSocket message twice, FCM after WebSocket, service restart
+                if (pendingIncomingCall?.id == callId || isCallActive || wasCallRecentlyHandled(callId)) {
+                    Log.d(TAG, "Ignoring duplicate incoming call notification for $callId (pending=${pendingIncomingCall?.id}, active=$isCallActive, recentlyHandled=${wasCallRecentlyHandled(callId)})")
+                    return START_NOT_STICKY
+                }
+
+                // Also check if the call manager already has this call active
+                if (_callManager?.currentCall?.value?.id == callId) {
+                    Log.d(TAG, "Ignoring incoming call notification - call $callId is already active in call manager")
+                    return START_NOT_STICKY
+                }
+
+                ensureWebSocketConnected("incoming_call")
+
                 val userId = vpsClient.userId ?: return START_NOT_STICKY
+
+                markCallHandled(callId)
 
                 // Create the pending incoming call
                 val call = com.phoneintegration.app.models.SyncFlowCall(
@@ -245,6 +293,26 @@ class SyncFlowCallService : Service() {
                 _pendingIncomingCallFlow.value = call  // Update flow for MainActivity
                 showIncomingCallNotification(call)
                 launchIncomingCallActivity(call)
+                startCallStatusPolling(call)
+
+                // Verify call is still ringing on the server (async).
+                // If FCM arrived late and the call is already ended, dismiss immediately.
+                serviceScope.launch(Dispatchers.IO) {
+                    try {
+                        val serverStatus = vpsClient.getSyncFlowCallStatus(callId)
+                        if (serverStatus != null && serverStatus != "ringing") {
+                            Log.d(TAG, "Call $callId is already $serverStatus on server, dismissing stale notification")
+                            withContext(Dispatchers.Main) {
+                                dismissIncomingCallNotification()
+                                pendingIncomingCall = null
+                                _pendingIncomingCallFlow.value = null
+                                updateNotificationForIdle()
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error verifying call status: ${e.message}")
+                    }
+                }
             }
             ACTION_DISMISS_CALL_NOTIFICATION -> {
                 // Call was answered on another device (Mac/Web) or ended
@@ -291,7 +359,14 @@ class SyncFlowCallService : Service() {
 
     private fun startIdleTimeout() {
         // Don't start idle timeout if there's an active call or pending incoming call
-        if (isCallActive || pendingIncomingCall != null) {
+        val callState = _callManager?.callState?.value
+        val callInProgress = when (callState) {
+            is SyncFlowCallManager.CallState.Ringing,
+            is SyncFlowCallManager.CallState.Connecting,
+            is SyncFlowCallManager.CallState.Connected -> true
+            else -> false
+        }
+        if (isCallActive || pendingIncomingCall != null || callInProgress) {
             Log.d(TAG, "Not starting idle timeout - call active or pending")
             return
         }
@@ -347,14 +422,11 @@ class SyncFlowCallService : Service() {
     }
 
     private fun startForegroundNotification() {
-        // On Android 14+ starting foreground while app is backgrounded will crash.
-        val inForeground = androidx.lifecycle.ProcessLifecycleOwner.get()
-            .lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
-        if (!inForeground) {
-            Log.w(TAG, "Skipping startForegroundNotification because app is backgrounded")
-            return
-        }
-
+        // We MUST always call startForeground() when started via startForegroundService(),
+        // even when the app is backgrounded. Skipping it causes
+        // ForegroundServiceDidNotStartInTimeException on Android 14+.
+        // Using FOREGROUND_SERVICE_TYPE_PHONE_CALL is allowed from background when started
+        // via high-priority FCM (which is how incoming calls arrive when app is killed).
         val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID_SERVICE)
             .setContentTitle("SyncFlow")
             .setContentText("Processing call...")
@@ -364,13 +436,20 @@ class SyncFlowCallService : Service() {
             .setOngoing(true)
             .build()
 
-        // On Android 14+, we need to specify the foreground service type
-        // Start with dataSync type (doesn't require special permissions)
-        // We'll upgrade to microphone|camera when actually in a call with permissions
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIFICATION_ID_SERVICE, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        } else {
-            startForeground(NOTIFICATION_ID_SERVICE, notification)
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(NOTIFICATION_ID_SERVICE, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL)
+            } else {
+                startForeground(NOTIFICATION_ID_SERVICE, notification)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting foreground notification: ${e.message}", e)
+            // Last resort: try without specifying service type
+            try {
+                startForeground(NOTIFICATION_ID_SERVICE, notification)
+            } catch (e2: Exception) {
+                Log.e(TAG, "Fallback startForeground also failed: ${e2.message}", e2)
+            }
         }
     }
 
@@ -417,48 +496,64 @@ class SyncFlowCallService : Service() {
             return
         }
         Log.d(TAG, "Starting to poll for incoming SyncFlow calls")
+        ensureWebSocketConnected("start_listening")
         stopListeningForCalls()
 
-        // Start polling for incoming calls
+        // Poll for pending SyncFlow calls (catches calls missed while app was killed)
         incomingCallsPollingJob = serviceScope.launch(Dispatchers.IO) {
+            // Initial check immediately on start
+            checkPendingSyncFlowCalls()
+
+            // Then poll periodically as catch-up
             while (isActive) {
-                try {
-                    val commands = vpsClient.getCallCommands()
-                    for (command in commands.filter { !it.processed }) {
-                        if (command.command == "incoming_call" && command.phoneNumber != null) {
-                            // Handle incoming call
-                            val call = SyncFlowCall(
-                                id = command.id,
-                                callerId = "",
-                                callerName = command.phoneNumber ?: "Unknown",
-                                callerPlatform = "unknown",
-                                calleeId = vpsClient.userId ?: "",
-                                calleeName = "",
-                                calleePlatform = "android",
-                                callType = SyncFlowCall.CallType.AUDIO,
-                                status = SyncFlowCall.CallStatus.RINGING,
-                                startedAt = command.timestamp,
-                                isUserCall = true,
-                                callerPhone = command.phoneNumber ?: ""
-                            )
-
-                            withContext(Dispatchers.Main) {
-                                cancelIdleTimeout()
-                                pendingIncomingCall = call
-                                _pendingIncomingCallFlow.value = call
-                                startCallStatusPolling(call)
-                                showIncomingCallNotification(call)
-                                launchIncomingCallActivity(call)
-                            }
-
-                            vpsClient.markCallCommandProcessed(command.id)
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error polling for calls", e)
+                delay(5000) // Poll every 5 seconds
+                if (!isCallActive && pendingIncomingCall == null) {
+                    checkPendingSyncFlowCalls()
                 }
-                delay(2000) // Poll every 2 seconds for calls
             }
+        }
+    }
+
+    /**
+     * Check the server for any ringing SyncFlow calls where we are the callee.
+     * This is the REST fallback for when FCM/WebSocket fail to deliver the incoming call.
+     */
+    private suspend fun checkPendingSyncFlowCalls() {
+        try {
+            val pendingCalls = vpsClient.getPendingSyncFlowCalls()
+            Log.d(TAG, "Checked pending SyncFlow calls: ${pendingCalls.size} found")
+            if (pendingCalls.isEmpty()) return
+
+            for (callMap in pendingCalls) {
+                val callId = callMap["id"] as? String ?: continue
+
+                // Skip if already handled
+                if (wasCallRecentlyHandled(callId) || pendingIncomingCall?.id == callId || isCallActive) {
+                    continue
+                }
+                if (_callManager?.currentCall?.value?.id == callId) {
+                    continue
+                }
+
+                Log.i(TAG, "Discovered pending SyncFlow call via REST polling: $callId")
+
+                withContext(Dispatchers.Main) {
+                    // Trigger the incoming call flow
+                    val callerName = (callMap["callerName"] as? String) ?: "SyncFlow Device"
+                    val callerPhone = (callMap["callerPhone"] as? String) ?: ""
+                    val intent = Intent(this@SyncFlowCallService, SyncFlowCallService::class.java).apply {
+                        action = ACTION_INCOMING_USER_CALL
+                        putExtra(EXTRA_CALL_ID, callId)
+                        putExtra(EXTRA_CALLER_NAME, callerName)
+                        putExtra(EXTRA_CALLER_PHONE, callerPhone)
+                        putExtra(EXTRA_IS_VIDEO, false) // Default to audio; call details fetched on answer
+                    }
+                    onStartCommand(intent, 0, 0)
+                }
+                break // Handle one call at a time
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error checking pending SyncFlow calls: ${e.message}")
         }
     }
 
@@ -467,16 +562,15 @@ class SyncFlowCallService : Service() {
         callStatusPollingJob = serviceScope.launch(Dispatchers.IO) {
             while (isActive) {
                 try {
-                    // Check if call is still ringing via VPS API
-                    val commands = vpsClient.getCallCommands()
-                    val currentCall = commands.find { it.id == call.id }
-
-                    if (currentCall == null || currentCall.processed) {
-                        // Call ended or was answered elsewhere
+                    // Check if call is still ringing via SyncFlow call status API
+                    val status = vpsClient.getSyncFlowCallStatus(call.id)
+                    if (status != null && status != "ringing") {
+                        // Call ended, answered elsewhere, rejected, etc.
                         withContext(Dispatchers.Main) {
-                            Log.d(TAG, "Pending call no longer active, dismissing notification")
+                            Log.d(TAG, "Call ${call.id} is now '$status', dismissing notification")
                             dismissIncomingCallNotification()
                             pendingIncomingCall = null
+                            _pendingIncomingCallFlow.value = null
                             updateNotificationForIdle()
                         }
                         break
@@ -484,7 +578,7 @@ class SyncFlowCallService : Service() {
                 } catch (e: Exception) {
                     Log.e(TAG, "Error polling call status", e)
                 }
-                delay(1000) // Check every second
+                delay(2000) // Check every 2 seconds
             }
         }
     }
@@ -501,9 +595,19 @@ class SyncFlowCallService : Service() {
         callStatusPollingJob = null
     }
 
+    private fun ensureWebSocketConnected(reason: String) {
+        if (!vpsClient.isAuthenticated) return
+        if (vpsClient.connectionState.value) return
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastWsConnectAttemptMs < 2000) return
+        lastWsConnectAttemptMs = now
+        Log.d(TAG, "Ensuring WebSocket connected ($reason)")
+        vpsClient.connectWebSocket()
+    }
+
     private fun updateDeviceOnlineStatus(online: Boolean) {
         if (!vpsClient.isAuthenticated) return
-        val deviceId = getAndroidDeviceId()
+        val deviceId = vpsClient.deviceId ?: return
 
         serviceScope.launch(Dispatchers.IO) {
             try {
@@ -522,16 +626,25 @@ class SyncFlowCallService : Service() {
         serviceScope.launch {
             _callManager?.callState?.collectLatest { state ->
                 when (state) {
+                    is SyncFlowCallManager.CallState.Ringing,
+                    is SyncFlowCallManager.CallState.Connecting -> {
+                        isCallActive = true
+                        cancelIdleTimeout()
+                    }
                     is SyncFlowCallManager.CallState.Connected -> {
+                        isCallActive = true
+                        cancelIdleTimeout()
                         dismissIncomingCallNotification()
                         updateNotificationForActiveCall()
                     }
                     is SyncFlowCallManager.CallState.Ended,
                     is SyncFlowCallManager.CallState.Failed -> {
+                        isCallActive = false
                         dismissIncomingCallNotification()
                         updateNotificationForIdle()
                     }
                     is SyncFlowCallManager.CallState.Idle -> {
+                        isCallActive = false
                         if (pendingIncomingCall == null) {
                             updateNotificationForIdle()
                         }
@@ -633,6 +746,7 @@ class SyncFlowCallService : Service() {
             .setFullScreenIntent(fullScreenPendingIntent, true)
             .setOngoing(true)
             .setAutoCancel(false)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .setTimeoutAfter(60000) // Auto dismiss after 60 seconds
 
         // Use CallStyle for Android 12+ for better incoming call UI
@@ -679,34 +793,29 @@ class SyncFlowCallService : Service() {
         val notification = notificationBuilder.build()
         notification.flags = notification.flags or Notification.FLAG_INSISTENT // Keep ringing
 
-        // For Android 12+, CallStyle notifications must be posted as foreground service notification
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            try {
-                // Use phone call foreground service type for incoming call
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    startForeground(
-                        NOTIFICATION_ID_INCOMING_CALL,
-                        notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
-                    )
-                } else {
-                    startForeground(
-                        NOTIFICATION_ID_INCOMING_CALL,
-                        notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                    )
-                }
-                Log.d(TAG, "Incoming call notification shown as foreground service")
-            } catch (e: Exception) {
-                Log.e(TAG, "Error starting foreground with call notification", e)
-                // Fallback to regular notification
-                val notificationManager = getSystemService(NotificationManager::class.java)
-                notificationManager.notify(NOTIFICATION_ID_INCOMING_CALL, notification)
+        // Must call startForeground on all Android O+ when started via startForegroundService
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startForeground(
+                    NOTIFICATION_ID_INCOMING_CALL,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+                )
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                startForeground(
+                    NOTIFICATION_ID_INCOMING_CALL,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                )
+            } else {
+                startForeground(NOTIFICATION_ID_INCOMING_CALL, notification)
             }
-        } else {
+            Log.d(TAG, "Incoming call notification shown as foreground service")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting foreground with call notification", e)
+            // Fallback to regular notification
             val notificationManager = getSystemService(NotificationManager::class.java)
             notificationManager.notify(NOTIFICATION_ID_INCOMING_CALL, notification)
-            Log.d(TAG, "Incoming call notification shown")
         }
     }
 
@@ -823,6 +932,13 @@ class SyncFlowCallService : Service() {
         val isLocked = keyguardManager.isKeyguardLocked
         Log.d(TAG, "Device locked: $isLocked")
 
+        if (isLocked) {
+            // Rely on full-screen call notification and lock-screen actions.
+            // Avoid launching activity behind keyguard (can hide the notification on some OEMs).
+            Log.d(TAG, "Device locked - skipping activity launch, using call notification")
+            return
+        }
+
         // Launch the incoming call activity with proper flags for locked screen
         val intent = Intent(this, MainActivity::class.java).apply {
             // Essential flags for launching from service
@@ -832,11 +948,11 @@ class SyncFlowCallService : Service() {
                     Intent.FLAG_ACTIVITY_CLEAR_TOP
 
             // Add flags for showing over lock screen (for older API levels)
+            // Do NOT use FLAG_DISMISS_KEYGUARD - we want to show over lock screen without forcing unlock
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) {
                 @Suppress("DEPRECATION")
                 addFlags(android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                        android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                        android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD)
+                        android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
             }
 
             putExtra("incoming_syncflow_call_id", call.id)
@@ -908,12 +1024,21 @@ class SyncFlowCallService : Service() {
         upgradeToCallForegroundType()
 
         serviceScope.launch {
-            _callManager?.startCall(calleeDeviceId, calleeName, isVideo)
+            val result = _callManager?.startCall(calleeDeviceId, calleeName, isVideo)
+            if (result?.isSuccess == true) {
+                Log.d(TAG, "WebRTC call started: ${result.getOrNull()}")
+            } else {
+                Log.e(TAG, "Failed to start WebRTC call: ${result?.exceptionOrNull()?.message}")
+                isCallActive = false
+                startIdleTimeout()
+            }
         }
     }
 
     private fun answerCall(callId: String, withVideo: Boolean) {
         val userId = vpsClient.userId ?: return
+
+        markCallHandled(callId) // Prevent duplicate notifications for this call
 
         val incomingCall = pendingIncomingCall
         val isUserCall = incomingCall?.isUserCall ?: false
@@ -973,11 +1098,11 @@ class SyncFlowCallService : Service() {
             addFlags(Intent.FLAG_ACTIVITY_NO_USER_ACTION)
 
             // Add flags for showing over lock screen (for older API levels)
+            // Do NOT use FLAG_DISMISS_KEYGUARD - we want to show over lock screen without forcing unlock
             if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) {
                 @Suppress("DEPRECATION")
                 addFlags(android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                        android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-                        android.view.WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD)
+                        android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
             }
 
             putExtra("active_syncflow_call", true)

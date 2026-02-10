@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { query } from '../services/database';
 import { authenticate } from '../middleware/auth';
 import { apiRateLimit } from '../middleware/rateLimit';
+import { normalizePhoneNumber } from '../utils/phoneNumber';
 
 const router = Router();
 
@@ -87,7 +88,7 @@ router.post('/sync', async (req: Request, res: Response) => {
             contact.id,
             userId,
             contact.displayName,
-            JSON.stringify(contact.phoneNumbers || []),
+            JSON.stringify((contact.phoneNumbers || []).map((p: string) => normalizePhoneNumber(p))),
             JSON.stringify(contact.emails || []),
             contact.photoThumbnail,
           ]
@@ -138,6 +139,74 @@ router.get('/:id', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Get contact error:', error);
     res.status(500).json({ error: 'Failed to get contact' });
+  }
+});
+
+// PUT /contacts/:id - Update a contact
+router.put('/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const userId = req.userId!;
+    const { displayName, phoneNumbers, emails, photoThumbnail } = req.body;
+
+    const setClauses: string[] = ['updated_at = NOW()'];
+    const params: any[] = [id, userId];
+    let paramIndex = 3;
+
+    if (displayName !== undefined) {
+      setClauses.push(`display_name = $${paramIndex++}`);
+      params.push(displayName);
+    }
+    if (phoneNumbers !== undefined) {
+      setClauses.push(`phone_numbers = $${paramIndex++}`);
+      params.push(JSON.stringify(phoneNumbers));
+    }
+    if (emails !== undefined) {
+      setClauses.push(`emails = $${paramIndex++}`);
+      params.push(JSON.stringify(emails));
+    }
+    if (photoThumbnail !== undefined) {
+      setClauses.push(`photo_thumbnail = $${paramIndex++}`);
+      params.push(photoThumbnail);
+    }
+
+    const result = await query(
+      `UPDATE user_contacts SET ${setClauses.join(', ')} WHERE id = $1 AND user_id = $2 RETURNING id`,
+      params
+    );
+
+    if (result.length === 0) {
+      res.status(404).json({ error: 'Contact not found' });
+      return;
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Update contact error:', error);
+    res.status(500).json({ error: 'Failed to update contact' });
+  }
+});
+
+// DELETE /contacts/:id - Delete a contact
+router.delete('/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const userId = req.userId!;
+
+    const result = await query(
+      `DELETE FROM user_contacts WHERE id = $1 AND user_id = $2 RETURNING id`,
+      [id, userId]
+    );
+
+    if (result.length === 0) {
+      res.status(404).json({ error: 'Contact not found' });
+      return;
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete contact error:', error);
+    res.status(500).json({ error: 'Failed to delete contact' });
   }
 });
 

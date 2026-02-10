@@ -894,6 +894,8 @@ export interface UsageSummary {
   mmsBytes: number
   /** File transfer bytes this period */
   fileBytes: number
+  /** Photo upload bytes this period */
+  photoBytes: number
   /** Last time usage was updated */
   lastUpdatedAt: number | null
   /** Whether user has active paid subscription */
@@ -921,6 +923,7 @@ export const getUsageSummary = async (userId: string): Promise<UsageSummary> => 
       storageLimitBytes: PAID_STORAGE_BYTES,
       mmsBytes: 0,
       fileBytes: 0,
+      photoBytes: 0,
       lastUpdatedAt: null,
       isPaid: true, // Treat VPS mode as "paid" to avoid limits
     }
@@ -979,6 +982,7 @@ export const getUsageSummary = async (userId: string): Promise<UsageSummary> => 
     storageLimitBytes,
     mmsBytes,
     fileBytes,
+    photoBytes: 0,
     lastUpdatedAt,
     isPaid,
   }

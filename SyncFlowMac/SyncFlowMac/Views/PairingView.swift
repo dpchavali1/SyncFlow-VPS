@@ -8,7 +8,6 @@
 import SwiftUI
 import Combine
 import CoreImage.CIFilterBuiltins
-// FirebaseDatabase - using FirebaseStubs.swift
 
 struct PairingView: View {
     @EnvironmentObject var appState: AppState
@@ -18,7 +17,6 @@ struct PairingView: View {
     @State private var errorMessage: String?
     @State private var pairingStatus: PairingStatusState = .generating
     @State private var timeRemaining: TimeInterval = 0
-    @State private var listenerHandle: DatabaseHandle?
     @State private var showManualJoin = false
     @State private var manualSyncGroupId = ""
     @State private var cachedQRImage: Image?
@@ -438,49 +436,8 @@ struct PairingView: View {
         errorMessage = nil
         showManualJoin = false
 
-        let syncGroupId = manualSyncGroupId.trimmingCharacters(in: .whitespaces)
-        let syncGroupManager = SyncGroupManager.shared
-        let firebaseService = FirebaseService.shared
-
-        syncGroupManager.joinSyncGroup(scannedSyncGroupId: syncGroupId, deviceName: "macOS") { result in
-            DispatchQueue.main.async {
-                switch result {
-                case .success(let joinResult):
-                    // Successfully joined sync group, now initiate pairing for authorization
-                    Task {
-                        do {
-                            let session = try await firebaseService.initiatePairing(
-                                deviceName: Host.current().localizedName ?? "Mac",
-                                syncGroupId: syncGroupId
-                            )
-
-                            await MainActor.run {
-                                self.pairingSession = session
-                                self.timeRemaining = session.timeRemaining
-                                self.pairingStatus = .waitingForScan
-                                // Generate QR code on background thread for better performance
-                                self.generateQRCodeImage(for: session.qrPayload)
-                            }
-
-                            let handle = firebaseService.listenForPairingApproval(token: session.token, version: session.version) { status in
-                                handlePairingStatus(status)
-                            }
-                            await MainActor.run {
-                                self.listenerHandle = handle
-                            }
-                        } catch {
-                            await MainActor.run {
-                                self.pairingStatus = .error("Failed to initiate pairing: \(error.localizedDescription)")
-                            }
-                        }
-                    }
-
-                case .failure(let error):
-                    pairingStatus = .error(error.localizedDescription)
-                    errorMessage = error.localizedDescription
-                }
-            }
-        }
+        // Use VPS pairing flow - manual join uses the same QR-based flow
+        await startPairing()
     }
 
     private func handlePairingStatus(_ status: PairingStatus) {
@@ -516,81 +473,16 @@ struct PairingView: View {
         }
     }
 
-    /// Fetch E2EE keys that Android pushed directly during pairing
-    /// Includes retry logic in case keys aren't immediately available
+    /// Fetch E2EE keys via VPS after pairing approval
+    /// E2EE key sync is handled by AppState.attemptAutoE2eeKeySyncVPS which will
+    /// be triggered automatically when setPaired() is called
     private func fetchE2EEKeysFromAndroid(userId: String, deviceId: String?) async {
-        let effectiveDeviceId = deviceId ?? DeviceIdentifier.shared.getDeviceId()
-
-        print("[Pairing] Fetching E2EE keys from Android:")
-        print("[Pairing]   userId (pairedUid): \(userId)")
-        print("[Pairing]   deviceId param: \(deviceId ?? "nil")")
-        print("[Pairing]   effectiveDeviceId: \(effectiveDeviceId)")
-        print("[Pairing]   Full path: users/\(userId)/e2ee_key_responses/\(effectiveDeviceId)")
-
-        let database = Database.database()
-        let responseRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("e2ee_key_responses")
-            .child(effectiveDeviceId)
-
-        // Retry up to 5 times with 1 second delay (keys should be pushed before approval)
-        let maxRetries = 5
-        var attempt = 0
-
-        while attempt < maxRetries {
-            attempt += 1
-
-            do {
-                let snapshot = try await responseRef.getData()
-
-                guard snapshot.exists(),
-                      let data = snapshot.value as? [String: Any],
-                      let status = data["status"] as? String,
-                      status == "ready" else {
-                    if attempt < maxRetries {
-                        try await Task.sleep(nanoseconds: 1_000_000_000)
-                        continue
-                    } else {
-                        print("[Pairing] E2EE keys not ready after \(maxRetries) attempts")
-                        return
-                    }
-                }
-
-                guard let encryptedPrivateKeyEnvelope = data["encryptedPrivateKeyEnvelope"] as? String,
-                      let syncGroupPublicKeyX963 = data["syncGroupPublicKeyX963"] as? String else {
-                    print("[Pairing] E2EE key response missing required fields")
-                    return
-                }
-
-                let privateKeyData = try E2EEManager.shared.decryptDataKey(from: encryptedPrivateKeyEnvelope)
-                let privateKeyPKCS8Base64 = privateKeyData.base64EncodedString()
-                try E2EEManager.shared.importSyncGroupKeypair(
-                    privateKeyPKCS8Base64: privateKeyPKCS8Base64,
-                    publicKeyX963Base64: syncGroupPublicKeyX963
-                )
-
-                print("[Pairing] E2EE sync group keypair imported")
-                try? await responseRef.removeValue()
-                return
-
-            } catch {
-                if attempt < maxRetries {
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                } else {
-                    print("[Pairing] E2EE key fetch failed: \(error.localizedDescription)")
-                }
-            }
-        }
+        print("[Pairing] E2EE key sync will be triggered by setPaired() via VPS")
+        // No action needed here - setPaired() in AppState triggers attemptAutoE2eeKeySyncVPS
     }
 
     private func cleanupListener() {
-        guard let session = pairingSession, let handle = listenerHandle else {
-            listenerHandle = nil
-            return
-        }
-        FirebaseService.shared.removePairingApprovalListener(token: session.token, handle: handle)
-        listenerHandle = nil
+        // VPS pairing uses polling via waitForPairingApproval, no listener to clean up
     }
 }
 

@@ -169,9 +169,9 @@ class OutgoingMessageService : Service() {
 
                                     Log.d(TAG, "[AndroidSend] MMS send result: $sendSuccess (took ${sendDuration}ms)")
                                 } else if (body.isNotEmpty()) {
-                                    // Handle regular SMS
+                                    // Handle regular SMS — pass outgoingId for delivery tracking
                                     updateNotification("Sending SMS to $address...")
-                                    sendSuccess = smsRepository.sendSms(address, body)
+                                    sendSuccess = smsRepository.sendSms(address, body, messageId)
                                 } else {
                                     Log.w(TAG, "Empty message body and no attachments")
                                     sendSuccess = false
@@ -208,6 +208,9 @@ class OutgoingMessageService : Service() {
                                                 // Sync the real message from provider (has correct ID)
                                                 syncService.syncMessage(latestMessage)
                                                 Log.d(TAG, "Sent message synced with provider ID: ${latestMessage.id} (isMms=${latestMessage.isMms})")
+
+                                                // Store outgoingId → syncedMessageId mapping for delivery callback
+                                                storeDeliveryMapping(messageId, latestMessage.id.toString())
                                             } else {
                                                 // Body doesn't match, use fallback
                                                 if (isMms && !attachments.isNullOrEmpty()) {
@@ -452,6 +455,20 @@ class OutgoingMessageService : Service() {
         } catch (e: Exception) {
             Log.e(TAG, "Error downloading attachment", e)
             null
+        }
+    }
+
+    /**
+     * Store outgoingId → syncedMessageId mapping so delivery callbacks
+     * can update the correct synced message in the VPS server.
+     */
+    private fun storeDeliveryMapping(outgoingId: String, syncedMessageId: String) {
+        try {
+            val prefs = getSharedPreferences("delivery_mappings", Context.MODE_PRIVATE)
+            prefs.edit().putString(outgoingId, syncedMessageId).apply()
+            Log.d(TAG, "Stored delivery mapping: $outgoingId -> $syncedMessageId")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to store delivery mapping: ${e.message}")
         }
     }
 }

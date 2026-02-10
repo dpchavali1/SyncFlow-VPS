@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { useAppStore } from '@/lib/store';
 
 // VPS mode check
@@ -11,6 +11,40 @@ interface Message {
   role: 'user' | 'assistant';
   content: string;
   timestamp: number;
+}
+
+/** Renders basic markdown (**bold**, *italic*) as React elements. */
+function renderMarkdown(text: string): React.ReactNode[] {
+  const parts: React.ReactNode[] = [];
+  // Split by lines first to handle newlines
+  const lines = text.split('\n');
+  lines.forEach((line, lineIdx) => {
+    if (lineIdx > 0) parts.push(<br key={`br-${lineIdx}`} />);
+    // Process bold and italic within each line
+    const regex = /(\*\*(.+?)\*\*|\*(.+?)\*)/g;
+    let lastIndex = 0;
+    let match;
+    let partIdx = 0;
+    while ((match = regex.exec(line)) !== null) {
+      // Text before the match
+      if (match.index > lastIndex) {
+        parts.push(<span key={`${lineIdx}-t-${partIdx++}`}>{line.slice(lastIndex, match.index)}</span>);
+      }
+      if (match[2]) {
+        // Bold: **text**
+        parts.push(<strong key={`${lineIdx}-b-${partIdx++}`}>{match[2]}</strong>);
+      } else if (match[3]) {
+        // Italic: *text*
+        parts.push(<em key={`${lineIdx}-i-${partIdx++}`}>{match[3]}</em>);
+      }
+      lastIndex = regex.lastIndex;
+    }
+    // Remaining text after last match
+    if (lastIndex < line.length) {
+      parts.push(<span key={`${lineIdx}-e-${partIdx}`}>{line.slice(lastIndex)}</span>);
+    }
+  });
+  return parts;
 }
 
 export default function SupportChat() {
@@ -48,12 +82,13 @@ export default function SupportChat() {
     scrollToBottom();
   }, [messages]);
 
-  const sendMessage = async () => {
-    if (!input.trim() || isLoading) return;
+  const sendMessage = async (text?: string) => {
+    const msgText = (text || input).trim();
+    if (!msgText || isLoading) return;
 
     const userMessage: Message = {
       role: 'user',
-      content: input.trim(),
+      content: msgText,
       timestamp: Date.now(),
     };
 
@@ -66,9 +101,14 @@ export default function SupportChat() {
 
       if (isVPSMode) {
         // VPS mode: Use VPS API endpoint
+        const token = typeof window !== 'undefined' ? localStorage.getItem('vps_access_token') : null;
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (token) {
+          headers['Authorization'] = `Bearer ${token}`;
+        }
         const response = await fetch(`${VPS_URL}/api/support/chat`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({
             message: userMessage.content,
             conversationHistory: messages.slice(-6),
@@ -131,7 +171,7 @@ export default function SupportChat() {
   };
 
   const quickQuestions = [
-    "What's my recovery code?",
+    "How does account recovery work?",
     "Show my sync status",
     "How many messages synced?",
     "Show my devices",
@@ -223,7 +263,9 @@ export default function SupportChat() {
                   : 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 rounded-bl-md'
               } group relative`}
             >
-              <p className="text-sm whitespace-pre-wrap select-text">{message.content}</p>
+              <div className="text-sm whitespace-pre-wrap select-text">
+                {message.role === 'assistant' ? renderMarkdown(message.content) : message.content}
+              </div>
               {message.role === 'assistant' && index > 0 && (
                 <button
                   onClick={() => copyToClipboard(message.content, index)}
@@ -274,9 +316,7 @@ export default function SupportChat() {
             {quickQuestions.map((q, i) => (
               <button
                 key={i}
-                onClick={() => {
-                  setInput(q);
-                }}
+                onClick={() => sendMessage(q)}
                 className="text-xs bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 px-3 py-1.5 rounded-full transition-colors"
               >
                 {q}
@@ -299,7 +339,7 @@ export default function SupportChat() {
             disabled={isLoading}
           />
           <button
-            onClick={sendMessage}
+            onClick={() => sendMessage()}
             disabled={!input.trim() || isLoading}
             className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white rounded-full p-2 transition-colors"
           >

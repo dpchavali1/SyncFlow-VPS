@@ -4,6 +4,22 @@ import { query, queryOne } from '../services/database';
 import { authenticate } from '../middleware/auth';
 import { apiRateLimit } from '../middleware/rateLimit';
 import { broadcastToUser } from '../services/websocket';
+import { normalizePhoneNumber } from '../utils/phoneNumber';
+import { sendOutgoingMessageNotification } from '../services/push';
+import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { config } from '../config';
+
+// R2/S3 Client for generating presigned download URLs for MMS attachments
+const s3Client = new S3Client({
+  region: 'auto',
+  endpoint: config.r2?.endpoint || process.env.R2_ENDPOINT,
+  credentials: {
+    accessKeyId: config.r2?.accessKeyId || process.env.R2_ACCESS_KEY_ID || '',
+    secretAccessKey: config.r2?.secretAccessKey || process.env.R2_SECRET_ACCESS_KEY || '',
+  },
+});
+const R2_BUCKET = config.r2?.bucketName || process.env.R2_BUCKET_NAME || 'syncflow-files';
 
 const router = Router();
 
@@ -34,6 +50,7 @@ const createMessageSchema = z.object({
   encryptedBody: z.string().optional(),
   encryptedNonce: z.string().optional(),
   keyMap: z.record(z.string()).optional(),
+  deliveryStatus: z.string().optional(), // 'sending', 'sent', 'delivered', 'failed'
 });
 
 const syncMessagesSchema = z.object({
@@ -42,8 +59,14 @@ const syncMessagesSchema = z.object({
 
 const sendMessageSchema = z.object({
   address: z.string().min(1).max(500), // Increased for group MMS, long addresses
-  body: z.string().min(1).max(1600),
+  body: z.string().max(1600).default(''),
   simSubscriptionId: z.number().optional(),
+  isMms: z.boolean().default(false),
+  attachments: z.array(z.object({
+    fileKey: z.string(),
+    contentType: z.string(),
+    fileName: z.string(),
+  })).optional(),
 });
 
 // GET /messages - Get messages with pagination
@@ -54,7 +77,7 @@ router.get('/', async (req: Request, res: Response) => {
 
     let queryText = `
       SELECT id, thread_id, address, contact_name, body, date, type, read,
-             is_mms, mms_parts, encrypted, encrypted_body, encrypted_nonce, key_map, created_at
+             is_mms, mms_parts, encrypted, encrypted_body, encrypted_nonce, key_map, delivery_status, created_at
       FROM user_messages
       WHERE user_id = $1
     `;
@@ -82,22 +105,35 @@ router.get('/', async (req: Request, res: Response) => {
     const messages = await query(queryText, queryParams);
 
     res.json({
-      messages: messages.map((m) => ({
-        id: m.id,
-        threadId: m.thread_id,
-        address: m.address,
-        contactName: m.contact_name,
-        body: m.body,
-        date: parseInt(m.date),
-        type: m.type,
-        read: m.read,
-        isMms: m.is_mms,
-        mmsParts: m.mms_parts,
-        encrypted: m.encrypted,
-        encryptedBody: m.encrypted_body,
-        encryptedNonce: m.encrypted_nonce,
-        keyMap: m.key_map,
-      })),
+      messages: messages.map((m) => {
+        // Ensure mmsParts is always a parsed array (not a JSON string)
+        let mmsParts = m.mms_parts;
+        if (typeof mmsParts === 'string') {
+          try { mmsParts = JSON.parse(mmsParts); } catch { mmsParts = null; }
+        }
+        // Ensure keyMap is always a parsed object
+        let keyMap = m.key_map;
+        if (typeof keyMap === 'string') {
+          try { keyMap = JSON.parse(keyMap); } catch { keyMap = null; }
+        }
+        return {
+          id: m.id,
+          threadId: m.thread_id,
+          address: m.address,
+          contactName: m.contact_name,
+          body: m.body,
+          date: parseInt(m.date),
+          type: m.type,
+          read: m.read,
+          isMms: m.is_mms,
+          mmsParts,
+          encrypted: m.encrypted,
+          encryptedBody: m.encrypted_body,
+          encryptedNonce: m.encrypted_nonce,
+          keyMap,
+          deliveryStatus: m.delivery_status,
+        };
+      }),
       hasMore: messages.length === params.limit,
     });
   } catch (error) {
@@ -124,8 +160,8 @@ router.post('/sync', async (req: Request, res: Response) => {
       try {
         await query(
           `INSERT INTO user_messages
-           (id, user_id, thread_id, address, contact_name, body, date, type, read, is_mms, mms_parts, encrypted, encrypted_body, encrypted_nonce, key_map)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+           (id, user_id, thread_id, address, contact_name, body, date, type, read, is_mms, mms_parts, encrypted, encrypted_body, encrypted_nonce, key_map, delivery_status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
            ON CONFLICT (id) DO UPDATE SET
              thread_id = EXCLUDED.thread_id,
              address = EXCLUDED.address,
@@ -135,17 +171,18 @@ router.post('/sync', async (req: Request, res: Response) => {
              type = EXCLUDED.type,
              read = EXCLUDED.read,
              is_mms = EXCLUDED.is_mms,
-             mms_parts = EXCLUDED.mms_parts,
+             mms_parts = COALESCE(EXCLUDED.mms_parts, user_messages.mms_parts),
              encrypted = EXCLUDED.encrypted,
              encrypted_body = EXCLUDED.encrypted_body,
              encrypted_nonce = EXCLUDED.encrypted_nonce,
              key_map = EXCLUDED.key_map,
+             delivery_status = COALESCE(EXCLUDED.delivery_status, user_messages.delivery_status),
              updated_at = NOW()`,
           [
             msg.id,
             userId,
             msg.threadId,
-            msg.address,
+            normalizePhoneNumber(msg.address),
             msg.contactName,
             msg.body,
             msg.date,
@@ -157,6 +194,7 @@ router.post('/sync', async (req: Request, res: Response) => {
             msg.encryptedBody ?? null,
             msg.encryptedNonce ?? null,
             msg.keyMap ? JSON.stringify(msg.keyMap) : null,
+            msg.deliveryStatus ?? null,
           ]
         );
         synced++;
@@ -190,6 +228,7 @@ router.post('/sync', async (req: Request, res: Response) => {
               encryptedBody: m.encryptedBody,
               encryptedNonce: m.encryptedNonce,
               keyMap: m.keyMap,
+              deliveryStatus: m.deliveryStatus,
             })),
             total: batch.length,
           },
@@ -217,15 +256,21 @@ router.post('/send', async (req: Request, res: Response) => {
 
     await query(
       `INSERT INTO user_outgoing_messages
-       (id, user_id, address, body, timestamp, status, sim_subscription_id)
-       VALUES ($1, $2, $3, $4, $5, 'pending', $6)`,
-      [messageId, userId, body.address, body.body, Date.now(), body.simSubscriptionId]
+       (id, user_id, address, body, timestamp, status, sim_subscription_id, is_mms, attachments)
+       VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8)`,
+      [messageId, userId, body.address, body.body, Date.now(), body.simSubscriptionId,
+       body.isMms, body.attachments ? JSON.stringify(body.attachments) : null]
     );
+
+    // Send FCM push to wake Android device for immediate delivery
+    sendOutgoingMessageNotification(userId, messageId, req.deviceId ?? null).catch(err => {
+      console.error('[Messages] FCM push for outgoing message failed:', err);
+    });
 
     res.json({
       id: messageId,
       status: 'pending',
-      message: 'Message queued for sending',
+      message: body.isMms ? 'MMS queued for sending' : 'Message queued for sending',
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -243,7 +288,7 @@ router.get('/outgoing', async (req: Request, res: Response) => {
     const userId = req.userId!;
 
     const messages = await query(
-      `SELECT id, address, body, timestamp, status, sim_subscription_id
+      `SELECT id, address, body, timestamp, status, sim_subscription_id, is_mms, attachments
        FROM user_outgoing_messages
        WHERE user_id = $1 AND status = 'pending'
        ORDER BY timestamp ASC
@@ -251,15 +296,42 @@ router.get('/outgoing', async (req: Request, res: Response) => {
       [userId]
     );
 
-    res.json({
-      messages: messages.map((m) => ({
+    // Resolve fileKey → presigned download URL for each attachment
+    const resolved = await Promise.all(messages.map(async (m) => {
+      let attachments = m.attachments;
+      if (typeof attachments === 'string') {
+        try { attachments = JSON.parse(attachments); } catch { attachments = null; }
+      }
+
+      // Generate presigned download URLs for R2-stored attachments
+      if (Array.isArray(attachments)) {
+        attachments = await Promise.all(attachments.map(async (att: any) => {
+          if (att.fileKey && !att.url) {
+            try {
+              const command = new GetObjectCommand({ Bucket: R2_BUCKET, Key: att.fileKey });
+              const url = await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+              return { ...att, url };
+            } catch (err) {
+              console.error(`[Messages] Failed to generate download URL for ${att.fileKey}:`, err);
+              return att;
+            }
+          }
+          return att;
+        }));
+      }
+
+      return {
         id: m.id,
         address: m.address,
         body: m.body,
         timestamp: parseInt(m.timestamp),
         simSubscriptionId: m.sim_subscription_id,
-      })),
-    });
+        isMms: m.is_mms || false,
+        attachments,
+      };
+    }));
+
+    res.json({ messages: resolved });
   } catch (error) {
     console.error('Get outgoing messages error:', error);
     res.status(500).json({ error: 'Failed to get outgoing messages' });
@@ -273,22 +345,59 @@ router.put('/outgoing/:id/status', async (req: Request, res: Response) => {
     const { status, error: errorMsg } = req.body;
     const userId = req.userId!;
 
-    if (!['sent', 'failed'].includes(status)) {
+    if (!['sending', 'sent', 'delivered', 'failed'].includes(status)) {
       res.status(400).json({ error: 'Invalid status' });
       return;
     }
 
     await query(
       `UPDATE user_outgoing_messages
-       SET status = $1, error_message = $2
+       SET status = $1, error_message = $2, delivery_status = $1
        WHERE id = $3 AND user_id = $4`,
       [status, errorMsg, id, userId]
     );
+
+    // Broadcast status change to all connected devices (Mac, Web)
+    broadcastToUser(userId, 'messages', {
+      type: 'outgoing_status_changed',
+      data: { id, status },
+    });
 
     res.json({ success: true });
   } catch (error) {
     console.error('Update outgoing status error:', error);
     res.status(500).json({ error: 'Failed to update status' });
+  }
+});
+
+// PUT /messages/:id/delivery-status - Update delivery status of a synced message
+router.put('/:id/delivery-status', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    const userId = req.userId!;
+
+    if (!['sending', 'sent', 'delivered', 'failed'].includes(status)) {
+      res.status(400).json({ error: 'Invalid delivery status' });
+      return;
+    }
+
+    await query(
+      `UPDATE user_messages SET delivery_status = $1, updated_at = NOW()
+       WHERE id = $2 AND user_id = $3`,
+      [status, id, userId]
+    );
+
+    // Broadcast delivery status change to all connected devices
+    broadcastToUser(userId, 'messages', {
+      type: 'delivery_status_changed',
+      data: { id, deliveryStatus: status },
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Update delivery status error:', error);
+    res.status(500).json({ error: 'Failed to update delivery status' });
   }
 });
 
@@ -308,6 +417,45 @@ router.put('/:id/read', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Mark read error:', error);
     res.status(500).json({ error: 'Failed to mark as read' });
+  }
+});
+
+// DELETE /messages - Delete messages by IDs
+router.delete('/', async (req: Request, res: Response) => {
+  try {
+    const { messageIds } = req.body;
+    const userId = req.userId!;
+
+    if (!Array.isArray(messageIds) || messageIds.length === 0) {
+      res.status(400).json({ error: 'messageIds array is required' });
+      return;
+    }
+
+    if (messageIds.length > 500) {
+      res.status(400).json({ error: 'Maximum 500 messages per request' });
+      return;
+    }
+
+    const placeholders = messageIds.map((_: string, i: number) => `$${i + 2}`).join(', ');
+    const result = await query(
+      `DELETE FROM user_messages WHERE user_id = $1 AND id IN (${placeholders}) RETURNING id`,
+      [userId, ...messageIds]
+    );
+
+    const deletedIds = result.map((r: any) => r.id);
+
+    // Broadcast deletions to other connected devices
+    if (deletedIds.length > 0) {
+      broadcastToUser(userId, 'messages', {
+        type: 'messages_deleted',
+        data: { messageIds: deletedIds },
+      });
+    }
+
+    res.json({ success: true, deleted: deletedIds.length });
+  } catch (error) {
+    console.error('Delete messages error:', error);
+    res.status(500).json({ error: 'Failed to delete messages' });
   }
 });
 

@@ -139,6 +139,8 @@ const QUICK_ACTIONS = [
   { icon: Calendar, title: 'Bills', query: 'Show my upcoming bills', color: 'orange' },
   { icon: Package, title: 'Packages', query: 'Track my packages', color: 'green' },
   { icon: CreditCard, title: 'Balance', query: 'What is my account balance?', color: 'purple' },
+  { icon: Repeat, title: 'Subscriptions', query: 'Show my subscriptions', color: 'indigo' },
+  { icon: ArrowUpDown, title: 'Compare', query: 'Compare spending vs last month', color: 'cyan' },
   { icon: Key, title: 'OTPs', query: 'Show my OTP codes', color: 'red' },
   { icon: ListTodo, title: 'Transactions', query: 'List my transactions', color: 'teal' },
 ]
@@ -488,27 +490,22 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
   const parseTransactions = useMemo((): ParsedTransaction[] => {
     const transactions: ParsedTransaction[] = []
 
-    // Regex patterns for extracting monetary amounts
-    // Supports INR (Rs, Rupees symbol) and USD ($ symbol)
+    // Regex patterns for extracting monetary amounts — matches Android's SpendingParser
     const amountPatterns = [
       // INR patterns: "Rs.1,234.56" or "Rs 1234"
       /(?:rs\.?|₹|inr)\s*([0-9,]+(?:\.\d{1,2})?)/i,
       // USD patterns: "$1,234.56"
       /(?:\$|usd)\s*([0-9,]+(?:\.\d{1,2})?)/i,
-      // Amount followed by currency: "1,234.56 Rs"
-      /([0-9,]+(?:\.\d{1,2})?)\s*(?:rs\.?|₹|inr)/i,
+      // Generic "amount: 1,234.56" pattern
+      /amount[: ]*([0-9,]+(?:\.\d{1,2})?)/i,
     ]
 
     for (const msg of messages) {
       const bodyLower = msg.body.toLowerCase()
 
-      // Skip credits/refunds
-      if (CREDIT_KEYWORDS.some(kw => bodyLower.includes(kw))) {
-        continue
-      }
-
-      // Must have debit keyword
-      if (!DEBIT_KEYWORDS.some(kw => bodyLower.includes(kw))) {
+      // Skip credits/refunds (same as Android — no debit keyword requirement)
+      if (bodyLower.includes('credited') || bodyLower.includes('refund') ||
+          bodyLower.includes('reversal') || bodyLower.includes('deposit')) {
         continue
       }
 
@@ -1662,7 +1659,7 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
             </div>
             <div>
               <h2 className="text-xl font-bold text-gray-900 dark:text-white">AI Assistant</h2>
-              <p className="text-sm text-gray-500 dark:text-gray-400">Analyze your messages and spending</p>
+              <p className="text-sm text-gray-500 dark:text-gray-400">Understands your messages & spending</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -1727,31 +1724,16 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
                             <span>vs last month</span>
                           </>
                         )}
-                        {generateSmartDigest.spendingChange === 0 && (
-                          <span>{generateSmartDigest.transactionCount} transactions</span>
-                        )}
                       </div>
                     </div>
 
-                    <div className="space-y-1 text-sm">
-                      {detectRecurringExpenses.length > 0 && (
-                        <div className="flex items-center gap-2 text-gray-600 dark:text-gray-300">
-                          <Repeat className="w-4 h-4" />
-                          <span>{detectRecurringExpenses.length} subscriptions</span>
-                        </div>
-                      )}
-                      {generateSmartDigest.upcomingBills > 0 && (
-                        <div className="flex items-center gap-2 text-gray-600 dark:text-gray-300">
-                          <Calendar className="w-4 h-4" />
-                          <span>{generateSmartDigest.upcomingBills} bills due</span>
-                        </div>
-                      )}
-                      {generateSmartDigest.recentPackages > 0 && (
-                        <div className="flex items-center gap-2 text-gray-600 dark:text-gray-300">
-                          <Package className="w-4 h-4" />
-                          <span>{generateSmartDigest.recentPackages} packages</span>
-                        </div>
-                      )}
+                    <div className="text-right">
+                      <div className="text-2xl font-bold text-gray-900 dark:text-white">
+                        {generateSmartDigest.transactionCount}
+                      </div>
+                      <div className="text-sm text-gray-500 dark:text-gray-400">
+                        transactions
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -1766,11 +1748,7 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
 
               {/* Quick Action Cards */}
               <div className="grid grid-cols-2 gap-3">
-                {[
-                  ...QUICK_ACTIONS,
-                  { icon: Repeat, title: 'Subscriptions', query: 'Show my subscriptions', color: 'indigo' },
-                  { icon: ArrowUpDown, title: 'Compare', query: 'Compare spending vs last month', color: 'cyan' },
-                ].map((action, idx) => {
+                {QUICK_ACTIONS.map((action, idx) => {
                   const Icon = action.icon
                   const colorClasses: Record<string, string> = {
                     blue: 'bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400',

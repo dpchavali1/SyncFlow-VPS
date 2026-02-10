@@ -6,7 +6,6 @@
 //
 
 import SwiftUI
-// FirebaseDatabase, FirebaseFunctions - using FirebaseStubs.swift
 
 private let trialDays: Int64 = 7 // 7 day trial
 
@@ -97,7 +96,7 @@ struct UsageSettingsView: View {
                         usedBytes: summary.monthlyUploadBytes,
                         limitBytes: monthlyLimit
                     )
-                    Text("MMS: \(formatBytes(summary.monthlyMmsBytes)) • Files: \(formatBytes(summary.monthlyFileBytes))")
+                    Text("MMS: \(formatBytes(summary.monthlyMmsBytes)) • Photos: \(formatBytes(summary.monthlyPhotoBytes)) • Files: \(formatBytes(summary.monthlyFileBytes))")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 } header: {
@@ -168,12 +167,12 @@ struct UsageSettingsView: View {
                             } else {
                                 Image(systemName: "trash")
                             }
-                            Text(isClearing ? "Clearing..." : "Clear MMS & File Data")
+                            Text(isClearing ? "Clearing..." : "Clear MMS & Photo Data")
                         }
                     }
                     .disabled(isClearing || appState.userId == nil)
 
-                    Text("Deletes synced MMS attachments and file transfers from cloud storage. This frees up your storage quota. Message text is not affected.")
+                    Text("Deletes synced MMS attachments and photos from cloud storage. This frees up your storage quota. Message text is not affected.")
                         .font(.caption)
                         .foregroundColor(.secondary)
 
@@ -191,45 +190,27 @@ struct UsageSettingsView: View {
         .task {
             await loadUsage()
         }
-        .alert("Clear MMS & File Data?", isPresented: $showClearConfirmation) {
+        .alert("Clear MMS & Photo Data?", isPresented: $showClearConfirmation) {
             Button("Cancel", role: .cancel) { }
             Button("Clear", role: .destructive) {
                 Task { await clearMmsData() }
             }
         } message: {
-            Text("This will delete all synced MMS images, videos, and file transfers from cloud storage. Your storage quota will be reset to 0. Message text is not affected.\n\nThis action cannot be undone.")
+            Text("This will delete all synced MMS images, videos, and photos from cloud storage. Your storage quota will be reset to 0. Message text is not affected.\n\nThis action cannot be undone.")
         }
     }
 
     private func clearMmsData() async {
-        guard let userId = appState.userId else { return }
-
         isClearing = true
         clearResult = nil
 
         do {
-            let functions = Functions.functions()
-            let callable = functions.httpsCallable("clearMmsData")
-
-            let result = try await callable.call(["syncGroupUserId": userId])
-
-            if let data = result.data as? [String: Any],
-               let success = data["success"] as? Bool,
-               success {
-                let deletedFiles = data["deletedFiles"] as? Int ?? 0
-                let freedBytes = data["freedBytes"] as? Int64 ?? 0
-                let freedMB = Double(freedBytes) / (1024 * 1024)
-
-                clearResult = "Cleared \(deletedFiles) files (\(String(format: "%.1f", freedMB)) MB freed)"
-
-                // Refresh usage stats
-                await loadUsage()
-            } else {
-                clearResult = "Cleared successfully"
-                await loadUsage()
-            }
+            try await VPSService.shared.resetStorage()
+            clearResult = "Storage quota reset successfully"
+            // Refresh usage to show updated numbers
+            await loadUsage()
         } catch {
-            clearResult = "Error: \(error.localizedDescription)"
+            clearResult = "Failed to clear: \(error.localizedDescription)"
         }
 
         isClearing = false
@@ -246,14 +227,27 @@ struct UsageSettingsView: View {
         errorMessage = nil
 
         do {
-            let snapshot = try await Database.database()
-                .reference()
-                .child("users")
-                .child(userId)
-                .child("usage")
-                .getData()
+            let response = try await VPSService.shared.getUsage()
+            let usage = response.usage
+            let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+            let isPaid = isPaidPlan(
+                plan: usage.plan,
+                planExpiresAt: usage.planExpiresAt,
+                nowMs: nowMs
+            )
 
-            summary = parseUsage(snapshot)
+            summary = UsageSummary(
+                plan: usage.plan,
+                planExpiresAt: usage.planExpiresAt,
+                trialStartedAt: usage.trialStartedAt,
+                storageBytes: usage.storageBytes ?? 0,
+                monthlyUploadBytes: usage.monthlyUploadBytes ?? 0,
+                monthlyMmsBytes: usage.monthlyMmsBytes ?? 0,
+                monthlyFileBytes: usage.monthlyFileBytes ?? 0,
+                monthlyPhotoBytes: usage.monthlyPhotoBytes ?? 0,
+                lastUpdatedAt: usage.lastUpdatedAt,
+                isPaid: isPaid
+            )
         } catch {
             errorMessage = "Failed to load usage: \(error.localizedDescription)"
         }
@@ -270,40 +264,9 @@ private struct UsageSummary {
     let monthlyUploadBytes: Int64
     let monthlyMmsBytes: Int64
     let monthlyFileBytes: Int64
+    let monthlyPhotoBytes: Int64
     let lastUpdatedAt: Int64?
     let isPaid: Bool
-}
-
-private func parseUsage(_ snapshot: DataSnapshot) -> UsageSummary {
-    let usage = snapshot.value as? [String: Any] ?? [:]
-
-    let plan = usage["plan"] as? String
-    let planExpiresAt = (usage["planExpiresAt"] as? NSNumber)?.int64Value
-    let trialStartedAt = (usage["trialStartedAt"] as? NSNumber)?.int64Value
-    let storageBytes = (usage["storageBytes"] as? NSNumber)?.int64Value ?? 0
-    let lastUpdatedAt = (usage["lastUpdatedAt"] as? NSNumber)?.int64Value
-
-    let periodKey = currentPeriodKey()
-    let monthly = usage["monthly"] as? [String: Any]
-    let periodData = monthly?[periodKey] as? [String: Any]
-    let monthlyUploadBytes = (periodData?["uploadBytes"] as? NSNumber)?.int64Value ?? 0
-    let monthlyMmsBytes = (periodData?["mmsBytes"] as? NSNumber)?.int64Value ?? 0
-    let monthlyFileBytes = (periodData?["fileBytes"] as? NSNumber)?.int64Value ?? 0
-
-    let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-    let isPaid = isPaidPlan(plan: plan, planExpiresAt: planExpiresAt, nowMs: nowMs)
-
-    return UsageSummary(
-        plan: plan,
-        planExpiresAt: planExpiresAt,
-        trialStartedAt: trialStartedAt,
-        storageBytes: storageBytes,
-        monthlyUploadBytes: monthlyUploadBytes,
-        monthlyMmsBytes: monthlyMmsBytes,
-        monthlyFileBytes: monthlyFileBytes,
-        lastUpdatedAt: lastUpdatedAt,
-        isPaid: isPaid
-    )
 }
 
 private struct UsageBarRow: View {
