@@ -2,12 +2,11 @@
 //  PhoneStatusService.swift
 //  SyncFlowMac
 //
-//  Service to monitor phone status (battery, signal, WiFi) from Firebase
+//  Service to monitor phone status (battery, signal, WiFi)
 //
 
 import Foundation
 import Combine
-// FirebaseDatabase - using FirebaseStubs.swift
 
 /// Represents the current status of the paired Android phone
 struct PhoneStatus: Equatable {
@@ -88,102 +87,66 @@ class PhoneStatusService: ObservableObject {
     @Published var phoneStatus = PhoneStatus()
     @Published var isListening = false
 
-    private let database = Database.database()
-    private var statusHandle: DatabaseHandle?
     private var currentUserId: String?
     private var lastLoggedSignature: String?
+    private var cancellables = Set<AnyCancellable>()
 
     private init() {}
 
     /// Start listening for phone status updates
     func startListening(userId: String) {
-        guard !isListening else { return }
         currentUserId = userId
+        isListening = true
 
-        let statusRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("phone_status")
-
-        statusHandle = statusRef.observe(.value) { [weak self] snapshot in
-            guard let self = self else { return }
-
-            if let data = snapshot.value as? [String: Any] {
-                DispatchQueue.main.async {
-                    self.updateStatus(from: data)
-                }
+        // Fetch current phone status
+        Task {
+            do {
+                let status = try await VPSService.shared.getPhoneStatus()
+                await MainActor.run { self.applyPhoneStatus(status) }
+            } catch {
+                print("[PhoneStatus] Error fetching initial status: \(error)")
             }
         }
 
-        isListening = true
+        // Listen for real-time WebSocket updates
+        VPSService.shared.phoneStatusUpdated
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] data in
+                self?.applyPhoneStatus(data)
+            }
+            .store(in: &cancellables)
     }
 
     /// Stop listening for updates
     func stopListening() {
-        guard isListening, let userId = currentUserId else { return }
-
-        if let handle = statusHandle {
-            database.reference()
-                .child("users")
-                .child(userId)
-                .child("phone_status")
-                .removeObserver(withHandle: handle)
-        }
-
-        statusHandle = nil
         currentUserId = nil
         isListening = false
-    }
-
-    /// Parse status data from Firebase
-    private func updateStatus(from data: [String: Any]) {
-        var status = PhoneStatus()
-
-        status.batteryLevel = data["batteryLevel"] as? Int ?? -1
-        status.isCharging = data["isCharging"] as? Bool ?? false
-        status.signalStrength = data["signalStrength"] as? Int ?? -1
-        status.networkType = data["networkType"] as? String ?? "unknown"
-        status.wifiConnected = data["wifiConnected"] as? Bool ?? false
-        status.wifiStrength = data["wifiStrength"] as? Int ?? -1
-        status.wifiSsid = data["wifiSsid"] as? String ?? ""
-        status.cellularConnected = data["cellularConnected"] as? Bool ?? false
-        status.deviceName = data["deviceName"] as? String ?? "Phone"
-
-        // Parse timestamp
-        if let timestamp = data["timestamp"] as? Double {
-            status.lastUpdated = Date(timeIntervalSince1970: timestamp / 1000)
-        } else {
-            status.lastUpdated = Date()
-        }
-
-        // Create signature to detect meaningful changes (exclude timestamp)
-        let signature = "\(status.batteryLevel)|\(status.isCharging)|\(status.signalStrength)|\(status.wifiConnected)|\(status.networkType)|\(status.wifiSsid)|\(status.deviceName)"
-
-        // ONLY update published property if something meaningful changed
-        // This prevents unnecessary SwiftUI view invalidations
-        guard signature != lastLoggedSignature else {
-            return
-        }
-
-        lastLoggedSignature = signature
-        phoneStatus = status
+        cancellables.removeAll()
     }
 
     /// Request a status refresh from the phone
     func requestRefresh() {
-        guard let userId = currentUserId else { return }
+        Task {
+            do {
+                try await VPSService.shared.requestPhoneStatusRefresh()
+            } catch {
+                print("[PhoneStatus] Error requesting refresh: \(error)")
+            }
+        }
+    }
 
-        // Write a refresh request that the phone will pick up
-        database.goOnline()
+    // MARK: - Private
 
-        let requestRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("status_refresh_request")
-
-        requestRef.setValue([
-            "timestamp": ServerValue.timestamp(),
-            "requestedBy": "macos"
-        ])
+    private func applyPhoneStatus(_ data: [String: Any]) {
+        if let battery = data["batteryLevel"] as? Int { phoneStatus.batteryLevel = battery }
+        if let charging = data["isCharging"] as? Bool { phoneStatus.isCharging = charging }
+        if let signal = data["signalStrength"] as? Int { phoneStatus.signalStrength = signal }
+        if let network = data["networkType"] as? String { phoneStatus.networkType = network }
+        if let wifi = data["wifiConnected"] as? Bool { phoneStatus.wifiConnected = wifi }
+        if let wifiStr = data["wifiStrength"] as? Int { phoneStatus.wifiStrength = wifiStr }
+        if let ssid = data["wifiSsid"] as? String { phoneStatus.wifiSsid = ssid }
+        if let cellular = data["cellularConnected"] as? Bool { phoneStatus.cellularConnected = cellular }
+        if let name = data["deviceName"] as? String { phoneStatus.deviceName = name }
+        phoneStatus.lastUpdated = Date()
     }
 }

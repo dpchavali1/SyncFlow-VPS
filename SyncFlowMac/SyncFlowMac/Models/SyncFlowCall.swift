@@ -124,7 +124,7 @@ struct SyncFlowCall: Identifiable, Equatable {
         )
     }
 
-    /// Parse from Firebase snapshot
+    /// Parse from dictionary
     static func from(id: String, dict: [String: Any]) -> SyncFlowCall? {
         guard let callerId = dict["callerId"] as? String,
               let callerName = dict["callerName"] as? String,
@@ -185,7 +185,7 @@ struct SyncFlowCall: Identifiable, Equatable {
         )
     }
 
-    /// Convert to Firebase-compatible dictionary
+    /// Convert to dictionary
     func toDict() -> [String: Any] {
         var dict: [String: Any] = [
             "id": id,

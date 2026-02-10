@@ -3,6 +3,8 @@ import { z } from 'zod';
 import { query } from '../services/database';
 import { authenticate } from '../middleware/auth';
 import { apiRateLimit } from '../middleware/rateLimit';
+import { normalizePhoneNumber } from '../utils/phoneNumber';
+import { broadcastToUser } from '../services/websocket';
 
 const router = Router();
 
@@ -74,6 +76,11 @@ router.post('/messages', async (req: Request, res: Response) => {
        body.spamScore, body.spamReason]
     );
 
+    broadcastToUser(userId, 'spam', {
+      type: 'spam_updated',
+      data: { action: 'added', id: messageId, address: body.address },
+    });
+
     res.json({ id: messageId, success: true });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -96,6 +103,11 @@ router.delete('/messages/:id', async (req: Request, res: Response) => {
       [id, userId]
     );
 
+    broadcastToUser(userId, 'spam', {
+      type: 'spam_updated',
+      data: { action: 'deleted', id },
+    });
+
     res.json({ success: true });
   } catch (error) {
     console.error('Delete spam message error:', error);
@@ -112,6 +124,11 @@ router.delete('/messages', async (req: Request, res: Response) => {
       `DELETE FROM user_spam_messages WHERE user_id = $1 RETURNING id`,
       [userId]
     );
+
+    broadcastToUser(userId, 'spam', {
+      type: 'spam_updated',
+      data: { action: 'cleared', count: result.length },
+    });
 
     res.json({ success: true, deleted: result.length });
   } catch (error) {
@@ -152,19 +169,20 @@ router.post('/whitelist', async (req: Request, res: Response) => {
   try {
     const body = listEntrySchema.parse(req.body);
     const userId = req.userId!;
+    const normalized = normalizePhoneNumber(body.phoneNumber);
 
     await query(
       `INSERT INTO user_spam_lists (user_id, phone_number, list_type, created_at)
        VALUES ($1, $2, 'whitelist', NOW())
        ON CONFLICT (user_id, phone_number, list_type) DO NOTHING`,
-      [userId, body.phoneNumber]
+      [userId, normalized]
     );
 
     // Remove from blocklist if present
     await query(
       `DELETE FROM user_spam_lists
        WHERE user_id = $1 AND phone_number = $2 AND list_type = 'blocklist'`,
-      [userId, body.phoneNumber]
+      [userId, normalized]
     );
 
     res.json({ success: true });
@@ -187,7 +205,7 @@ router.delete('/whitelist/:phoneNumber', async (req: Request, res: Response) => 
     await query(
       `DELETE FROM user_spam_lists
        WHERE user_id = $1 AND phone_number = $2 AND list_type = 'whitelist'`,
-      [userId, phoneNumber]
+      [userId, normalizePhoneNumber(phoneNumber)]
     );
 
     res.json({ success: true });
@@ -229,19 +247,20 @@ router.post('/blocklist', async (req: Request, res: Response) => {
   try {
     const body = listEntrySchema.parse(req.body);
     const userId = req.userId!;
+    const normalized = normalizePhoneNumber(body.phoneNumber);
 
     await query(
       `INSERT INTO user_spam_lists (user_id, phone_number, list_type, created_at)
        VALUES ($1, $2, 'blocklist', NOW())
        ON CONFLICT (user_id, phone_number, list_type) DO NOTHING`,
-      [userId, body.phoneNumber]
+      [userId, normalized]
     );
 
     // Remove from whitelist if present
     await query(
       `DELETE FROM user_spam_lists
        WHERE user_id = $1 AND phone_number = $2 AND list_type = 'whitelist'`,
-      [userId, body.phoneNumber]
+      [userId, normalized]
     );
 
     res.json({ success: true });
@@ -264,7 +283,7 @@ router.delete('/blocklist/:phoneNumber', async (req: Request, res: Response) => 
     await query(
       `DELETE FROM user_spam_lists
        WHERE user_id = $1 AND phone_number = $2 AND list_type = 'blocklist'`,
-      [userId, phoneNumber]
+      [userId, normalizePhoneNumber(phoneNumber)]
     );
 
     res.json({ success: true });
@@ -283,7 +302,7 @@ router.get('/check/:phoneNumber', async (req: Request, res: Response) => {
     const entry = await query(
       `SELECT list_type FROM user_spam_lists
        WHERE user_id = $1 AND phone_number = $2`,
-      [userId, phoneNumber]
+      [userId, normalizePhoneNumber(phoneNumber)]
     );
 
     res.json({

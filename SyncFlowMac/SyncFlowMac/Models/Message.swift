@@ -2,22 +2,21 @@
 //  Message.swift
 //  SyncFlowMac
 //
-//  Data models for SMS/MMS messages, conversations, and related Firebase response structures.
+//  Data models for SMS/MMS messages, conversations, and related response structures.
 //
 //  This file contains the core messaging data models used throughout the SyncFlowMac application:
 //  - MmsAttachment: Represents media attachments in MMS messages (images, videos, audio, etc.)
 //  - Message: Represents an individual SMS or MMS message
 //  - Conversation: Represents a conversation thread with one or more contacts
-//  - FirebaseAttachment/FirebaseMessage: DTOs for deserializing data from Firebase Realtime Database
+//  - FirebaseAttachment/FirebaseMessage: Legacy DTOs for deserializing message data
 //  - ReadReceipt: Tracks when messages have been read across devices
 //
-//  These models are synchronized from the companion Android app via Firebase. The Android app
-//  uploads messages to Firebase, and the macOS app observes these changes in real-time.
+//  These models are synchronized from the companion Android app via VPS server.
 //
 //  Serialization Notes:
 //  - Message and MmsAttachment conform to Codable for JSON serialization
-//  - Firebase response models (FirebaseAttachment, FirebaseMessage) handle the flexible typing
-//    that Firebase uses (e.g., integers may come as Double)
+//  - Legacy response models (FirebaseAttachment, FirebaseMessage) handle flexible typing
+//    (e.g., integers may come as Double)
 //  - Conversation does not conform to Codable as it is constructed from Message data
 //
 
@@ -34,7 +33,7 @@ import Foundation
 ///
 /// ## Relationships
 /// - Parent: `Message` - An MmsAttachment belongs to a single Message
-/// - Used by: `FirebaseAttachment.toMmsAttachment()` for conversion from Firebase format
+/// - Used by: `FirebaseAttachment.toMmsAttachment()` for conversion from server format
 ///
 /// ## Codable Conformance
 /// This struct conforms to `Codable` for JSON serialization. All properties use standard
@@ -50,7 +49,7 @@ struct MmsAttachment: Identifiable, Codable, Hashable {
     /// Original filename of the attachment, if available. May be nil for inline images.
     let fileName: String?
 
-    /// Remote URL where the attachment file is stored (typically Firebase Storage).
+    /// Remote URL where the attachment file is stored.
     /// May be nil if the attachment data is stored inline as Base64.
     let url: String?
 
@@ -69,7 +68,7 @@ struct MmsAttachment: Identifiable, Codable, Hashable {
     let encrypted: Bool?
 
     /// Base64-encoded attachment data for small files when cloud storage is unavailable.
-    /// This is used as a fallback when Firebase Storage upload fails or for very small files.
+    /// This is used as a fallback when cloud storage upload fails or for very small files.
     /// The data may be encrypted if `encrypted` is true.
     let inlineData: String?
 
@@ -217,8 +216,8 @@ struct MmsAttachment: Identifiable, Codable, Hashable {
 
 /// Represents a single SMS or MMS message synchronized from the connected Android device.
 ///
-/// Messages are the core data unit in SyncFlow. They are uploaded from the Android app to Firebase
-/// and then observed in real-time by the macOS app. Each message contains the sender/recipient
+/// Messages are the core data unit in SyncFlow. They are uploaded from the Android app to the VPS
+/// server and then observed in real-time by the macOS app. Each message contains the sender/recipient
 /// address, message content, timestamp, and metadata about whether it was sent or received.
 ///
 /// ## Message Types
@@ -238,13 +237,13 @@ struct MmsAttachment: Identifiable, Codable, Hashable {
 /// ## Relationships
 /// - Child: `MmsAttachment` - A Message can have zero or more attachments
 /// - Parent: `Conversation` - Messages are grouped into conversations by address
-/// - Firebase DTO: `FirebaseMessage` - Converts to Message after deserialization
+/// - DTO: `FirebaseMessage` - Converts to Message after deserialization
 ///
 /// ## Codable Conformance
 /// This struct conforms to `Codable` for JSON serialization. The `date` field is stored as a
-/// Double (milliseconds since Unix epoch) for compatibility with Firebase's number format.
+/// Double (milliseconds since Unix epoch) for compatibility with JSON number format.
 struct Message: Identifiable, Codable, Hashable {
-    /// Unique identifier for this message, typically the Firebase key or Android message ID
+    /// Unique identifier for this message, typically the server key or Android message ID
     let id: String
 
     /// Phone number or address of the other party (sender for received, recipient for sent).
@@ -291,6 +290,10 @@ struct Message: Identifiable, Codable, Hashable {
     /// Whether this message was encrypted end-to-end when synced.
     /// Nil when the source didn't provide encryption metadata.
     var isEncrypted: Bool? = nil
+
+    /// Carrier delivery status for sent messages.
+    /// Values: nil (unknown), "sending", "sent", "delivered", "failed"
+    var deliveryStatus: String? = nil
 
     // MARK: - Computed Properties
 
@@ -379,7 +382,7 @@ struct Message: Identifiable, Codable, Hashable {
 ///
 /// ## Codable Conformance
 /// This struct does NOT conform to Codable. Conversations are constructed dynamically by aggregating
-/// Message data. They are not stored directly in Firebase; instead, conversation state (pinned,
+/// Message data. They are not stored directly on the server; instead, conversation state (pinned,
 /// archived, blocked) is stored separately and merged at runtime.
 struct Conversation: Identifiable, Hashable {
     /// Unique identifier for this conversation. Currently uses the primary address as the ID.
@@ -496,23 +499,23 @@ struct Conversation: Identifiable, Hashable {
     }
 }
 
-// MARK: - Firebase Response Models
+// MARK: - Response Models
 
-/// Data Transfer Object (DTO) for deserializing attachment data from Firebase Realtime Database.
+/// Data Transfer Object (DTO) for deserializing attachment data from server responses.
 ///
-/// Firebase returns JSON data with flexible typing, so this struct uses optional types throughout
+/// Server JSON data uses flexible typing, so this struct uses optional types throughout
 /// to handle potentially missing or differently-typed fields. After deserialization, use
 /// `toMmsAttachment()` to convert to the app's native `MmsAttachment` type.
 ///
 /// ## Why a Separate DTO?
-/// Firebase may return:
+/// JSON may return:
 /// - Numbers as Int or Double depending on value
 /// - Missing fields as nil rather than default values
 /// - The `id` field as Int (from Android's content provider) rather than String
 ///
 /// This DTO handles these variations and normalizes them in `toMmsAttachment()`.
 struct FirebaseAttachment: Codable {
-    /// Attachment ID from Android, stored as Int in Firebase. Converted to String in MmsAttachment.
+    /// Attachment ID from Android, stored as Int. Converted to String in MmsAttachment.
     let id: Int?
 
     /// MIME type of the attachment. Defaults to "application/octet-stream" if missing.
@@ -521,7 +524,7 @@ struct FirebaseAttachment: Codable {
     /// Original filename, if available
     let fileName: String?
 
-    /// Remote URL for the attachment in Firebase Storage
+    /// Remote URL for the attachment in cloud storage
     let url: String?
 
     /// Simplified type category. Defaults to "file" if missing.
@@ -536,7 +539,7 @@ struct FirebaseAttachment: Codable {
     /// Whether the attachment uses inline storage
     let isInline: Bool?
 
-    /// Converts this Firebase DTO to a native MmsAttachment model.
+    /// Converts this DTO to a native MmsAttachment model.
     ///
     /// Applies default values for any nil fields:
     /// - `id`: Converts to String, defaults to "0"
@@ -558,23 +561,23 @@ struct FirebaseAttachment: Codable {
     }
 }
 
-/// Data Transfer Object (DTO) for deserializing message data from Firebase Realtime Database.
+/// Data Transfer Object (DTO) for deserializing message data from server responses.
 ///
-/// Similar to `FirebaseAttachment`, this struct handles Firebase's flexible JSON typing and
+/// Similar to `FirebaseAttachment`, this struct handles flexible JSON typing and
 /// provides conversion to the app's native `Message` type via `toMessage(id:)`.
 ///
-/// ## Firebase Data Structure
-/// Messages are stored in Firebase at path: `users/{userId}/messages/{messageId}`
-/// The message ID is the Firebase key, not stored within the message data itself,
+/// ## Data Structure
+/// Messages are stored on the server with a message ID as the key.
+/// The message ID may not be stored within the message data itself,
 /// which is why `toMessage(id:)` requires the ID as a parameter.
 ///
 /// ## Type Handling
-/// - `id`: May be present in the data or provided externally (Firebase key)
+/// - `id`: May be present in the data or provided externally (server key)
 /// - `isMms`: Optional, defaults to false
 /// - `attachments`: Optional array, only present for MMS messages
 /// - `e2eeFailed`: Optional, defaults to false
 struct FirebaseMessage: Codable {
-    /// Optional message ID (may be stored externally as Firebase key)
+    /// Optional message ID (may be stored externally as server key)
     let id: String?
 
     /// Phone number or address of the message sender/recipient
@@ -607,9 +610,9 @@ struct FirebaseMessage: Codable {
     /// Whether the message was E2EE encrypted
     let encrypted: Bool?
 
-    /// Converts this Firebase DTO to a native Message model.
+    /// Converts this DTO to a native Message model.
     ///
-    /// - Parameter id: The message ID (typically the Firebase key for this message)
+    /// - Parameter id: The message ID (typically the server key for this message)
     /// - Returns: A properly typed `Message` instance with all attachments converted
     func toMessage(id: String) -> Message {
         let mmsAttachments = attachments?.map { $0.toMmsAttachment() }
@@ -634,11 +637,8 @@ struct FirebaseMessage: Codable {
 /// Tracks when a message or conversation has been read, supporting multi-device sync.
 ///
 /// Read receipts allow the app to synchronize read status across multiple devices. When a user
-/// reads a message on one device (e.g., their phone), the read receipt is uploaded to Firebase,
+/// reads a message on one device (e.g., their phone), the read receipt is synced to the server,
 /// and other devices (e.g., the Mac app) can update their UI accordingly.
-///
-/// ## Firebase Storage
-/// Read receipts are stored at: `users/{userId}/readReceipts/{receiptId}`
 ///
 /// ## Multi-Device Support
 /// The `readBy` and `readDeviceName` fields identify which device marked the message as read,
@@ -648,7 +648,7 @@ struct FirebaseMessage: Codable {
 /// - Related to: `Message` - Read receipts reference messages via address and source ID
 /// - Related to: `Conversation` - The conversationAddress links to a Conversation
 struct ReadReceipt: Identifiable, Hashable {
-    /// Unique identifier for this read receipt (typically a Firebase key)
+    /// Unique identifier for this read receipt
     let id: String
 
     /// Timestamp when the message was marked as read, in milliseconds since Unix epoch

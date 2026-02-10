@@ -3,12 +3,12 @@
 //  SyncFlowMac
 //
 //  Handles in-app purchases and subscriptions using StoreKit 2
+//  syncUsagePlan() uses local data only.
 //
 
 import Foundation
 import StoreKit
 import Combine
-// FirebaseDatabase - using FirebaseStubs.swift
 
 // MARK: - Product Identifiers
 
@@ -150,10 +150,10 @@ class SubscriptionService: ObservableObject {
         case .subscribed, .threeYear:
             return true
         case .trial, .expired, .notSubscribed:
-            break // Fall through to check Firebase plan
+            break // Fall through to check local plan
         }
 
-        // Fallback to Firebase plan from PreferencesService (for testing tab)
+        // Fallback to local plan from PreferencesService (for testing tab)
         return PreferencesService.shared.isPaidUser()
     }
 
@@ -242,11 +242,10 @@ class SubscriptionService: ObservableObject {
     // MARK: - Update Status
 
     func updateSubscriptionStatus() async {
-        // FIRST: Check Firebase for admin-assigned plan (Testing tab)
-        // This takes priority over StoreKit for testing
+        // Check local data for admin-assigned plan (Testing tab)
         await syncUsagePlan()
 
-        // If Firebase already set a valid paid status, don't override with StoreKit
+        // If local data already set a valid paid status, don't override with StoreKit
         if case .subscribed = subscriptionStatus {
             return
         }
@@ -339,154 +338,37 @@ class SubscriptionService: ObservableObject {
         return subscriptionStatus.isActive
     }
 
+    /// Checks local PreferencesService data for admin-assigned plans.
+    /// Uses only locally cached plan data.
     private func syncUsagePlan() async {
         guard let userId = UserDefaults.standard.string(forKey: "syncflow_user_id"),
               !userId.isEmpty else {
             return
         }
 
+        // Check local plan data from PreferencesService
+        let prefs = PreferencesService.shared
+        let plan = prefs.userPlan
+        let planExpiresAt = prefs.planExpiresAt
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
 
-        let userRef = Database.database()
-            .reference()
-            .child("users")
-            .child(userId)
-
-        // FIRST: Try to load plan from Firebase (check both root level and usage path)
-        do {
-            let snapshot = try await userRef.getData()
-            if let userData = snapshot.value as? [String: Any] {
-
-                var plan = ""
-                var planExpiresAt: NSNumber?
-                var freeTrialExpiresAt: NSNumber?
-
-                // Check for plan at root level (legacy location from before)
-                if let rootPlan = userData["plan"] as? String {
-                    plan = rootPlan
-                    planExpiresAt = userData["planExpiresAt"] as? NSNumber
-                    freeTrialExpiresAt = userData["freeTrialExpiresAt"] as? NSNumber
-                }
-
-                // Check for plan in usage (new location from Testing tab)
-                if let usageData = userData["usage"] as? [String: Any] {
-                    if let usagePlan = usageData["plan"] as? String, !usagePlan.isEmpty {
-                        plan = usagePlan
-                        planExpiresAt = usageData["planExpiresAt"] as? NSNumber
-                        freeTrialExpiresAt = usageData["freeTrialExpiresAt"] as? NSNumber
-                    } else {
-                    }
+        // If local data has a valid paid plan that hasn't expired, use it
+        if ["monthly", "yearly", "lifetime", "3year"].contains(plan.lowercased()) {
+            if plan.lowercased() == "lifetime" || plan.lowercased() == "3year" ||
+               (planExpiresAt > 0 && planExpiresAt > nowMs) {
+                // Valid paid plan from local data
+                if plan.lowercased() == "lifetime" || plan.lowercased() == "3year" {
+                    let expiryDate = planExpiresAt > 0 ? Date(timeIntervalSince1970: TimeInterval(planExpiresAt) / 1000) : nil
+                    self.subscriptionStatus = .threeYear(expiresAt: expiryDate)
                 } else {
+                    let expiryDate = Date(timeIntervalSince1970: TimeInterval(planExpiresAt) / 1000)
+                    self.subscriptionStatus = .subscribed(plan: plan, expiresAt: expiryDate)
                 }
-
-                let now = Int64(Date().timeIntervalSince1970 * 1000)
-
-                // If Firebase has a valid paid plan that hasn't expired, use it
-                if ["monthly", "yearly", "lifetime", "3year"].contains(plan.lowercased()) {
-                    if plan.lowercased() == "lifetime" || plan.lowercased() == "3year" ||
-                       (planExpiresAt != nil && planExpiresAt!.int64Value > now) {
-                        // Valid paid plan from Firebase, use it
-                        updateLocalPlanData(plan: plan, expiresAt: planExpiresAt?.int64Value ?? 0)
-
-                        // Update subscriptionStatus to reflect the paid plan (immediately, not async)
-                        if plan.lowercased() == "lifetime" || plan.lowercased() == "3year" {
-                            let expiryDate = planExpiresAt != nil ? Date(timeIntervalSince1970: TimeInterval(planExpiresAt!.int64Value) / 1000) : nil
-                            self.subscriptionStatus = .threeYear(expiresAt: expiryDate)
-                        } else {
-                            let expiryDate = Date(timeIntervalSince1970: TimeInterval(planExpiresAt?.int64Value ?? 0) / 1000)
-                            self.subscriptionStatus = .subscribed(plan: plan, expiresAt: expiryDate)
-                        }
-                        return
-                    }
-                }
-
-                // If Firebase has active free trial, use it
-                if let trialExpiry = freeTrialExpiresAt?.int64Value, trialExpiry > now {
-                    updateLocalPlanData(plan: "free", expiresAt: trialExpiry)
-
-                    // Update subscriptionStatus to reflect active trial (immediately, not async)
-                    let trialDaysRemaining = Int((trialExpiry - now) / (24 * 60 * 60 * 1000))
-                    self.subscriptionStatus = .trial(daysRemaining: max(0, trialDaysRemaining))
-                    return
-                } else {
-                }
-            } else {
+                return
             }
-        } catch {
-            print("SubscriptionService: Error loading plan from Firebase: \(error)")
         }
 
-        // FALLBACK: Check subscription_records/{uid} (persists even after user deletion)
-        let subscriptionRecordRef = Database.database()
-            .reference()
-            .child("subscription_records")
-            .child(userId)
-
-        do {
-            let subscriptionSnapshot = try await subscriptionRecordRef.child("active").getData()
-            if let activeData = subscriptionSnapshot.value as? [String: Any] {
-                let plan = activeData["plan"] as? String ?? ""
-                let planExpiresAt = activeData["planExpiresAt"] as? NSNumber
-                let freeTrialExpiresAt = activeData["freeTrialExpiresAt"] as? NSNumber
-
-                let now = Int64(Date().timeIntervalSince1970 * 1000)
-
-                // If subscription record has a valid paid plan that hasn't expired, use it
-                if ["monthly", "yearly", "lifetime", "3year"].contains(plan.lowercased()) {
-                    if plan.lowercased() == "lifetime" || plan.lowercased() == "3year" ||
-                       (planExpiresAt != nil && planExpiresAt!.int64Value > now) {
-                        // Valid paid plan from subscription record (survives user deletion)
-                        updateLocalPlanData(plan: plan, expiresAt: planExpiresAt?.int64Value ?? 0)
-
-                        if plan.lowercased() == "lifetime" || plan.lowercased() == "3year" {
-                            let expiryDate = planExpiresAt != nil ? Date(timeIntervalSince1970: TimeInterval(planExpiresAt!.int64Value) / 1000) : nil
-                            self.subscriptionStatus = .threeYear(expiresAt: expiryDate)
-                        } else {
-                            let expiryDate = Date(timeIntervalSince1970: TimeInterval(planExpiresAt?.int64Value ?? 0) / 1000)
-                            self.subscriptionStatus = .subscribed(plan: plan, expiresAt: expiryDate)
-                        }
-                        return
-                    }
-                }
-
-                // If subscription record has active free trial, use it
-                if let trialExpiry = freeTrialExpiresAt?.int64Value, trialExpiry > now {
-                    updateLocalPlanData(plan: "free", expiresAt: trialExpiry)
-
-                    let trialDaysRemaining = Int((trialExpiry - now) / (24 * 60 * 60 * 1000))
-                    self.subscriptionStatus = .trial(daysRemaining: max(0, trialDaysRemaining))
-                    return
-                }
-            }
-        } catch {
-        }
-
-        // FALLBACK: Sync StoreKit subscription data to Firebase
-        let usageRef = userRef.child("usage")
-        var updates: [String: Any] = [
-            "planUpdatedAt": ServerValue.timestamp()
-        ]
-
-        switch subscriptionStatus {
-        case .threeYear(let expiresAt):
-            updates["plan"] = "3year"
-            if let expiresAt = expiresAt {
-                updates["planExpiresAt"] = Int64(expiresAt.timeIntervalSince1970 * 1000)
-            } else {
-                updates["planExpiresAt"] = NSNull()
-            }
-        case .subscribed(let plan, let expiresAt):
-            updates["plan"] = plan.lowercased()
-            if let expiresAt = expiresAt {
-                updates["planExpiresAt"] = Int64(expiresAt.timeIntervalSince1970 * 1000)
-            } else {
-                updates["planExpiresAt"] = NSNull()
-            }
-        default:
-            updates["plan"] = NSNull()
-            updates["planExpiresAt"] = NSNull()
-        }
-
-        try? await usageRef.updateChildValues(updates)
+        // No valid local plan found; StoreKit check will follow in updateSubscriptionStatus()
     }
 
     private func updateLocalPlanData(plan: String, expiresAt: Int64) {

@@ -42,6 +42,8 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.outlined.AccountBalance
+import androidx.compose.material.icons.outlined.Autorenew
+import androidx.compose.material.icons.outlined.CompareArrows
 import androidx.compose.material.icons.outlined.LocalShipping
 import androidx.compose.material.icons.outlined.Receipt
 import androidx.compose.material.icons.outlined.ShoppingCart
@@ -105,6 +107,8 @@ val QUICK_ACTIONS = listOf(
     QuickAction(Icons.Outlined.Receipt, "Bills", "Show my upcoming bills", 0xFFFF9800),
     QuickAction(Icons.Outlined.LocalShipping, "Packages", "Track my packages", 0xFF4CAF50),
     QuickAction(Icons.Outlined.AccountBalance, "Balance", "What is my account balance?", 0xFF9C27B0),
+    QuickAction(Icons.Outlined.Autorenew, "Subscriptions", "Show my subscriptions", 0xFF3F51B5),
+    QuickAction(Icons.Outlined.CompareArrows, "Compare", "Compare spending vs last month", 0xFF00BCD4),
     QuickAction(Icons.Outlined.VpnKey, "OTPs", "Show my OTP codes", 0xFFF44336),
     QuickAction(Icons.Outlined.ShoppingCart, "Transactions", "List my transactions", 0xFF009688),
 )

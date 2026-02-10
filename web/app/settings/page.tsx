@@ -120,6 +120,7 @@ export default function SettingsPage() {
               storageLimitBytes: STORAGE_LIMIT,
               mmsBytes: u.monthlyMmsBytes || 0,
               fileBytes: u.monthlyFileBytes || 0,
+              photoBytes: u.monthlyPhotoBytes || 0,
               lastUpdatedAt: u.lastUpdatedAt || null,
               isPaid,
             })
@@ -399,7 +400,7 @@ export default function SettingsPage() {
                             {formatBytes(usage.monthlyUsedBytes)} / {formatBytes(usage.monthlyLimitBytes)}
                           </div>
                           <div className="text-sm text-gray-500 dark:text-gray-400">
-                            MMS {formatBytes(usage.mmsBytes)} • Files {formatBytes(usage.fileBytes)}
+                            MMS {formatBytes(usage.mmsBytes)} • Photos {formatBytes(usage.photoBytes)} • Files {formatBytes(usage.fileBytes)}
                           </div>
                         </div>
                         <div className="w-full bg-gray-100 dark:bg-gray-700 rounded-full h-2">

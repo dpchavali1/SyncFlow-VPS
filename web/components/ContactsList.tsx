@@ -8,6 +8,7 @@ import {
   updateContact,
   deleteContact,
 } from '@/lib/firebase'
+import vpsService from '@/lib/vps'
 
 interface ContactsListProps {
   userId: string
@@ -35,7 +36,51 @@ export default function ContactsList({ userId, onSelectContact }: ContactsListPr
   useEffect(() => {
     if (!userId) return
 
-    // Optimized contacts listener - uses child events instead of full snapshot
+    if (vpsService.isAuthenticated) {
+      // VPS mode: fetch contacts from API
+      const loadContacts = async () => {
+        try {
+          const response = await vpsService.getContacts({ limit: 1000 })
+          const mapped: Contact[] = response.contacts.map((c) => ({
+            id: c.id,
+            displayName: c.displayName || '',
+            phoneNumber: c.phoneNumbers?.[0],
+            phoneType: 'Mobile',
+            sync: {
+              pendingAndroidSync: false,
+              lastSyncedAt: 0,
+              lastUpdatedAt: Date.now(),
+              lastUpdatedBy: 'android',
+              version: 1,
+              desktopOnly: false,
+            },
+            sources: { android: true },
+            email: c.emails?.[0],
+          }))
+          setContacts(mapped)
+        } catch (err) {
+          console.error('[Contacts] VPS: Failed to load contacts', err)
+        }
+        setIsLoading(false)
+      }
+      loadContacts()
+
+      // Listen for real-time contact updates
+      const handleContactAdded = async () => { loadContacts() }
+      const handleContactUpdated = async () => { loadContacts() }
+      const handleContactDeleted = async () => { loadContacts() }
+      vpsService.on('contact_added', handleContactAdded)
+      vpsService.on('contact_updated', handleContactUpdated)
+      vpsService.on('contact_deleted', handleContactDeleted)
+
+      return () => {
+        vpsService.off('contact_added', handleContactAdded)
+        vpsService.off('contact_updated', handleContactUpdated)
+        vpsService.off('contact_deleted', handleContactDeleted)
+      }
+    }
+
+    // Firebase mode: Optimized contacts listener
     const unsubContacts = listenToContactsOptimized(userId, (androidContacts) => {
       setContacts(androidContacts)
       setIsLoading(false)
@@ -113,7 +158,21 @@ export default function ContactsList({ userId, onSelectContact }: ContactsListPr
 
     setIsSaving(true)
     try {
-      if (editingContact) {
+      if (vpsService.isAuthenticated) {
+        if (editingContact) {
+          await vpsService.updateContact(editingContact.id, {
+            displayName: formName.trim(),
+            phoneNumbers: [formPhone.trim()],
+            emails: formEmail.trim() ? [formEmail.trim()] : [],
+          })
+        } else {
+          await vpsService.createContact({
+            displayName: formName.trim(),
+            phoneNumbers: [formPhone.trim()],
+            emails: formEmail.trim() ? [formEmail.trim()] : [],
+          })
+        }
+      } else if (editingContact) {
         await updateContact(
           userId,
           editingContact.id,
@@ -145,7 +204,11 @@ export default function ContactsList({ userId, onSelectContact }: ContactsListPr
 
   const handleDelete = async (contact: Contact) => {
     try {
-      await deleteContact(userId, contact.id)
+      if (vpsService.isAuthenticated) {
+        await vpsService.deleteContact(contact.id)
+      } else {
+        await deleteContact(userId, contact.id)
+      }
       setDeleteConfirmContact(null)
     } catch (error) {
       console.error('Error deleting contact:', error)

@@ -7,7 +7,6 @@
 
 import SwiftUI
 import Combine
-// FirebaseFunctions - using FirebaseStubs.swift
 
 struct DeleteAccountView: View {
     @Environment(\.dismiss) private var dismiss
@@ -384,8 +383,6 @@ class DeleteAccountViewModel: ObservableObject {
         "Other"
     ]
 
-    private lazy var functions = Functions.functions()
-
     init() {
         checkDeletionStatus()
     }
@@ -393,18 +390,22 @@ class DeleteAccountViewModel: ObservableObject {
     func checkDeletionStatus() {
         isLoading = true
 
-        functions.httpsCallable("getAccountDeletionStatus").call { [weak self] result, error in
-            DispatchQueue.main.async {
-                self?.isLoading = false
+        Task {
+            do {
+                let status = try await VPSService.shared.getAccountDeletionStatus()
+                await MainActor.run {
+                    self.isLoading = false
+                    self.isScheduledForDeletion = status.scheduled
+                    self.daysRemaining = status.daysRemaining
 
-                if let data = result?.data as? [String: Any] {
-                    self?.isScheduledForDeletion = data["isScheduledForDeletion"] as? Bool ?? false
-
-                    if let timestamp = data["scheduledDeletionAt"] as? Double {
-                        self?.scheduledDeletionDate = Date(timeIntervalSince1970: timestamp / 1000)
+                    if let scheduledMs = status.scheduledDate {
+                        self.scheduledDeletionDate = Date(timeIntervalSince1970: Double(scheduledMs) / 1000)
                     }
-
-                    self?.daysRemaining = data["daysRemaining"] as? Int ?? 0
+                }
+            } catch {
+                await MainActor.run {
+                    self.isLoading = false
+                    self.errorMessage = error.localizedDescription
                 }
             }
         }
@@ -413,26 +414,19 @@ class DeleteAccountViewModel: ObservableObject {
     func requestDeletion() {
         isProcessing = true
 
-        let data: [String: Any] = ["reason": selectedReason]
-
-        functions.httpsCallable("requestAccountDeletion").call(data) { [weak self] result, error in
-            DispatchQueue.main.async {
-                self?.isProcessing = false
-
-                if let error = error {
-                    self?.errorMessage = error.localizedDescription
-                    return
+        Task {
+            do {
+                try await VPSService.shared.requestAccountDeletion(reason: selectedReason)
+                await MainActor.run {
+                    self.isProcessing = false
+                    self.daysRemaining = 30
+                    self.isScheduledForDeletion = true
+                    self.scheduledDeletionDate = Date().addingTimeInterval(30 * 24 * 60 * 60)
                 }
-
-                if let data = result?.data as? [String: Any],
-                   let success = data["success"] as? Bool, success {
-
-                    if let timestamp = data["scheduledDeletionAt"] as? Double {
-                        self?.scheduledDeletionDate = Date(timeIntervalSince1970: timestamp / 1000)
-                    }
-
-                    self?.daysRemaining = 30
-                    self?.isScheduledForDeletion = true
+            } catch {
+                await MainActor.run {
+                    self.isProcessing = false
+                    self.errorMessage = error.localizedDescription
                 }
             }
         }
@@ -441,19 +435,18 @@ class DeleteAccountViewModel: ObservableObject {
     func cancelDeletion() {
         isProcessing = true
 
-        functions.httpsCallable("cancelAccountDeletion").call { [weak self] result, error in
-            DispatchQueue.main.async {
-                self?.isProcessing = false
-
-                if let error = error {
-                    self?.errorMessage = error.localizedDescription
-                    return
+        Task {
+            do {
+                try await VPSService.shared.cancelAccountDeletion()
+                await MainActor.run {
+                    self.isProcessing = false
+                    self.isScheduledForDeletion = false
+                    self.scheduledDeletionDate = nil
                 }
-
-                if let data = result?.data as? [String: Any],
-                   let success = data["success"] as? Bool, success {
-                    self?.isScheduledForDeletion = false
-                    self?.scheduledDeletionDate = nil
+            } catch {
+                await MainActor.run {
+                    self.isProcessing = false
+                    self.errorMessage = error.localizedDescription
                 }
             }
         }

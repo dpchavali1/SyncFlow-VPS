@@ -480,39 +480,47 @@ class AIAssistantService: ObservableObject {
     private func parseTransactions(from messages: [Message]) -> [ParsedTransaction] {
         var transactions: [ParsedTransaction] = []
 
-        // Amount patterns
-        let usdPattern = #"\$\s*([0-9,]+(?:\.\d{1,2})?)"#
+        // Amount patterns — match Android's SpendingParser: INR first, then USD, then generic "amount"
         let inrPattern = #"(?:Rs\.?|₹|INR)\s*([0-9,]+(?:\.\d{1,2})?)"#
+        let usdPattern = #"(?:USD|\$)\s*([0-9,]+(?:\.\d{1,2})?)"#
+        let genericAmountPattern = #"amount[: ]*([0-9,]+(?:\.\d{1,2})?)"#
 
         for message in messages {
             let body = message.body
             let bodyLower = body.lowercased()
 
-            // Skip credit/refund messages
-            if creditKeywords.contains(where: { bodyLower.contains($0) }) {
-                continue
-            }
-
-            // Must have debit keyword
-            guard debitKeywords.contains(where: { bodyLower.contains($0) }) else {
+            // Skip credit/refund messages (same as Android)
+            if bodyLower.contains("credited") || bodyLower.contains("refund") ||
+               bodyLower.contains("reversal") || bodyLower.contains("deposit") {
                 continue
             }
 
             // Extract merchant first (needed for currency detection)
             let merchant = extractMerchantFromMessage(body)
 
-            // Extract amount
+            // Extract amount — try each pattern in order (matches Android's approach)
             var amount: Double? = nil
 
-            if let match = body.range(of: usdPattern, options: String.CompareOptions.regularExpression) {
-                let amountStr = String(body[match]).replacingOccurrences(of: "$", with: "").replacingOccurrences(of: ",", with: "").trimmingCharacters(in: CharacterSet.whitespaces)
-                amount = Double(amountStr)
-            } else if let match = body.range(of: inrPattern, options: String.CompareOptions.regularExpression) {
+            if let match = body.range(of: inrPattern, options: [.regularExpression, .caseInsensitive]) {
                 var amountStr = String(body[match])
                 amountStr = amountStr.replacingOccurrences(of: "Rs.", with: "")
                     .replacingOccurrences(of: "Rs", with: "")
                     .replacingOccurrences(of: "₹", with: "")
                     .replacingOccurrences(of: "INR", with: "")
+                    .replacingOccurrences(of: ",", with: "")
+                    .trimmingCharacters(in: CharacterSet.whitespaces)
+                amount = Double(amountStr)
+            } else if let match = body.range(of: usdPattern, options: [.regularExpression, .caseInsensitive]) {
+                let amountStr = String(body[match])
+                    .replacingOccurrences(of: "$", with: "")
+                    .replacingOccurrences(of: "USD", with: "", options: .caseInsensitive)
+                    .replacingOccurrences(of: ",", with: "")
+                    .trimmingCharacters(in: CharacterSet.whitespaces)
+                amount = Double(amountStr)
+            } else if let match = body.range(of: genericAmountPattern, options: [.regularExpression, .caseInsensitive]) {
+                let amountStr = String(body[match])
+                    .replacingOccurrences(of: "amount", with: "", options: .caseInsensitive)
+                    .replacingOccurrences(of: ":", with: "")
                     .replacingOccurrences(of: ",", with: "")
                     .trimmingCharacters(in: CharacterSet.whitespaces)
                 amount = Double(amountStr)

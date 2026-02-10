@@ -7,7 +7,6 @@
 
 import Foundation
 import Combine
-// FirebaseDatabase - using FirebaseStubs.swift
 
 class HotspotControlService: ObservableObject {
     static let shared = HotspotControlService()
@@ -19,9 +18,8 @@ class HotspotControlService: ObservableObject {
     @Published var statusMessage: String?
     @Published var lastUpdated: Date?
 
-    private let database = Database.database()
-    private var statusHandle: DatabaseHandle?
     private var currentUserId: String?
+    private var cancellables = Set<AnyCancellable>()
 
     private init() {}
 
@@ -29,42 +27,29 @@ class HotspotControlService: ObservableObject {
     func startListening(userId: String) {
         currentUserId = userId
 
-        let statusRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("hotspot_status")
-
-        statusHandle = statusRef.observe(.value) { [weak self] snapshot in
-            guard let self = self,
-                  let data = snapshot.value as? [String: Any] else { return }
-
-            DispatchQueue.main.async {
-                self.isHotspotEnabled = data["enabled"] as? Bool ?? false
-                self.hotspotSSID = data["ssid"] as? String ?? ""
-                self.connectedDevices = data["connectedDevices"] as? Int ?? 0
-                self.canToggleProgrammatically = data["canToggleProgrammatically"] as? Bool ?? false
-                self.statusMessage = data["message"] as? String
-
-                if let timestamp = data["timestamp"] as? Double {
-                    self.lastUpdated = Date(timeIntervalSince1970: timestamp / 1000)
-                }
+        // Fetch current hotspot status
+        Task {
+            do {
+                let status = try await VPSService.shared.getHotspotStatus()
+                await MainActor.run { self.applyHotspotStatus(status) }
+            } catch {
+                print("[Hotspot] Error fetching initial status: \(error)")
             }
         }
 
+        // Listen for real-time WebSocket updates
+        VPSService.shared.hotspotStatusUpdated
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] data in
+                self?.applyHotspotStatus(data)
+            }
+            .store(in: &cancellables)
     }
 
     /// Stop listening
     func stopListening() {
-        guard let userId = currentUserId, let handle = statusHandle else { return }
-
-        database.reference()
-            .child("users")
-            .child(userId)
-            .child("hotspot_status")
-            .removeObserver(withHandle: handle)
-
-        statusHandle = nil
         currentUserId = nil
+        cancellables.removeAll()
     }
 
     /// Toggle hotspot on phone
@@ -94,27 +79,22 @@ class HotspotControlService: ObservableObject {
 
     /// Send command to phone
     private func sendCommand(_ action: String) {
-        guard let userId = currentUserId else {
-            return
-        }
-
-        database.goOnline()
-
-        let commandRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("hotspot_command")
-
-        let commandData: [String: Any] = [
-            "action": action,
-            "timestamp": ServerValue.timestamp()
-        ]
-
-        commandRef.setValue(commandData) { error, _ in
-            if let error = error {
-                print("HotspotControlService: Error sending command: \(error)")
-            } else {
+        Task {
+            do {
+                try await VPSService.shared.sendHotspotCommand(action: action)
+            } catch {
+                print("[Hotspot] Error sending command \(action): \(error)")
             }
         }
+    }
+
+    // MARK: - Private
+
+    private func applyHotspotStatus(_ data: [String: Any]) {
+        if let enabled = data["enabled"] as? Bool { isHotspotEnabled = enabled }
+        if let ssid = data["ssid"] as? String { hotspotSSID = ssid }
+        if let devices = data["connectedDevices"] as? Int { connectedDevices = devices }
+        if let canToggle = data["canToggle"] as? Bool { canToggleProgrammatically = canToggle }
+        lastUpdated = Date()
     }
 }

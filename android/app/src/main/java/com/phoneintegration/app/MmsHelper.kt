@@ -1864,12 +1864,13 @@ object MmsHelper {
     fun getMmsAddresses(contentResolver: android.content.ContentResolver, mmsIds: List<Long>): Map<Long, String> {
         if (mmsIds.isEmpty()) return emptyMap()
 
-        val addresses = mutableMapOf<Long, String>()
+        val fromAddresses = mutableMapOf<Long, String>()
+        val toAddresses = mutableMapOf<Long, String>()
         val uri = Uri.parse("content://mms/addr")
         val selection = "${Telephony.Mms.Addr.MSG_ID} IN (${mmsIds.joinToString(",")}) AND ${Telephony.Mms.Addr.TYPE} IN (137, 151)"
         val cursor = contentResolver.query(
             uri,
-            arrayOf(Telephony.Mms.Addr.MSG_ID, Telephony.Mms.Addr.ADDRESS),
+            arrayOf(Telephony.Mms.Addr.MSG_ID, Telephony.Mms.Addr.ADDRESS, Telephony.Mms.Addr.TYPE),
             selection, null, null
         )
 
@@ -1877,12 +1878,21 @@ object MmsHelper {
             while (it.moveToNext()) {
                 val msgId = it.getLong(it.getColumnIndexOrThrow(Telephony.Mms.Addr.MSG_ID))
                 val address = it.getString(it.getColumnIndexOrThrow(Telephony.Mms.Addr.ADDRESS))
-                if (!address.isNullOrBlank() && !addresses.containsKey(msgId)) {
-                    addresses[msgId] = address
+                val type = it.getInt(it.getColumnIndexOrThrow(Telephony.Mms.Addr.TYPE))
+                if (address.isNullOrBlank()) continue
+                if (address.contains("insert-address-token", ignoreCase = true)) continue
+                when (type) {
+                    137 -> fromAddresses.putIfAbsent(msgId, address)
+                    151 -> toAddresses.putIfAbsent(msgId, address)
                 }
             }
         }
-        return addresses
+        // Prefer FROM (sender) for each message, fall back to TO
+        val result = mutableMapOf<Long, String>()
+        for (msgId in (fromAddresses.keys + toAddresses.keys)) {
+            result[msgId] = fromAddresses[msgId] ?: toAddresses[msgId] ?: continue
+        }
+        return result
     }
 
     fun getMmsTexts(contentResolver: android.content.ContentResolver, mmsIds: List<Long>): Map<Long, String> {
@@ -1919,19 +1929,23 @@ object MmsHelper {
             null, null, null
         )
 
+        // Prefer FROM (type 137) for received MMS - this is the sender.
+        // Fall back to TO (type 151) only if no FROM is available.
+        var fromAddress: String? = null
+        var toAddress: String? = null
         cursor?.use {
             while (it.moveToNext()) {
                 val address = it.getString(it.getColumnIndexOrThrow(Telephony.Mms.Addr.ADDRESS))
                 val type = it.getInt(it.getColumnIndexOrThrow(Telephony.Mms.Addr.TYPE))
-                Log.d("MmsHelper", "MMS $mmsId address entry: address='$address', type=$type")
-                // Type 137 = FROM, Type 151 = TO
-                if (!address.isNullOrBlank() && (type == 137 || type == 151)) {
-                    Log.d("MmsHelper", "MMS $mmsId using address: '$address' (type: $type)")
-                    return address
+                if (address.isNullOrBlank()) continue
+                if (address.contains("insert-address-token", ignoreCase = true)) continue
+                when (type) {
+                    137 -> if (fromAddress == null) fromAddress = address  // FROM
+                    151 -> if (toAddress == null) toAddress = address      // TO
                 }
             }
         }
-        return null
+        return fromAddress ?: toAddress
     }
 
     /**
@@ -1951,9 +1965,10 @@ object MmsHelper {
             while (it.moveToNext()) {
                 val address = it.getString(it.getColumnIndexOrThrow(Telephony.Mms.Addr.ADDRESS))
                 val type = it.getInt(it.getColumnIndexOrThrow(Telephony.Mms.Addr.TYPE))
-                // Type 137 = FROM, Type 151 = TO
-                if (!address.isNullOrBlank() && (type == 137 || type == 151)) {
-                    // Filter out insert-address-token (self)
+                // Only include type 151 (TO) addresses - these are the actual recipients.
+                // Type 137 (FROM) is the sender (own number for sent MMS) and must be excluded
+                // to prevent sent messages from being grouped under the user's own number.
+                if (!address.isNullOrBlank() && type == 151) {
                     if (!address.contains("insert-address-token", ignoreCase = true)) {
                         recipients.add(address)
                     }

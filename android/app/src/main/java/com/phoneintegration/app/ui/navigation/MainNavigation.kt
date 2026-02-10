@@ -52,7 +52,9 @@ fun MainNavigation(
     pendingShare: SharePayload?,
     onShareHandled: () -> Unit,
     pendingConversation: com.phoneintegration.app.MainActivity.ConversationLaunch?,
-    onConversationHandled: () -> Unit
+    onConversationHandled: () -> Unit,
+    pendingOpenSpam: Boolean = false,
+    onSpamHandled: () -> Unit = {}
 ) {
     val navController = rememberNavController()
     val context = LocalContext.current
@@ -112,6 +114,16 @@ fun MainNavigation(
                 launchSingleTop = true
             }
             onConversationHandled()
+        }
+    }
+
+    // Handle pending spam folder open from notification
+    LaunchedEffect(pendingOpenSpam) {
+        if (pendingOpenSpam) {
+            navController.navigate("spam") {
+                launchSingleTop = true
+            }
+            onSpamHandled()
         }
     }
 

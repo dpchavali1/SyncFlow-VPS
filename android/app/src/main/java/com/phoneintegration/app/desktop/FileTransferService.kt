@@ -2,8 +2,11 @@ package com.phoneintegration.app.desktop
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
@@ -401,6 +404,10 @@ class FileTransferService(context: Context) {
     private suspend fun pollFileTransfers() {
         try {
             val transfers = vpsClient.getFileTransfers()
+            val pending = transfers.filter { it.source != "android" && it.status == "pending" }
+            if (pending.isNotEmpty()) {
+                Log.d(TAG, "Found ${pending.size} incoming pending transfers: ${pending.map { "${it.id} from=${it.source} status=${it.status}" }}")
+            }
             for (transfer in transfers) {
                 handleFileTransfer(transfer)
             }
@@ -445,7 +452,7 @@ class FileTransferService(context: Context) {
 
         val fileName = transfer.fileName
         val fileSize = transfer.fileSize
-        val contentType = transfer.contentType
+        val contentType = transfer.contentType ?: "application/octet-stream"
         val source = transfer.source
         val status = transfer.status
         val timestamp = transfer.timestamp
@@ -459,7 +466,7 @@ class FileTransferService(context: Context) {
         }
 
         // Only process files from other devices (not Android)
-        if (source == "android") {
+        if (source == null || source == "android") {
             return
         }
 
@@ -855,11 +862,21 @@ class FileTransferService(context: Context) {
      * @param fileName Name of the downloaded file
      */
     private fun showDownloadCompleteNotification(fileName: String) {
+        // Open system Downloads viewer when notification is tapped
+        val intent = Intent(android.app.DownloadManager.ACTION_VIEW_DOWNLOADS).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context, 0, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
             .setContentTitle("File received from Mac")
             .setContentText("$fileName saved to Downloads/SyncFlow")
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             .build()
 

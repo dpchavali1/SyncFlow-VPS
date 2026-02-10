@@ -6,7 +6,6 @@
 //
 
 import SwiftUI
-// FirebaseDatabase - using FirebaseStubs.swift
 import Combine
 
 enum PhoneType: String, CaseIterable {
@@ -413,7 +412,7 @@ struct ContactRow: View {
         .onHover { hovering in
             isHovered = hovering
             // BANDWIDTH OPTIMIZATION: Load SIMs and devices once at app level (not per-row)
-            // This saves ~2 Firebase fetches per contact hover
+            // This saves ~2 API fetches per contact hover
             if hovering {
                 contactsStore.loadSimsIfNeeded()
                 contactsStore.loadDevicesIfNeeded()

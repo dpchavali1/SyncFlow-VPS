@@ -7,7 +7,7 @@
  * This replaces the Firebase-based pairing flow.
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import QRCode from 'qrcode';
 import vpsService, { VPSUser } from '@/lib/vps';
 
@@ -23,6 +23,12 @@ export default function VPSPairingScreen({ onPairingComplete, onError }: VPSPair
   const [isPairing, setIsPairing] = useState(false);
   const [isPaired, setIsPaired] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Use refs for callbacks to avoid re-triggering startPairing when parent re-renders
+  const onPairingCompleteRef = useRef(onPairingComplete);
+  onPairingCompleteRef.current = onPairingComplete;
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
 
   const startPairing = useCallback(async () => {
     setIsLoading(true);
@@ -51,15 +57,15 @@ export default function VPSPairingScreen({ onPairingComplete, onError }: VPSPair
       const user = await vpsService.waitForPairingApproval(token);
       setIsPairing(false);
       setIsPaired(true);
-      onPairingComplete?.(user);
+      onPairingCompleteRef.current?.(user);
 
     } catch (err: any) {
       setIsLoading(false);
       setIsPairing(false);
       setError(err.message || 'Failed to start pairing');
-      onError?.(err);
+      onErrorRef.current?.(err);
     }
-  }, [onPairingComplete, onError]);
+  }, []);
 
   useEffect(() => {
     startPairing();

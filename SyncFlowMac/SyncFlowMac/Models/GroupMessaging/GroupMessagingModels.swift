@@ -29,7 +29,7 @@ struct ContactGroup: Identifiable, Hashable {
 
         let createdAt = (data["created_at"] as? Double) ?? (data["createdAt"] as? Double) ?? 0
 
-        // Handle different numeric types from Firebase
+        // Handle different numeric types from JSON
         let contactCount: Int
         if let count = data["contact_count"] as? Int {
             contactCount = count

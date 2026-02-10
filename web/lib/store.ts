@@ -25,6 +25,7 @@ interface Message {
   attachments?: Attachment[]  // MMS attachments from Firebase
   mmsParts?: any[]            // VPS MMS attachment metadata
   mmsSubject?: string
+  deliveryStatus?: string     // 'sending', 'sent', 'delivered', 'failed'
 }
 
 interface ReadReceipt {

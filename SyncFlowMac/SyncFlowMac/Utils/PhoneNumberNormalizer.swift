@@ -79,6 +79,48 @@ class PhoneNumberNormalizer {
     }
 
     /**
+     * Convert phone number to E.164 format for server communication.
+     * Rules:
+     * - 10 digits → +1XXXXXXXXXX (US)
+     * - 11 digits starting with 1 → +1XXXXXXXXXX (US)
+     * - Already starts with + → keep as-is
+     * - Short codes (<=6 digits), emails, alphanumeric sender IDs → unchanged
+     */
+    func toE164(_ phoneNumber: String?) -> String {
+        guard let phoneNumber = phoneNumber, !phoneNumber.trimmingCharacters(in: .whitespaces).isEmpty else {
+            return phoneNumber ?? ""
+        }
+
+        let trimmed = phoneNumber.trimmingCharacters(in: .whitespaces)
+
+        // Leave emails unchanged
+        if trimmed.contains("@") { return trimmed }
+
+        // Leave alphanumeric sender IDs unchanged
+        if trimmed.rangeOfCharacter(from: .letters) != nil { return trimmed }
+
+        // Strip everything except digits and '+'
+        let stripped = trimmed.replacingOccurrences(of: "[^0-9+]", with: "", options: .regularExpression)
+        if stripped.isEmpty || stripped == "+" { return trimmed }
+
+        let digitsOnly = stripped.replacingOccurrences(of: "+", with: "")
+
+        // Short codes (<=6 digits)
+        if digitsOnly.count <= 6 { return digitsOnly }
+
+        // Already has '+' prefix → keep as-is
+        if stripped.hasPrefix("+") { return stripped }
+
+        // 10 digits → US number
+        if digitsOnly.count == 10 { return "+1\(digitsOnly)" }
+
+        // 11 digits starting with '1' → US number
+        if digitsOnly.count == 11 && digitsOnly.hasPrefix("1") { return "+\(digitsOnly)" }
+
+        return digitsOnly
+    }
+
+    /**
      * Check if two phone numbers are the same person
      */
     func isSameContact(phone1: String?, phone2: String?) -> Bool {

@@ -3,7 +3,6 @@ package com.phoneintegration.app.ui.support
 import android.util.Log
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -22,9 +21,14 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.launch
@@ -61,17 +65,17 @@ fun SupportChatScreen(
     var isLoading by remember { mutableStateOf(false) }
 
     val quickQuestions = listOf(
-        "What's my recovery code?",
+        "How does account recovery work?",
         "Show my sync status",
         "How many messages synced?",
         "Show my devices"
     )
 
-    fun sendMessage() {
-        val text = inputText.trim()
-        if (text.isEmpty() || isLoading) return
+    fun sendMessage(text: String? = null) {
+        val msgText = (text ?: inputText).trim()
+        if (msgText.isEmpty() || isLoading) return
 
-        val userMessage = ChatMessage(role = "user", content = text)
+        val userMessage = ChatMessage(role = "user", content = msgText)
         messages = messages + userMessage
         inputText = ""
         isLoading = true
@@ -82,7 +86,7 @@ fun SupportChatScreen(
                     mapOf("role" to msg.role, "content" to msg.content)
                 }
 
-                val result = vpsClient.supportChat(text, history)
+                val result = vpsClient.supportChat(msgText, history)
 
                 if (result.success && result.response != null) {
                     messages = messages + ChatMessage(role = "assistant", content = result.response)
@@ -187,7 +191,7 @@ fun SupportChatScreen(
                     ) {
                         items(quickQuestions) { question ->
                             AssistChip(
-                                onClick = { inputText = question },
+                                onClick = { sendMessage(question) },
                                 label = { Text(question, style = MaterialTheme.typography.bodySmall) }
                             )
                         }
@@ -231,6 +235,50 @@ fun SupportChatScreen(
     }
 }
 
+/**
+ * Parses basic markdown into AnnotatedString.
+ * Handles **bold**, *italic*, and preserves newlines/bullets.
+ */
+private fun parseMarkdown(text: String): AnnotatedString {
+    return buildAnnotatedString {
+        var i = 0
+        while (i < text.length) {
+            when {
+                // Bold: **text**
+                i + 1 < text.length && text[i] == '*' && text[i + 1] == '*' -> {
+                    val end = text.indexOf("**", i + 2)
+                    if (end != -1) {
+                        withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
+                            append(text.substring(i + 2, end))
+                        }
+                        i = end + 2
+                    } else {
+                        append(text[i])
+                        i++
+                    }
+                }
+                // Italic: *text* (single asterisk, not followed by another)
+                text[i] == '*' && (i + 1 >= text.length || text[i + 1] != '*') -> {
+                    val end = text.indexOf('*', i + 1)
+                    if (end != -1 && end > i + 1) {
+                        withStyle(SpanStyle(fontStyle = FontStyle.Italic)) {
+                            append(text.substring(i + 1, end))
+                        }
+                        i = end + 1
+                    } else {
+                        append(text[i])
+                        i++
+                    }
+                }
+                else -> {
+                    append(text[i])
+                    i++
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun MessageBubble(message: ChatMessage) {
     val isUser = message.role == "user"
@@ -252,15 +300,21 @@ private fun MessageBubble(message: ChatMessage) {
             else
                 MaterialTheme.colorScheme.surfaceVariant
         ) {
-            Text(
-                text = message.content,
-                modifier = Modifier.padding(12.dp),
-                color = if (isUser)
-                    MaterialTheme.colorScheme.onPrimary
-                else
-                    MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyMedium
-            )
+            if (isUser) {
+                Text(
+                    text = message.content,
+                    modifier = Modifier.padding(12.dp),
+                    color = MaterialTheme.colorScheme.onPrimary,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            } else {
+                Text(
+                    text = parseMarkdown(message.content),
+                    modifier = Modifier.padding(12.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
         }
     }
 }

@@ -40,7 +40,7 @@ export const config = {
   },
 
   // CORS
-  corsOrigins: (process.env.CORS_ORIGINS || 'http://localhost:3000,http://localhost:3001,https://sfweb.app').split(','),
+  corsOrigins: (process.env.CORS_ORIGINS || 'http://localhost:3000,http://localhost:3001,https://sfweb.app,https://www.sfweb.app').split(','),
 
   // Admin credentials (for VPS admin API)
   admin: {
@@ -55,6 +55,23 @@ export const config = {
     accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
     secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
     bucketName: process.env.R2_BUCKET_NAME || 'syncflow-files',
+  },
+
+  // Email (Resend API for admin notifications)
+  email: {
+    resendApiKey: process.env.RESEND_API_KEY || '',
+    adminEmail: process.env.ADMIN_EMAIL || '',
+  },
+
+  // Cloudflare TURN (WebRTC relay for video calling)
+  cloudflare: {
+    turnKeyId: process.env.CLOUDFLARE_TURN_KEY_ID || '',
+    turnApiToken: process.env.CLOUDFLARE_TURN_API_TOKEN || '',
+  },
+
+  // FCM (Firebase Cloud Messaging for push notifications)
+  fcm: {
+    serviceAccountPath: process.env.FCM_SERVICE_ACCOUNT_PATH || '',
   },
 
   // Stripe (subscription billing)

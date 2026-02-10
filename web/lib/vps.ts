@@ -6,6 +6,7 @@
  */
 
 import { getPublicKeyX963Base64 } from './e2ee';
+import { PhoneNumberNormalizer } from './phoneNumberNormalizer';
 
 // VPS Server Configuration
 const VPS_BASE_URL = process.env.NEXT_PUBLIC_VPS_URL || 'https://api.sfweb.app';
@@ -42,6 +43,7 @@ export interface VPSMessage {
   encryptedNonce?: string;
   keyMap?: Record<string, string>;
   mmsParts?: any[];
+  deliveryStatus?: string;
 }
 
 export interface VPSDeviceE2eeKey {
@@ -98,13 +100,16 @@ type WebSocketEventType =
   | 'message_added'
   | 'message_updated'
   | 'message_deleted'
+  | 'messages_deleted'
   | 'contact_added'
   | 'contact_updated'
   | 'contact_deleted'
   | 'call_added'
   | 'messages_synced'
   | 'device_removed'
-  | 'e2ee_key_available';
+  | 'e2ee_key_available'
+  | 'outgoing_status_changed'
+  | 'delivery_status_changed';
 
 type EventCallback = (data: any) => void;
 
@@ -118,7 +123,6 @@ class VPSService {
   private wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private eventListeners: Map<WebSocketEventType, Set<EventCallback>> = new Map();
   private reconnectAttempts = 0;
-  private maxReconnectAttempts = 5;
   private e2eeKeyPushResolver: (() => void) | null = null;
 
   constructor() {
@@ -344,11 +348,13 @@ class VPSService {
   async getMessages(options: {
     limit?: number;
     before?: number;
+    after?: number;
     threadId?: number;
   } = {}): Promise<{ messages: VPSMessage[]; hasMore: boolean }> {
     const params = new URLSearchParams();
     if (options.limit) params.set('limit', String(options.limit));
     if (options.before) params.set('before', String(options.before));
+    if (options.after) params.set('after', String(options.after));
     if (options.threadId) params.set('threadId', String(options.threadId));
 
     return this.request('GET', `/api/messages?${params}`);
@@ -364,6 +370,36 @@ class VPSService {
 
   async markMessageRead(messageId: string): Promise<void> {
     await this.request('PUT', `/api/messages/${messageId}/read`, null);
+  }
+
+  async deleteMessages(messageIds: string[]): Promise<{ deleted: number }> {
+    return await this.request('DELETE', '/api/messages', { messageIds });
+  }
+
+  async sendMmsMessage(address: string, body: string, attachments: { fileKey: string; contentType: string; fileName: string }[]): Promise<void> {
+    await this.request('POST', '/api/messages/send', {
+      address,
+      body,
+      isMms: true,
+      attachments,
+    });
+  }
+
+  async getFileUploadUrl(fileName: string, contentType: string, fileSize: number): Promise<{ uploadUrl: string; fileKey: string }> {
+    return await this.request('POST', '/api/file-transfers/upload-url', {
+      fileName,
+      contentType,
+      fileSize,
+      transferType: 'mms',
+    });
+  }
+
+  async confirmFileUpload(fileKey: string, fileSize: number): Promise<void> {
+    await this.request('POST', '/api/file-transfers/confirm-upload', {
+      fileKey,
+      fileSize,
+      transferType: 'mms',
+    });
   }
 
   // ==================== File Transfers ====================
@@ -392,6 +428,36 @@ class VPSService {
     return this.request('GET', `/api/contacts?${params}`);
   }
 
+  async createContact(contact: {
+    id?: string;
+    displayName: string;
+    phoneNumbers: string[];
+    emails?: string[];
+  }): Promise<void> {
+    const contactId = contact.id || `web_${Date.now()}`;
+    await this.request('POST', '/api/contacts/sync', {
+      contacts: [{
+        id: contactId,
+        displayName: contact.displayName,
+        phoneNumbers: contact.phoneNumbers,
+        emails: contact.emails || [],
+      }],
+    });
+  }
+
+  async updateContact(contactId: string, data: {
+    displayName?: string;
+    phoneNumbers?: string[];
+    emails?: string[];
+    photoThumbnail?: string;
+  }): Promise<void> {
+    await this.request('PUT', `/api/contacts/${contactId}`, data);
+  }
+
+  async deleteContact(contactId: string): Promise<void> {
+    await this.request('DELETE', `/api/contacts/${contactId}`, null);
+  }
+
   // ==================== Call History ====================
 
   async getCallHistory(options: {
@@ -407,7 +473,7 @@ class VPSService {
 
   async requestCall(phoneNumber: string, simSubscriptionId?: number): Promise<void> {
     await this.request('POST', '/api/calls/request', {
-      phoneNumber,
+      phoneNumber: PhoneNumberNormalizer.toE164(phoneNumber),
       simSubscriptionId,
     });
   }
@@ -432,6 +498,13 @@ class VPSService {
 
     if (this.ws?.readyState === WebSocket.OPEN) {
       return;
+    }
+
+    // Close any existing socket in CONNECTING state
+    if (this.ws) {
+      this.ws.onclose = null; // Prevent triggering reconnect
+      this.ws.close();
+      this.ws = null;
     }
 
     try {
@@ -514,15 +587,15 @@ class VPSService {
   }
 
   private scheduleReconnect() {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error('[VPS] Max reconnect attempts reached');
-      return;
-    }
+    if (!this.accessToken) return;
 
     this.reconnectAttempts++;
-    const delay = Math.pow(2, this.reconnectAttempts) * 1000;
+    // Exponential backoff capped at 30s: 2, 4, 8, 16, 30, 30, ...
+    const delay = Math.min(Math.pow(2, Math.min(this.reconnectAttempts, 5)) * 1000, 30000);
 
-    console.log(`[VPS] Scheduling reconnect in ${delay}ms (attempt ${this.reconnectAttempts})`);
+    if (this.reconnectAttempts <= 3 || this.reconnectAttempts % 10 === 0) {
+      console.log(`[VPS] Scheduling reconnect in ${delay}ms (attempt ${this.reconnectAttempts})`);
+    }
 
     this.wsReconnectTimer = setTimeout(() => {
       this.connectWebSocket();
@@ -776,6 +849,10 @@ class VPSService {
     return this.request('GET', '/api/admin/e2ee/health');
   }
 
+  async cleanupE2eeKeys(): Promise<any> {
+    return this.request('POST', '/api/admin/cleanup/e2ee');
+  }
+
   async getAdminLogs(params?: { limit?: number; level?: string; search?: string }): Promise<any> {
     const q = new URLSearchParams();
     if (params?.limit) q.set('limit', String(params.limit));
@@ -821,6 +898,20 @@ class VPSService {
 
   async getAdminAnalyticsFeatures(): Promise<any> {
     return this.request('GET', '/api/admin/analytics/features');
+  }
+
+  // ==================== Admin: Pending Deletions ====================
+
+  async getPendingDeletions(): Promise<any> {
+    return this.request('GET', '/api/admin/pending-deletions');
+  }
+
+  async processUserDeletion(userId: string): Promise<any> {
+    return this.request('POST', `/api/admin/process-deletion/${userId}`);
+  }
+
+  async cancelUserDeletion(userId: string): Promise<any> {
+    return this.request('POST', `/api/admin/cancel-deletion/${userId}`);
   }
 
   // ==================== Usage ====================

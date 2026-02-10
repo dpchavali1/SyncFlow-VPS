@@ -71,6 +71,44 @@ object PhoneNumberUtils {
     }
 
     /**
+     * Converts a phone number to E.164 format for server communication.
+     * Rules:
+     * - 10 digits → +1XXXXXXXXXX (US)
+     * - 11 digits starting with 1 → +1XXXXXXXXXX (US)
+     * - Already starts with + → keep as-is
+     * - Short codes (<=6 digits), emails, alphanumeric sender IDs → unchanged
+     */
+    fun toE164(phoneNumber: String): String {
+        if (phoneNumber.isBlank()) return phoneNumber
+
+        // Leave emails unchanged
+        if (phoneNumber.contains("@")) return phoneNumber
+
+        // Leave alphanumeric sender IDs unchanged
+        if (phoneNumber.any { it.isLetter() }) return phoneNumber
+
+        // Strip everything except digits and '+'
+        val stripped = phoneNumber.replace(Regex("[^0-9+]"), "")
+        if (stripped.isEmpty() || stripped == "+") return phoneNumber
+
+        val digitsOnly = stripped.replace("+", "")
+
+        // Short codes (<=6 digits)
+        if (digitsOnly.length <= 6) return digitsOnly
+
+        // Already has '+' prefix → keep as-is
+        if (stripped.startsWith("+")) return stripped
+
+        // 10 digits → US number
+        if (digitsOnly.length == 10) return "+1$digitsOnly"
+
+        // 11 digits starting with '1' → US number
+        if (digitsOnly.length == 11 && digitsOnly.startsWith("1")) return "+$digitsOnly"
+
+        return digitsOnly
+    }
+
+    /**
      * Checks if two phone numbers are the same
      */
     fun areNumbersEqual(number1: String, number2: String): Boolean {

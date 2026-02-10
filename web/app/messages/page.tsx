@@ -303,12 +303,22 @@ export default function MessagesPage() {
           }
         }
 
-        // Fetch initial messages from VPS
+        // Fetch all messages from VPS (paginate through all pages)
         try {
-          const response = await vpsService.getMessages({ limit: 100 })
-          console.log('[Messages] VPS: Loaded', response.messages.length, 'messages')
+          let allMessages: any[] = []
+          let before: number | undefined
+          let hasMore = true
+          while (hasMore) {
+            const response = await vpsService.getMessages({ limit: 500, before })
+            allMessages.push(...response.messages)
+            hasMore = response.hasMore
+            if (response.messages.length > 0) {
+              before = response.messages[response.messages.length - 1].date
+            }
+          }
+          console.log('[Messages] VPS: Loaded', allMessages.length, 'messages')
           const formattedMessages = await Promise.all(
-            response.messages.map((msg: any) => decryptVpsMessage(msg))
+            allMessages.map((msg: any) => decryptVpsMessage(msg))
           )
           setMessages(formattedMessages)
         } catch (err) {
@@ -316,18 +326,115 @@ export default function MessagesPage() {
         }
 
         // Set up VPS WebSocket listeners for real-time updates
-        vpsService.on('messages_synced', async (data: any) => {
+        const onMessagesSynced = async (data: any) => {
           const incoming = Array.isArray(data?.messages) ? data.messages : []
           if (incoming.length === 0) return
 
           const decrypted = await Promise.all(incoming.map((msg: any) => decryptVpsMessage(msg)))
 
           const current = useAppStore.getState().messages
-          const merged = new Map(current.map((m) => [m.id, m]))
+          // Remove optimistic messages that now have real counterparts
+          const realSentBodies = new Set(
+            decrypted.filter(m => m.type === 2).map(m => m.body)
+          )
+          const filtered = current.filter(m => {
+            if (!m.id?.startsWith('optimistic_')) return true
+            return !realSentBodies.has(m.body)
+          })
+          const merged = new Map(filtered.map((m) => [m.id, m]))
           decrypted.forEach((m) => merged.set(m.id, m))
           const mergedList = Array.from(merged.values()).sort((a, b) => b.date - a.date)
           setMessages(mergedList)
-        })
+        }
+
+        const onMessageDeleted = (data: any) => {
+          const messageId = data?.messageId || data?.id
+          if (!messageId) return
+          const current = useAppStore.getState().messages
+          setMessages(current.filter((m) => m.id !== messageId))
+        }
+
+        const onMessagesDeleted = (data: any) => {
+          const ids = data?.messageIds
+          if (!Array.isArray(ids) || ids.length === 0) return
+          const idSet = new Set(ids)
+          const current = useAppStore.getState().messages
+          setMessages(current.filter((m) => !idSet.has(m.id)))
+        }
+
+        const onOutgoingStatusChanged = (data: any) => {
+          const id = data?.id
+          const status = data?.status
+          if (!id || !status) return
+          const current = useAppStore.getState().messages
+          const updated = current.map((m) =>
+            m.id === id ? { ...m, deliveryStatus: status } : m
+          )
+          setMessages(updated)
+        }
+
+        const onDeliveryStatusChanged = (data: any) => {
+          const id = data?.id
+          const deliveryStatus = data?.deliveryStatus
+          if (!id || !deliveryStatus) return
+          const current = useAppStore.getState().messages
+          const updated = current.map((m) =>
+            m.id === id ? { ...m, deliveryStatus } : m
+          )
+          setMessages(updated)
+        }
+
+        vpsService.on('messages_synced', onMessagesSynced)
+        vpsService.on('message_deleted', onMessageDeleted)
+        vpsService.on('messages_deleted', onMessagesDeleted)
+        vpsService.on('outgoing_status_changed', onOutgoingStatusChanged)
+        vpsService.on('delivery_status_changed', onDeliveryStatusChanged)
+
+        // Periodic sync fallback: poll for new messages every 30s
+        // Catches anything missed if WebSocket dropped temporarily
+        const syncInterval = setInterval(async () => {
+          try {
+            const current = useAppStore.getState().messages
+            // Exclude optimistic messages from newest date calculation
+            const newestDate = current
+              .filter(m => !m.id?.startsWith('optimistic_'))
+              .reduce((max, m) => Math.max(max, m.date), 0)
+            if (newestDate === 0) return
+
+            const response = await vpsService.getMessages({ limit: 500, after: newestDate })
+            if (response.messages.length === 0) return
+
+            const decrypted = await Promise.all(
+              response.messages.map((msg: any) => decryptVpsMessage(msg))
+            )
+            // Remove optimistic messages replaced by real ones
+            const realSentBodies = new Set(
+              decrypted.filter(m => m.type === 2).map(m => m.body)
+            )
+            const filtered = current.filter(m => {
+              if (!m.id?.startsWith('optimistic_')) return true
+              return !realSentBodies.has(m.body)
+            })
+            const merged = new Map(filtered.map((m) => [m.id, m]))
+            decrypted.forEach((m) => merged.set(m.id, m))
+            const mergedList = Array.from(merged.values()).sort((a, b) => b.date - a.date)
+            setMessages(mergedList)
+          } catch {
+            // Silently ignore poll failures
+          }
+        }, 30000)
+
+        // Store cleanup refs for when effect unmounts
+        const cleanupVPS = () => {
+          clearInterval(syncInterval)
+          vpsService.off('messages_synced', onMessagesSynced)
+          vpsService.off('message_deleted', onMessageDeleted)
+          vpsService.off('messages_deleted', onMessagesDeleted)
+          vpsService.off('outgoing_status_changed', onOutgoingStatusChanged)
+          vpsService.off('delivery_status_changed', onDeliveryStatusChanged)
+        }
+        // Stash so the outer cleanup can call it
+        ;(window as any).__vpsMessagesCleanup = cleanupVPS
 
         return // Skip Firebase setup
       }
@@ -415,6 +522,11 @@ export default function MessagesPage() {
       if (unsubscribeReadReceipts) {
         unsubscribeReadReceipts()
       }
+      // Clean up VPS listeners and sync interval
+      if (typeof window !== 'undefined' && (window as any).__vpsMessagesCleanup) {
+        (window as any).__vpsMessagesCleanup()
+        delete (window as any).__vpsMessagesCleanup
+      }
     }
   }, [router, setUserId, setMessages, setReadReceipts, reloadToken, initializeConversationListVisibility, setSpamMessages])
 
@@ -422,6 +534,8 @@ export default function MessagesPage() {
     if (!userId) return
     const handleRemoteUnpair = () => {
       localStorage.removeItem('syncflow_user_id')
+      localStorage.removeItem('syncflow_device_id')
+      vpsService.clearTokens()
       setUserId(null)
       setMessages([])
       setReadReceipts({})
@@ -438,8 +552,20 @@ export default function MessagesPage() {
       }
     })
 
+    // VPS: listen for device_removed WebSocket event (remote unpair from Android)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const handleVPSDeviceRemoved = (data: any) => {
+      const removedId = data?.id || data?.deviceId || ''
+      const myDeviceId = vpsService.currentDeviceId
+      if (!myDeviceId || removedId === myDeviceId || removedId === '') {
+        handleRemoteUnpair()
+      }
+    }
+    vpsService.on('device_removed', handleVPSDeviceRemoved)
+
     return () => {
       unsubscribeDevice()
+      vpsService.off('device_removed', handleVPSDeviceRemoved)
     }
   }, [
     router,

@@ -131,8 +131,8 @@ class BatteryAwareServiceManager {
         // Resume all background sync operations
         NotificationCenter.default.post(name: .servicesResumeFull, object: nil)
 
-        // Adjust Firebase listener frequencies
-        adjustFirebaseListeners(interval: 1.0) // Normal frequency
+        // Adjust sync listener frequencies
+        adjustSyncListeners(interval: 1.0) // Normal frequency
 
         // Resume real-time features
         enableRealTimeSync()
@@ -142,8 +142,8 @@ class BatteryAwareServiceManager {
         // Reduce background sync frequency
         NotificationCenter.default.post(name: .servicesReduceActivity, object: nil)
 
-        // Throttle Firebase listeners
-        adjustFirebaseListeners(interval: 5.0) // Reduced frequency
+        // Throttle sync listeners
+        adjustSyncListeners(interval: 5.0) // Reduced frequency
 
         // Reduce real-time update frequency
         reduceRealTimeUpdates()
@@ -153,8 +153,8 @@ class BatteryAwareServiceManager {
         // Pause most background operations
         NotificationCenter.default.post(name: .servicesMinimizeActivity, object: nil)
 
-        // Significantly throttle Firebase listeners
-        adjustFirebaseListeners(interval: 15.0) // Minimal frequency
+        // Significantly throttle sync listeners
+        adjustSyncListeners(interval: 15.0) // Minimal frequency
 
         // Disable real-time features
         disableRealTimeSync()
@@ -164,23 +164,21 @@ class BatteryAwareServiceManager {
         // Suspend almost all background activity
         NotificationCenter.default.post(name: .servicesSuspendNonEssential, object: nil)
 
-        // Pause Firebase listeners
-        pauseFirebaseListeners()
+        // Pause sync listeners
+        pauseSyncListeners()
 
         // Disable all real-time sync
         disableAllRealTimeFeatures()
     }
 
-    // MARK: - Firebase Listener Management
+    // MARK: - Sync Listener Management
 
-    private func adjustFirebaseListeners(interval: TimeInterval) {
-        // This would need integration with FirebaseService to adjust polling intervals
-        // For now, we post notification to allow other components to adjust
-        NotificationCenter.default.post(name: .firebaseListenerFrequencyChanged, object: nil, userInfo: ["interval": interval])
+    private func adjustSyncListeners(interval: TimeInterval) {
+        NotificationCenter.default.post(name: .syncListenerFrequencyChanged, object: nil, userInfo: ["interval": interval])
     }
 
-    private func pauseFirebaseListeners() {
-        NotificationCenter.default.post(name: .firebaseListenersPaused, object: nil)
+    private func pauseSyncListeners() {
+        NotificationCenter.default.post(name: .syncListenersPaused, object: nil)
     }
 
     // MARK: - Real-time Feature Management
@@ -336,8 +334,8 @@ extension Notification.Name {
     static let servicesMinimizeActivity = Notification.Name("com.syncflowmac.servicesMinimizeActivity")
     static let servicesSuspendNonEssential = Notification.Name("com.syncflowmac.servicesSuspendNonEssential")
 
-    static let firebaseListenerFrequencyChanged = Notification.Name("com.syncflowmac.firebaseListenerFrequencyChanged")
-    static let firebaseListenersPaused = Notification.Name("com.syncflowmac.firebaseListenersPaused")
+    static let syncListenerFrequencyChanged = Notification.Name("com.syncflowmac.syncListenerFrequencyChanged")
+    static let syncListenersPaused = Notification.Name("com.syncflowmac.syncListenersPaused")
 
     static let realTimeSyncEnabled = Notification.Name("com.syncflowmac.realTimeSyncEnabled")
     static let realTimeSyncReduced = Notification.Name("com.syncflowmac.realTimeSyncReduced")

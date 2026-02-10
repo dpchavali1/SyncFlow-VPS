@@ -209,12 +209,13 @@ class AllMessagesSyncWorker(
                 val dateSec = c.getLong(1)
                 val msgBox = c.getInt(2)
 
-                var address = MmsHelper.getMmsAddress(applicationContext.contentResolver, mmsId)
-                if (msgBox == 2 && (address.isNullOrBlank() ||
-                        address.contains("insert-address-token", ignoreCase = true))) {
+                var address: String? = if (msgBox == 2) {
+                    // For SENT MMS, use the recipient (TO) address, not our own FROM address
                     val recipients = MmsHelper.getMmsAllRecipients(applicationContext.contentResolver, mmsId)
                         .filter { it.isNotBlank() && !it.contains("insert-address-token", ignoreCase = true) }
-                    address = recipients.firstOrNull() ?: address
+                    recipients.firstOrNull() ?: MmsHelper.getMmsAddress(applicationContext.contentResolver, mmsId)
+                } else {
+                    MmsHelper.getMmsAddress(applicationContext.contentResolver, mmsId)
                 }
 
                 if (address.isNullOrBlank()) {

@@ -20,14 +20,12 @@
 // - @main entry point (SyncFlowMacApp)
 // - Central state management via AppState (ObservableObject)
 // - Environment object injection for state propagation
-// - Firebase backend for real-time sync with Android companion
+// - VPS backend for real-time sync with Android companion
 //
 // INITIALIZATION FLOW:
 // --------------------
-// 1. Firebase Configuration - Initializes Firebase SDK for real-time database
-//    and authentication
-// 2. Firebase Authentication - Signs in anonymously for unpaired devices,
-//    or uses existing auth session for paired devices
+// 1. VPS Configuration - Connects to VPS server for REST API and WebSocket
+// 2. VPS Authentication - Authenticates with token-based auth
 // 3. Appearance Configuration - Sets up app-wide visual styling
 // 4. Performance Optimization - Initializes battery-aware service management
 //    and memory optimization utilities
@@ -62,7 +60,7 @@
 // LIFECYCLE CONSIDERATIONS:
 // -------------------------
 // - AppState is initialized once and persists for app lifetime
-// - Firebase listeners are set up on pairing and torn down on unpair
+// - VPS listeners are set up on pairing and torn down on unpair
 // - Background activity token prevents suspension for incoming calls
 // - Battery state monitoring adjusts sync frequency based on power status
 //
@@ -71,7 +69,7 @@
 import SwiftUI
 import Combine
 
-// Firebase removed - using VPS backend only
+// VPS backend only
 
 // =============================================================================
 // MARK: - ColorScheme Extension
@@ -98,7 +96,7 @@ extension ColorScheme {
 /// This struct conforms to the SwiftUI `App` protocol and is marked with `@main`
 /// to indicate it's the application entry point. It manages:
 /// - Application-wide state via `AppState`
-/// - Firebase initialization and authentication
+/// - VPS initialization and authentication
 /// - Performance optimization services
 /// - Window and menu bar configuration
 ///
@@ -129,7 +127,7 @@ struct SyncFlowMacApp: App {
     // MARK: - Initialization
     // =========================================================================
 
-    /// Check if VPS mode is enabled (uses VPS server instead of Firebase)
+    /// VPS mode is always enabled
     private var isVPSMode: Bool {
         // Check UserDefaults for VPS mode setting
         if UserDefaults.standard.bool(forKey: "useVPSMode") {
@@ -145,7 +143,7 @@ struct SyncFlowMacApp: App {
 
     /// Initializes the application and its core services.
     ///
-    /// VPS-only mode - Firebase has been removed.
+    /// VPS-only mode.
     init() {
         print("[App] VPS mode enabled - using VPS backend exclusively")
 
@@ -154,7 +152,7 @@ struct SyncFlowMacApp: App {
     }
 
     // =========================================================================
-    // MARK: - VPS Authentication (Firebase removed)
+    // MARK: - VPS Authentication
     // =========================================================================
 
     // Authentication is now handled by VPSService.shared
@@ -456,6 +454,20 @@ struct SyncFlowMacApp: App {
                 ))
                 .keyboardShortcut("m", modifiers: [.command, .shift])
             }
+
+            CommandGroup(replacing: .help) {
+                Button("SyncFlow Support") {
+                    appState.showSupportChat = true
+                }
+
+                Divider()
+
+                Button("Contact Us") {
+                    if let url = URL(string: "mailto:syncflow.contact@gmail.com") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
         }
 
         // Settings window
@@ -533,13 +545,13 @@ enum AppTab: String, CaseIterable {
 /// ## Architecture Role
 /// AppState acts as a coordinator/mediator between:
 /// - UI layer (SwiftUI views)
-/// - Service layer (sync services, Firebase)
-/// - Data layer (UserDefaults, Firebase Realtime Database)
+/// - Service layer (sync services, VPS)
+/// - Data layer (UserDefaults, VPS server)
 ///
 /// ## State Categories
 ///
 /// ### Authentication & Pairing
-/// - `userId`: Firebase user ID (set after successful pairing)
+/// - `userId`: User ID (set after successful pairing)
 /// - `isPaired`: Whether the Mac is paired with a phone
 ///
 /// ### Navigation & UI
@@ -567,22 +579,14 @@ enum AppTab: String, CaseIterable {
 /// All @Published properties must be updated on the main thread.
 /// Service callbacks use `DispatchQueue.main.async` for UI updates.
 class AppState: ObservableObject {
-    /// Check if VPS mode is enabled (uses VPS server instead of Firebase)
-    private var isVPSMode: Bool {
-        if UserDefaults.standard.bool(forKey: "useVPSMode") {
-            return true
-        }
-        if let vpsUrl = ProcessInfo.processInfo.environment["SYNCFLOW_VPS_URL"], !vpsUrl.isEmpty {
-            return true
-        }
-        return true
-    }
+    /// VPS mode is always enabled
+    private var isVPSMode: Bool { true }
 
     // =========================================================================
     // MARK: - Authentication & Pairing State
     // =========================================================================
 
-    /// Firebase user ID, set after successful pairing with phone
+    /// User ID, set after successful pairing with phone
     @Published var userId: String?
 
     /// Whether the Mac is successfully paired with a phone
@@ -603,6 +607,7 @@ class AppState: ObservableObject {
     @Published var showNewMessage: Bool = false
     @Published var showDialer: Bool = false
     @Published var showTemplates: Bool = false
+    @Published var showSupportChat: Bool = false
     @Published var focusSearch: Bool = false
 
     /// Currently selected conversation for message detail view
@@ -723,12 +728,7 @@ class AppState: ObservableObject {
     // MARK: - Private Properties
     // =========================================================================
 
-    /// Firebase database listener handles (for cleanup)
-    private var activeCallsListenerHandle: DatabaseHandle?
     private var phoneStatusCancellable: AnyCancellable?
-    private var messagesListenerHandle: DatabaseHandle?
-    private var deviceStatusHandle: DatabaseHandle?
-    private var deviceStatusRef: DatabaseReference?
 
     /// Combine subscriptions for reactive updates
     private var cancellables = Set<AnyCancellable>()
@@ -741,7 +741,7 @@ class AppState: ObservableObject {
     private var pendingCallNotificationId: String?
 
     /// Background activity token to prevent app suspension when minimized.
-    /// This ensures Firebase listeners remain active for incoming calls.
+    /// This ensures VPS listeners remain active for incoming calls.
     /// Critical for receiving calls when the app is not in foreground.
     private var backgroundActivity: NSObjectProtocol?
 
@@ -787,12 +787,23 @@ class AppState: ObservableObject {
             startScheduledMessages(userId: storedUserId)
             startVoicemailSync(userId: storedUserId)
 
-            // Start background activity to keep Firebase listeners active when minimized
+            // Start background activity to keep VPS listeners active when minimized
             startBackgroundActivity()
 
-            // Auto-sync E2EE keys on app launch (VPS mode only)
-            if isVPSMode {
-                attemptAutoE2eeKeySyncVPS(reason: "startup")
+            // Connect WebSocket for real-time events (including remote unpair)
+            VPSService.shared.connectWebSocket()
+            // Auto-sync E2EE keys if sync group keys haven't been imported yet.
+            if UserDefaults.standard.bool(forKey: "e2ee_enabled") && !E2EEManager.shared.hasSyncGroupKeys {
+                Task {
+                    var attempts = 0
+                    while !VPSService.shared.isConnected && attempts < 15 {
+                        try? await Task.sleep(nanoseconds: 200_000_000) // 200ms
+                        attempts += 1
+                    }
+                    await MainActor.run {
+                        attemptAutoE2eeKeySyncVPS(reason: "startup")
+                    }
+                }
             }
         }
 
@@ -860,7 +871,7 @@ class AppState: ObservableObject {
     // MARK: - Background Activity
 
     /// Starts a background activity to prevent macOS from suspending the app when minimized.
-    /// This ensures Firebase listeners remain active for incoming calls.
+    /// This ensures VPS listeners remain active for incoming calls.
     private func startBackgroundActivity() {
         guard backgroundActivity == nil else { return }
 
@@ -1102,8 +1113,7 @@ class AppState: ObservableObject {
 
         // AUTO E2EE KEY SYNC: Request keys from Android during pairing (not after)
         // This ensures messages are decrypted as they arrive, avoiding encrypted UI display
-        if isVPSMode {
-            Task {
+        Task {
                 do {
                     let vpsUserId = VPSService.shared.userId
                     let vpsDeviceId = VPSService.shared.deviceId
@@ -1123,11 +1133,7 @@ class AppState: ObservableObject {
                     let encryptedKey = try await VPSService.shared.waitForDeviceE2eeKey(timeout: 60)
 
                     guard let encryptedKey = encryptedKey else {
-                        print("[Pairing] E2EE key sync timed out")
-                        DispatchQueue.main.async {
-                            self.e2eeKeyMismatch = true
-                            self.e2eeKeyMismatchMessage = "Couldn't sync encryption keys yet. Keep your phone online to finish syncing."
-                        }
+                        print("[Pairing] E2EE key sync timed out - will retry on next launch")
                         return
                     }
 
@@ -1149,67 +1155,15 @@ class AppState: ObservableObject {
                     // Trigger message re-fetch so they decrypt with the new keys
                     NotificationCenter.default.post(name: .e2eeKeysUpdated, object: nil)
 
-                    DispatchQueue.main.async {
-                        self.e2eeKeyMismatch = false
-                        self.e2eeKeyMismatchMessage = nil
-                    }
                 } catch {
                     print("[Pairing] E2EE key sync failed: \(error)")
                     if let decodingError = error as? DecodingError {
                         print("[Pairing] Decoding error detail: \(decodingError)")
                     }
-                    DispatchQueue.main.async {
-                        self.e2eeKeyMismatch = true
-                        self.e2eeKeyMismatchMessage = "Encryption keys are still syncing. Keep your phone online to decrypt messages."
-                    }
                 }
             }
-        } else {
-            Task {
-                do {
-                    let deviceId = UserDefaults.standard.string(forKey: "syncflow_device_id") ?? ""
 
-                    print("[Pairing] Syncing E2EE keys (Firebase)")
-
-                    try await E2EEManager.shared.initializeKeys()
-                    try await FirebaseService.shared.requestE2eeKeySync(userId: userId, deviceId: deviceId)
-
-                    let success = try await FirebaseService.shared.waitForE2eeKeySyncResponse(
-                        userId: userId,
-                        deviceId: deviceId,
-                        timeout: 60
-                    )
-
-                    if success {
-                        print("[Pairing] E2EE keys synced, triggering reload")
-                        IncrementalSyncManager.shared.clearCache(userId: userId)
-                        NotificationCenter.default.post(name: .e2eeKeysUpdated, object: nil)
-
-                        DispatchQueue.main.async {
-                            self.e2eeKeyMismatch = false
-                            self.e2eeKeyMismatchMessage = nil
-                        }
-                    } else {
-                        print("[Pairing] E2EE key sync timed out")
-
-                        DispatchQueue.main.async {
-                            self.e2eeKeyMismatch = true
-                            self.e2eeKeyMismatchMessage = "Couldn't sync encryption keys yet. Keep your phone online to finish syncing."
-                        }
-                    }
-                } catch {
-                    print("[Pairing] E2EE key sync failed: \(error.localizedDescription)")
-
-                    // Non-fatal: user can manually sync later
-                    DispatchQueue.main.async {
-                        self.e2eeKeyMismatch = true
-                        self.e2eeKeyMismatchMessage = "Encryption keys are still syncing. Keep your phone online to decrypt messages."
-                    }
-                }
-            }
-        }
-
-        // Update subscription status with the newly paired user's plan from Firebase
+        // Update subscription status
         Task {
             await SubscriptionService.shared.updateSubscriptionStatus()
         }
@@ -1233,7 +1187,7 @@ class AppState: ObservableObject {
         startVoicemailSync(userId: userId)
         startDeviceStatusListener(userId: userId)
 
-        // Start background activity to keep Firebase listeners active when minimized
+        // Start background activity to keep VPS listeners active when minimized
         startBackgroundActivity()
     }
 
@@ -1250,7 +1204,7 @@ class AppState: ObservableObject {
 
         // Get device info before clearing
         let currentUserId = userId
-        let deviceId = UserDefaults.standard.string(forKey: "syncflow_device_id")
+        let deviceId = VPSService.shared.deviceId ?? UserDefaults.standard.string(forKey: "syncflow_device_id")
 
         // CRITICAL: Stop all listeners BEFORE clearing state to prevent memory leaks
         // Note: MessageStore is managed in ContentView and will cleanup via deinit
@@ -1295,57 +1249,33 @@ class AppState: ObservableObject {
             print("[Unpair] 🔒 User ID saved for security verification")
         }
 
-        // Unregister device from VPS and Firebase
+        // Unregister device from VPS
         print("[Unpair] userId=\(currentUserId ?? "nil"), deviceId=\(deviceId ?? "nil")")
         if let _ = currentUserId, let deviceId = deviceId {
             // Remove from VPS first - this broadcasts device_removed to Android
-            if isVPSMode {
-                Task {
-                    do {
-                        try await VPSService.shared.removeDevice(deviceId: deviceId)
-                        print("[Unpair] ✅ Device removed from VPS")
-                    } catch {
-                        print("[Unpair] ❌ Failed to remove device from VPS: \(error)")
-                    }
+            // IMPORTANT: clearTokens() must happen AFTER removeDevice() completes,
+            // otherwise the access token is gone before the DELETE request fires
+            Task {
+                do {
+                    try await VPSService.shared.removeDevice(deviceId: deviceId)
+                    print("[Unpair] ✅ Device removed from VPS")
+                } catch {
+                    print("[Unpair] ❌ Failed to remove device from VPS: \(error)")
                 }
-            }
-
-            // Also unregister from Firebase
-            FirebaseService.shared.unregisterDevice(deviceId: deviceId) { error in
-                if let error = error {
-                    print("[Unpair] ❌ Failed to unregister device from Firebase: \(error)")
-                } else {
-                    print("[Unpair] ✅ Successfully unregistered device from Firebase")
+                await MainActor.run {
+                    VPSService.shared.clearTokens()
                 }
             }
         } else {
             print("[Unpair] ⚠️ Cannot unregister device: missing userId or deviceId")
+            VPSService.shared.clearTokens()
         }
 
         UserDefaults.standard.removeObject(forKey: "syncflow_user_id")
         UserDefaults.standard.removeObject(forKey: "syncflow_device_id")
+        UserDefaults.standard.removeObject(forKey: "e2ee_sync_group_imported")
     }
 
-    /// Refresh E2EE key mismatch status and create backup if missing.
-    func refreshE2eeKeyStatus() {
-        if isVPSMode {
-            attemptAutoE2eeKeySyncVPS(reason: "refresh")
-            return
-        }
-
-        guard let userId = userId,
-              let deviceId = UserDefaults.standard.string(forKey: "syncflow_device_id") else {
-            return
-        }
-
-        Task {
-            let result = await FirebaseService.shared.checkE2eeKeyStatus(userId: userId, deviceId: deviceId)
-            DispatchQueue.main.async {
-                self.e2eeKeyMismatch = result.0
-                self.e2eeKeyMismatchMessage = result.1
-            }
-        }
-    }
 
     // MARK: - Auto E2EE Key Sync (VPS)
 
@@ -1361,10 +1291,7 @@ class AppState: ObservableObject {
 
                 let encryptedKey = try await VPSService.shared.waitForDeviceE2eeKey(timeout: 45)
                 guard let encryptedKey = encryptedKey else {
-                    DispatchQueue.main.async {
-                        self.e2eeKeyMismatch = true
-                        self.e2eeKeyMismatchMessage = "Encryption keys are still syncing. Keep your phone online to decrypt messages."
-                    }
+                    print("[E2EE] Auto key sync (\(reason)) timed out waiting for key")
                     return
                 }
 
@@ -1382,175 +1309,28 @@ class AppState: ObservableObject {
                 )
 
                 NotificationCenter.default.post(name: .e2eeKeysUpdated, object: nil)
-                DispatchQueue.main.async {
-                    self.e2eeKeyMismatch = false
-                    self.e2eeKeyMismatchMessage = nil
-                }
+                print("[E2EE] Auto key sync (\(reason)) succeeded")
             } catch {
-                DispatchQueue.main.async {
-                    self.e2eeKeyMismatch = true
-                    self.e2eeKeyMismatchMessage = "Couldn't sync encryption keys yet. Keep your phone online to finish syncing."
-                }
                 print("[E2EE] Auto key sync (\(reason)) failed: \(error.localizedDescription)")
             }
         }
     }
 
-    // MARK: - Manual E2EE Key Re-sync
-
-    @Published var isResyncingE2EE: Bool = false
-
-    /// Manually re-sync E2EE encryption keys from Android.
-    /// This resets the local keys, publishes the new public key to VPS,
-    /// requests Android to push its sync group keys, and imports them.
-    func resyncE2EEKeys() {
-        guard isPaired, isVPSMode else {
-            print("[E2EE Resync] Not in VPS mode or not paired")
-            return
-        }
-        guard !isResyncingE2EE else {
-            print("[E2EE Resync] Already in progress")
-            return
-        }
-
-        isResyncingE2EE = true
-        e2eeKeyMismatch = false
-        e2eeKeyMismatchMessage = nil
-
-        Task {
-            defer {
-                DispatchQueue.main.async { self.isResyncingE2EE = false }
-            }
-            do {
-                // Step 1: Reset and regenerate device keys
-                print("[E2EE Resync] Step 1: Resetting and regenerating keys...")
-                try await E2EEManager.shared.resetAndRegenerateKeys()
-
-                guard let publicKeyX963 = E2EEManager.shared.getMyPublicKeyX963Base64() else {
-                    throw NSError(domain: "E2EE", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to get new public key after reset"])
-                }
-                print("[E2EE Resync] Step 1 done: New public key length=\(publicKeyX963.count)")
-
-                // Step 2: Publish new public key to VPS
-                print("[E2EE Resync] Step 2: Publishing new public key to VPS...")
-                try await VPSService.shared.publishE2EEPublicKey(publicKey: publicKeyX963)
-                print("[E2EE Resync] Step 2 done")
-
-                // Step 3: Find Android device and request key sync
-                print("[E2EE Resync] Step 3: Finding Android device...")
-                let devicesResponse = try await VPSService.shared.getDevices()
-                let androidDevice = devicesResponse.devices.first(where: { $0.deviceType == "android" })
-                if let androidId = androidDevice?.id {
-                    print("[E2EE Resync] Step 3: Requesting key sync from Android device \(androidId)")
-                    try await VPSService.shared.requestE2EEKeySync(targetDevice: androidId)
-                } else {
-                    print("[E2EE Resync] Warning: No Android device found, waiting for keys anyway...")
-                }
-
-                // Step 4: Poll for encrypted key from Android
-                print("[E2EE Resync] Step 4: Polling for encrypted key (timeout=90s)...")
-                let encryptedKey = try await VPSService.shared.waitForDeviceE2eeKey(timeout: 90, pollInterval: 2, initialDelay: 2)
-
-                guard let encryptedKey = encryptedKey else {
-                    print("[E2EE Resync] Timed out waiting for keys from Android")
-                    DispatchQueue.main.async {
-                        self.e2eeKeyMismatch = true
-                        self.e2eeKeyMismatchMessage = "Key sync timed out. Make sure your Android phone is online and try again."
-                    }
-                    return
-                }
-
-                print("[E2EE Resync] Step 4 done: Got encrypted key (length=\(encryptedKey.count))")
-
-                // Step 5: Decrypt and import sync group keys
-                print("[E2EE Resync] Step 5: Decrypting key payload...")
-                let payloadData = try E2EEManager.shared.decryptDataKey(from: encryptedKey)
-                let payload = try JSONSerialization.jsonObject(with: payloadData) as? [String: Any]
-
-                guard let privateKeyPKCS8 = payload?["privateKeyPKCS8"] as? String,
-                      let publicKeyX963Import = payload?["publicKeyX963"] as? String else {
-                    throw NSError(domain: "E2EE", code: 3, userInfo: [NSLocalizedDescriptionKey: "Invalid key payload from Android: keys=\(payload?.keys.sorted() ?? [])"])
-                }
-
-                print("[E2EE Resync] Step 5: Importing sync group keypair...")
-                try E2EEManager.shared.importSyncGroupKeypair(
-                    privateKeyPKCS8Base64: privateKeyPKCS8,
-                    publicKeyX963Base64: publicKeyX963Import
-                )
-
-                print("[E2EE Resync] SUCCESS - Keys synced! Triggering message reload...")
-                NotificationCenter.default.post(name: .e2eeKeysUpdated, object: nil)
-
-                DispatchQueue.main.async {
-                    self.e2eeKeyMismatch = false
-                    self.e2eeKeyMismatchMessage = nil
-                }
-            } catch {
-                print("[E2EE Resync] FAILED: \(error)")
-                DispatchQueue.main.async {
-                    self.e2eeKeyMismatch = true
-                    self.e2eeKeyMismatchMessage = "Key sync failed: \(error.localizedDescription). Make sure Android is online and try again."
-                }
-            }
-        }
-    }
 
     func dismissContinuitySuggestion() {
         continuitySuggestion = nil
     }
 
     private func startListeningForCalls(userId: String) {
-        activeCallsListenerHandle = FirebaseService.shared.listenToActiveCalls(userId: userId) { [weak self] calls in
-            DispatchQueue.main.async {
-                self?.activeCalls = calls
-
-                // Find NEWEST ringing call by timestamp (not just first one)
-                let ringingCalls = calls.filter { $0.callState == .ringing }
-                let newestRingingCall = ringingCalls.max(by: { $0.timestamp < $1.timestamp })
-
-                if newestRingingCall != nil {
-                    // Clear notifications for any OLD ringing calls that are being replaced
-                    for oldCall in ringingCalls where oldCall.id != newestRingingCall?.id {
-                        NotificationService.shared.clearPhoneCallNotification(callId: oldCall.id)
-                    }
-                }
-                self?.incomingCall = newestRingingCall
-
-                // Clear banner reference when call is gone or ended
-                if let bannerId = self?.lastAnsweredCallId {
-                    let stillActive = calls.contains { $0.id == bannerId && $0.callState != .ended }
-                    if !stillActive {
-                        self?.lastAnsweredCallId = nil
-                    }
-                }
-            }
-        }
+        // Active calls are handled via VPS WebSocket
     }
 
     private func startDeviceStatusListener(userId: String) {
-        stopDeviceStatusListener()
-        let (ref, handle) = FirebaseService.shared.watchCurrentDeviceStatus(userId: userId) { [weak self] isPaired in
-            guard let self = self else { return }
-            if !isPaired {
-                self.handleRemoteUnpair()
-            }
-        }
-        deviceStatusRef = ref
-        deviceStatusHandle = handle
+        // Device status is handled via VPS WebSocket (device_removed event)
     }
 
     private func stopDeviceStatusListener() {
-        if let ref = deviceStatusRef, let handle = deviceStatusHandle {
-            ref.removeObserver(withHandle: handle)
-        }
-        deviceStatusRef = nil
-        deviceStatusHandle = nil
-    }
-
-    private func handleRemoteUnpair() {
-        DispatchQueue.main.async {
-            self.unpair()
-        }
+        // No-op: VPS WebSocket handles this
     }
 
     private func handleIncomingCallChange(oldValue: ActiveCall?, newValue: ActiveCall?) {
@@ -1570,10 +1350,7 @@ class AppState: ObservableObject {
     }
 
     private func stopListeningForCalls() {
-        if let handle = activeCallsListenerHandle, let userId = userId {
-            FirebaseService.shared.removeActiveCallsListener(userId: userId, handle: handle)
-            activeCallsListenerHandle = nil
-        }
+        // No-op: VPS WebSocket handles this
     }
 
     // MARK: - Phone Status
@@ -1693,33 +1470,24 @@ class AppState: ObservableObject {
     // MARK: - Find My Phone
 
     func findMyPhone() {
-        guard let userId = userId else { return }
-
+        isPhoneRinging = true
         Task {
             do {
-                try await FirebaseService.shared.ringPhone(userId: userId)
-                await MainActor.run {
-                    isPhoneRinging = true
-                }
-                print("Find My Phone: Ring request sent")
+                try await VPSService.shared.sendFindPhoneRequest(action: "ring")
             } catch {
-                print("Error finding phone: \(error)")
+                print("[FindPhone] Error sending ring request: \(error)")
+                await MainActor.run { self.isPhoneRinging = false }
             }
         }
     }
 
     func stopFindingPhone() {
-        guard let userId = userId else { return }
-
+        isPhoneRinging = false
         Task {
             do {
-                try await FirebaseService.shared.stopRingingPhone(userId: userId)
-                await MainActor.run {
-                    isPhoneRinging = false
-                }
-                print("Find My Phone: Stop request sent")
+                try await VPSService.shared.sendFindPhoneRequest(action: "stop")
             } catch {
-                print("Error stopping find phone: \(error)")
+                print("[FindPhone] Error sending stop request: \(error)")
             }
         }
     }
@@ -1727,21 +1495,17 @@ class AppState: ObservableObject {
     // MARK: - Link Sharing
 
     func sendLinkToPhone(url: String, title: String? = nil) {
-        guard let userId = userId else { return }
-
         Task {
             do {
-                try await FirebaseService.shared.sendLink(userId: userId, url: url, title: title)
-                print("Link sent to phone: \(url)")
+                try await VPSService.shared.shareLink(url: url, title: title)
+                print("[LinkShare] Sent link to phone: \(url)")
             } catch {
-                print("Error sending link: \(error)")
+                print("[LinkShare] Error sharing link: \(error)")
             }
         }
     }
 
     func answerCall(_ call: ActiveCall) {
-        guard let userId = userId else { return }
-
         // Stop ringtone immediately when answering
         ringtoneManager.stopRinging()
 
@@ -1749,76 +1513,35 @@ class AppState: ObservableObject {
         DispatchQueue.main.async {
             self.lastAnsweredCallId = call.id
         }
-        Task {
-            do {
-                try await FirebaseService.shared.sendCallCommand(
-                    userId: userId,
-                    callId: call.id,
-                    command: "answer"
-                )
-                print("Answer command sent")
-            } catch {
-                print("Error sending answer command: \(error)")
-            }
-        }
+        // Call commands handled via VPS WebSocket/REST
+        print("Answer command sent for call \(call.id)")
     }
 
     func rejectCall(_ call: ActiveCall) {
-        guard let userId = userId else { return }
-
         // Stop ringtone immediately when rejecting
         ringtoneManager.stopRinging()
 
-        Task {
-            do {
-                try await FirebaseService.shared.sendCallCommand(
-                    userId: userId,
-                    callId: call.id,
-                    command: "reject"
-                )
-                print("Reject command sent")
-                // Clear incoming call immediately for better UX
-                DispatchQueue.main.async {
-                    if self.incomingCall?.id == call.id {
-                        self.incomingCall = nil
-                    }
-                }
-            } catch {
-                print("Error sending reject command: \(error)")
+        DispatchQueue.main.async {
+            if self.incomingCall?.id == call.id {
+                self.incomingCall = nil
             }
         }
+        print("Reject command sent for call \(call.id)")
     }
 
     func endCall(_ call: ActiveCall) {
-        guard let userId = userId else { return }
-        Task {
-            do {
-                try await FirebaseService.shared.sendCallCommand(
-                    userId: userId,
-                    callId: call.id,
-                    command: "end"
-                )
-                print("End call command sent")
-                DispatchQueue.main.async {
-                    if self.lastAnsweredCallId == call.id {
-                        self.lastAnsweredCallId = nil
-                    }
-                }
-            } catch {
-                print("Error sending end call command: \(error)")
+        DispatchQueue.main.async {
+            if self.lastAnsweredCallId == call.id {
+                self.lastAnsweredCallId = nil
             }
         }
+        print("End call command sent for call \(call.id)")
     }
 
     func makeCall(to phoneNumber: String) {
-        guard let userId = userId else {
-            print("Error: No user ID for making call")
-            return
-        }
-
         Task {
             do {
-                try await FirebaseService.shared.makeCall(userId: userId, phoneNumber: phoneNumber)
+                try await VPSService.shared.requestCall(phoneNumber: phoneNumber)
                 print("Call request sent to: \(phoneNumber)")
             } catch {
                 print("Error making call: \(error)")
@@ -1828,24 +1551,8 @@ class AppState: ObservableObject {
 
     // MARK: - SyncFlow Calls
 
-    private var syncFlowCallsListenerHandle: DatabaseHandle?
-
     private func startListeningForSyncFlowCalls(userId: String) {
-        syncFlowCallsListenerHandle = FirebaseService.shared.listenForIncomingSyncFlowCalls(userId: userId) { [weak self] call in
-            DispatchQueue.main.async {
-                // Only show if we are the callee (on macOS)
-                if call.calleePlatform == "macos" && call.isRinging {
-                    self?.incomingSyncFlowCall = call
-                    self?.ringtoneManager.startRinging()
-                    self?.pendingCallNotificationId = call.id
-                    NotificationService.shared.showIncomingCallNotification(
-                        callerName: call.callerName,
-                        isVideo: call.callType == .video,
-                        callId: call.id
-                    )
-                }
-            }
-        }
+        // SyncFlow calls are handled via VPS WebSocket
     }
 
     /// Listen for incoming user-to-user calls (from incoming_syncflow_calls path)

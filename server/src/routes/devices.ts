@@ -4,6 +4,7 @@ import { query } from '../services/database';
 import { authenticate } from '../middleware/auth';
 import { apiRateLimit } from '../middleware/rateLimit';
 import { broadcastToUser } from '../services/websocket';
+import { normalizePhoneNumber } from '../utils/phoneNumber';
 
 const router = Router();
 
@@ -192,7 +193,7 @@ router.post('/sims', async (req: Request, res: Response) => {
         body.subscriptionId,
         body.displayName,
         body.carrierName,
-        body.phoneNumber,
+        body.phoneNumber ? normalizePhoneNumber(body.phoneNumber) : null,
         body.isDefault,
       ]
     );
@@ -205,6 +206,40 @@ router.post('/sims', async (req: Request, res: Response) => {
     }
     console.error('Register sim error:', error);
     res.status(500).json({ error: 'Failed to register SIM' });
+  }
+});
+
+// POST /devices/fcm-token - Register/update FCM push token
+router.post('/fcm-token', async (req: Request, res: Response) => {
+  try {
+    const { token, platform } = req.body;
+    const userId = req.userId!;
+    const deviceId = req.deviceId;
+
+    if (!token || typeof token !== 'string') {
+      res.status(400).json({ error: 'token is required' });
+      return;
+    }
+
+    await query(
+      `INSERT INTO fcm_tokens (uid, device_id, token, platform, updated_at)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (uid, device_id) DO UPDATE SET token = $3, updated_at = NOW()`,
+      [userId, deviceId, token, platform || 'android']
+    );
+
+    // Also update user_devices.fcm_token
+    if (deviceId) {
+      await query(
+        `UPDATE user_devices SET fcm_token = $1 WHERE user_id = $2 AND id = $3`,
+        [token, userId, deviceId]
+      );
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Register FCM token error:', error);
+    res.status(500).json({ error: 'Failed to register FCM token' });
   }
 });
 

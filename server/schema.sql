@@ -14,6 +14,9 @@ CREATE TABLE users (
     phone VARCHAR(20),
     email VARCHAR(255),
     display_name VARCHAR(255),
+    deletion_requested_at BIGINT, -- epoch ms, NULL = not requested
+    deletion_reason TEXT,
+    deletion_scheduled_for BIGINT, -- epoch ms, 30 days after request
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -100,11 +103,13 @@ CREATE INDEX idx_user_messages_address ON user_messages(user_id, address);
 CREATE TABLE user_outgoing_messages (
     id VARCHAR(128) PRIMARY KEY,
     user_id VARCHAR(128) NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
-    address VARCHAR(50) NOT NULL,
+    address VARCHAR(500) NOT NULL,
     body TEXT,
     timestamp BIGINT NOT NULL,
     status VARCHAR(20) DEFAULT 'pending', -- pending, sent, failed
     sim_subscription_id INTEGER,
+    is_mms BOOLEAN DEFAULT FALSE,
+    attachments JSONB,
     error_message TEXT,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -115,7 +120,7 @@ CREATE INDEX idx_outgoing_user_status ON user_outgoing_messages(user_id, status,
 CREATE TABLE user_spam_messages (
     id VARCHAR(128) PRIMARY KEY,
     user_id VARCHAR(128) NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
-    address VARCHAR(50) NOT NULL,
+    address VARCHAR(500) NOT NULL,
     body TEXT,
     date BIGINT NOT NULL,
     spam_score FLOAT,
@@ -363,6 +368,10 @@ CREATE TABLE user_photos (
     user_id VARCHAR(128) NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
     file_name VARCHAR(255),
     storage_url TEXT,
+    r2_key TEXT,
+    file_size BIGINT,
+    content_type VARCHAR(100),
+    photo_metadata JSONB,
     thumbnail TEXT, -- Base64 thumbnail
     taken_at BIGINT,
     synced_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
@@ -457,6 +466,11 @@ CREATE TABLE user_media_status (
     title VARCHAR(255),
     artist VARCHAR(255),
     album VARCHAR(255),
+    app_name VARCHAR(255),
+    package_name VARCHAR(255),
+    volume INTEGER DEFAULT 0,
+    max_volume INTEGER DEFAULT 15,
+    has_permission BOOLEAN DEFAULT FALSE,
     position INTEGER,
     duration INTEGER,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),

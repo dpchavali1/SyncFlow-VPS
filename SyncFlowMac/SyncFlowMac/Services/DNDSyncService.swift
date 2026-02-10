@@ -7,7 +7,6 @@
 
 import Foundation
 import Combine
-// FirebaseDatabase - using FirebaseStubs.swift
 
 class DNDSyncService: ObservableObject {
     static let shared = DNDSyncService()
@@ -18,9 +17,8 @@ class DNDSyncService: ObservableObject {
     @Published var statusMessage: String?
     @Published var lastUpdated: Date?
 
-    private let database = Database.database()
-    private var statusHandle: DatabaseHandle?
     private var currentUserId: String?
+    private var cancellables = Set<AnyCancellable>()
 
     private init() {}
 
@@ -28,48 +26,29 @@ class DNDSyncService: ObservableObject {
     func startListening(userId: String) {
         currentUserId = userId
 
-        let statusRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("dnd_status")
-
-        statusHandle = statusRef.observe(.value) { [weak self] snapshot in
-            guard let self = self,
-                  let data = snapshot.value as? [String: Any] else { return }
-
-            DispatchQueue.main.async {
-                self.isPhoneDndEnabled = data["enabled"] as? Bool ?? false
-                self.phoneDndMode = data["mode"] as? String ?? "off"
-                self.hasPhonePermission = data["hasPermission"] as? Bool ?? false
-                self.statusMessage = data["message"] as? String
-
-                if let timestamp = data["timestamp"] as? Double {
-                    self.lastUpdated = Date(timeIntervalSince1970: timestamp / 1000)
-                }
-
-                // Clear message after showing
-                if self.statusMessage != nil {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
-                        self.statusMessage = nil
-                    }
-                }
+        // Fetch current DND status
+        Task {
+            do {
+                let status = try await VPSService.shared.getDndStatus()
+                await MainActor.run { self.applyDndStatus(status) }
+            } catch {
+                print("[DND] Error fetching initial status: \(error)")
             }
         }
 
+        // Listen for real-time WebSocket updates
+        VPSService.shared.dndStatusUpdated
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] data in
+                self?.applyDndStatus(data)
+            }
+            .store(in: &cancellables)
     }
 
     /// Stop listening
     func stopListening() {
-        guard let userId = currentUserId, let handle = statusHandle else { return }
-
-        database.reference()
-            .child("users")
-            .child(userId)
-            .child("dnd_status")
-            .removeObserver(withHandle: handle)
-
-        statusHandle = nil
         currentUserId = nil
+        cancellables.removeAll()
     }
 
     /// Toggle phone DND
@@ -104,26 +83,11 @@ class DNDSyncService: ObservableObject {
 
     /// Send command to phone
     private func sendCommand(_ action: String) {
-        guard let userId = currentUserId else {
-            return
-        }
-
-        database.goOnline()
-
-        let commandRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("dnd_command")
-
-        let commandData: [String: Any] = [
-            "action": action,
-            "timestamp": ServerValue.timestamp()
-        ]
-
-        commandRef.setValue(commandData) { error, _ in
-            if let error = error {
-                print("DNDSyncService: Error sending command: \(error)")
-            } else {
+        Task {
+            do {
+                try await VPSService.shared.sendDndCommand(action: action)
+            } catch {
+                print("[DND] Error sending command \(action): \(error)")
             }
         }
     }
@@ -154,5 +118,20 @@ class DNDSyncService: ObservableObject {
         if let userId = currentUserId {
             startListening(userId: userId)
         }
+    }
+
+    // MARK: - Private
+
+    private func applyDndStatus(_ data: [String: Any]) {
+        if let enabled = data["enabled"] as? Bool {
+            isPhoneDndEnabled = enabled
+        }
+        if let mode = data["mode"] as? String {
+            phoneDndMode = mode
+        }
+        if let perm = data["hasPermission"] as? Bool {
+            hasPhonePermission = perm
+        }
+        lastUpdated = Date()
     }
 }

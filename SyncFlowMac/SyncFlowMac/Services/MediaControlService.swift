@@ -7,7 +7,6 @@
 
 import Foundation
 import Combine
-// FirebaseDatabase - using FirebaseStubs.swift
 
 class MediaControlService: ObservableObject {
     static let shared = MediaControlService()
@@ -23,70 +22,38 @@ class MediaControlService: ObservableObject {
     @Published var hasPhonePermission: Bool = false
     @Published var lastUpdated: Date?
 
-    private let database = Database.database()
-    private var statusHandle: DatabaseHandle?
     private var currentUserId: String?
+    private var cancellables = Set<AnyCancellable>()
 
     private init() {}
 
     /// Start listening for media status from phone
     func startListening(userId: String) {
-        if statusHandle != nil {
-            stopListening()
-        }
-
         currentUserId = userId
 
-        let statusRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("media_status")
-
-        statusHandle = statusRef.observe(.value) { [weak self] snapshot in
-            guard let self = self else { return }
-
-            guard let data = snapshot.value as? [String: Any] else {
-                DispatchQueue.main.async {
-                    self.isPlaying = false
-                    self.trackTitle = nil
-                    self.trackArtist = nil
-                    self.trackAlbum = nil
-                    self.trackAppName = nil
-                    self.trackPackageName = nil
-                }
-                return
-            }
-
-            DispatchQueue.main.async {
-                self.isPlaying = data["isPlaying"] as? Bool ?? false
-                self.trackTitle = data["title"] as? String
-                self.trackArtist = data["artist"] as? String
-                self.trackAlbum = data["album"] as? String
-                self.trackAppName = data["appName"] as? String
-                self.trackPackageName = data["packageName"] as? String
-                self.volume = data["volume"] as? Int ?? 0
-                self.maxVolume = data["maxVolume"] as? Int ?? 15
-                self.hasPhonePermission = data["hasPermission"] as? Bool ?? false
-
-                if let timestamp = data["timestamp"] as? Double {
-                    self.lastUpdated = Date(timeIntervalSince1970: timestamp / 1000)
-                }
+        // Fetch current media status
+        Task {
+            do {
+                let status = try await VPSService.shared.getMediaStatus()
+                await MainActor.run { self.applyMediaStatus(status) }
+            } catch {
+                print("[MediaControl] Error fetching initial status: \(error)")
             }
         }
+
+        // Listen for real-time WebSocket updates
+        VPSService.shared.mediaStatusUpdated
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] data in
+                self?.applyMediaStatus(data)
+            }
+            .store(in: &cancellables)
     }
 
     /// Stop listening
     func stopListening() {
-        guard let userId = currentUserId, let handle = statusHandle else { return }
-
-        database.reference()
-            .child("users")
-            .child(userId)
-            .child("media_status")
-            .removeObserver(withHandle: handle)
-
-        statusHandle = nil
         currentUserId = nil
+        cancellables.removeAll()
     }
 
     // MARK: - Playback Controls
@@ -169,35 +136,27 @@ class MediaControlService: ObservableObject {
 
     // MARK: - Private
 
+    private func applyMediaStatus(_ data: [String: Any]) {
+        if let playing = data["isPlaying"] as? Bool { isPlaying = playing }
+        if let title = data["trackTitle"] as? String { trackTitle = title }
+        if let artist = data["trackArtist"] as? String { trackArtist = artist }
+        if let album = data["trackAlbum"] as? String { trackAlbum = album }
+        if let appName = data["appName"] as? String { trackAppName = appName }
+        if let pkg = data["packageName"] as? String { trackPackageName = pkg }
+        if let vol = data["volume"] as? Int { volume = vol }
+        if let maxVol = data["maxVolume"] as? Int { maxVolume = maxVol }
+        if let perm = data["hasPermission"] as? Bool { hasPhonePermission = perm }
+        lastUpdated = Date()
+    }
+
     /// Send command to phone
     private func sendCommand(_ action: String, extraData: [String: Any]? = nil) {
-        guard let userId = currentUserId else {
-            return
-        }
-
-        // Ensure Firebase is online before writing
-        database.goOnline()
-
-        let commandRef = database.reference()
-            .child("users")
-            .child(userId)
-            .child("media_command")
-
-        var commandData: [String: Any] = [
-            "action": action,
-            "timestamp": ServerValue.timestamp()
-        ]
-
-        if let extra = extraData {
-            for (key, value) in extra {
-                commandData[key] = value
-            }
-        }
-
-        commandRef.setValue(commandData) { error, _ in
-            if let error = error {
-                print("MediaControlService: Error sending command: \(error)")
-            } else {
+        Task {
+            do {
+                let vol = extraData?["volume"] as? Int
+                try await VPSService.shared.sendMediaCommand(action: action, volume: vol)
+            } catch {
+                print("[MediaControl] Error sending command \(action): \(error)")
             }
         }
     }
@@ -206,6 +165,4 @@ class MediaControlService: ObservableObject {
     func reduceUpdates() {
         // Reduce the frequency of media control updates
     }
-
-
 }

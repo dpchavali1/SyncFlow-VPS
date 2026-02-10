@@ -511,30 +511,6 @@ struct GeneralSettingsView: View {
                         .foregroundColor(.secondary)
                 }
 
-                if appState.isPaired {
-                    Button(action: {
-                        appState.resyncE2EEKeys()
-                    }) {
-                        HStack {
-                            if appState.isResyncingE2EE {
-                                ProgressView()
-                                    .scaleEffect(0.7)
-                                    .frame(width: 16, height: 16)
-                                Text("Syncing keys...")
-                            } else {
-                                Image(systemName: "key.horizontal.fill")
-                                Text("Re-sync Encryption Keys")
-                            }
-                        }
-                    }
-                    .disabled(appState.isResyncingE2EE)
-
-                    if let mismatchMsg = appState.e2eeKeyMismatchMessage {
-                        Text(mismatchMsg)
-                            .font(.caption)
-                            .foregroundColor(.orange)
-                    }
-                }
             } header: {
                 Text("Security")
             }
@@ -1338,7 +1314,7 @@ struct AboutView: View {
                 Text("Access your Android SMS messages on your Mac")
                     .multilineTextAlignment(.center)
 
-                Text("Built with SwiftUI and Firebase")
+                Text("Built with SwiftUI")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

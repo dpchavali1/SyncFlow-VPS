@@ -19,7 +19,7 @@ import vpsService from './vps'
  */
 export async function unpairDevice(clearCache: boolean = false): Promise<void> {
   const currentUserId = localStorage.getItem('syncflow_user_id')
-  const deviceId = localStorage.getItem('syncflow_device_id')
+  const deviceId = localStorage.getItem('syncflow_device_id') ?? vpsService.currentDeviceId
 
   // Remove device from VPS - broadcasts device_removed to Android
   if (deviceId) {
@@ -44,6 +44,9 @@ export async function unpairDevice(clearCache: boolean = false): Promise<void> {
   localStorage.removeItem('syncflow_user_id')
   localStorage.removeItem('syncflow_device_id')
   localStorage.removeItem('syncflow_sync_group_id')
+
+  // Clean up VPS tokens and disconnect WebSocket
+  vpsService.clearTokens()
 
   console.log('[Auth] Device unpaired')
 }

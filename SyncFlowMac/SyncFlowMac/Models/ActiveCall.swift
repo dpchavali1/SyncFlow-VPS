@@ -51,7 +51,7 @@ struct ActiveCall: Identifiable, Hashable {
         return phoneNumber
     }
 
-    /// Create ActiveCall from Firebase data
+    /// Create ActiveCall from dictionary data
     static func from(_ data: [String: Any], id: String) -> ActiveCall? {
         guard let phoneNumber = data["phoneNumber"] as? String,
               // Support both "state" (new) and "callState" (legacy) field names

@@ -169,6 +169,9 @@ class VPSSyncService(context: Context) {
                     vpsClient.logout()
                 } else {
                     Log.d(TAG, "Another device was removed: $deviceId")
+                    // Invalidate the in-memory cache so re-entering DesktopIntegrationScreen
+                    // fetches fresh data from server instead of serving stale cached list
+                    com.phoneintegration.app.ui.desktop.PairedDevicesCache.clear()
                     scope.launch {
                         _otherDeviceRemoved.emit(deviceId)
                     }
@@ -282,11 +285,11 @@ class VPSSyncService(context: Context) {
         try {
             _syncState.value = SyncState.Syncing
 
-            val messageMaps = messages.map { buildMessageMap(it, skipAttachments = false) }
-
-            // Sync in batches of 50
-            messageMaps.chunked(50).forEach { batch ->
-                val response = vpsClient.syncMessages(batch)
+            // Process in chunks: build maps (incl. MMS upload) and sync each batch together
+            // so that if interrupted, completed batches are already persisted on the server
+            messages.chunked(50).forEach { batch ->
+                val messageMaps = batch.map { buildMessageMap(it, skipAttachments = false) }
+                val response = vpsClient.syncMessages(messageMaps)
                 Log.d(TAG, "Synced batch: synced=${response.synced}, skipped=${response.skipped}")
             }
 
@@ -345,15 +348,21 @@ class VPSSyncService(context: Context) {
         }
 
         // Handle MMS attachments - upload to R2
+        // Only send mmsParts when we have actual data to prevent overwriting existing
+        // DB entries via ON CONFLICT (COALESCE on server preserves existing if null)
         var mmsParts: List<Map<String, Any>>? = null
         if (message.isMms && !skipAttachments) {
             try {
-                mmsParts = extractAndUploadMmsAttachments(message.id)
-                if (!mmsParts.isNullOrEmpty()) {
-                    Log.d(TAG, "MMS ${message.id}: ${mmsParts.size} attachments uploaded to R2")
+                val extracted = extractAndUploadMmsAttachments(message.id)
+                if (extracted.isNotEmpty()) {
+                    mmsParts = extracted
+                    Log.d(TAG, "MMS ${message.id}: ${extracted.size} attachments uploaded to R2")
+                } else {
+                    Log.d(TAG, "MMS ${message.id}: no media parts extracted, preserving existing DB data")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to upload MMS attachments for ${message.id}", e)
+                // mmsParts stays null → server COALESCE preserves existing DB data
             }
         }
 
@@ -399,7 +408,14 @@ class VPSSyncService(context: Context) {
             "${Telephony.Mms.Part.MSG_ID} = ?",
             arrayOf(mmsId.toString()),
             null
-        ) ?: return emptyList()
+        )
+
+        if (cursor == null) {
+            Log.w(TAG, "MMS $mmsId: cursor null for parts query")
+            return emptyList()
+        }
+
+        Log.d(TAG, "MMS $mmsId: found ${cursor.count} parts")
 
         cursor.use {
             while (it.moveToNext()) {
@@ -408,24 +424,38 @@ class VPSSyncService(context: Context) {
                 val name = it.getString(2)
 
                 // Skip text and SMIL parts - only process media attachments
-                if (contentType.startsWith("text/") || contentType == "application/smil") continue
+                if (contentType.startsWith("text/") || contentType == "application/smil") {
+                    Log.d(TAG, "MMS $mmsId part $partId: skipping $contentType")
+                    continue
+                }
 
                 // Read part bytes
                 val partUri = Uri.parse("content://mms/part/$partId")
                 val bytes = try {
                     resolver.openInputStream(partUri)?.use { stream -> stream.readBytes() }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Failed to read MMS part $partId", e)
+                    Log.e(TAG, "MMS $mmsId part $partId: failed to read bytes", e)
                     null
-                } ?: continue
+                }
+
+                if (bytes == null) {
+                    Log.w(TAG, "MMS $mmsId part $partId: openInputStream returned null ($contentType)")
+                    continue
+                }
 
                 // Skip empty parts
-                if (bytes.isEmpty()) continue
+                if (bytes.isEmpty()) {
+                    Log.w(TAG, "MMS $mmsId part $partId: empty bytes ($contentType)")
+                    continue
+                }
+
+                Log.d(TAG, "MMS $mmsId part $partId: ${bytes.size} bytes, type=$contentType, name=$name")
 
                 // Upload to R2
                 try {
                     val ext = contentType.substringAfter("/").substringBefore(";")
-                    val fileName = name ?: "mms_${mmsId}_${partId}.$ext"
+                    // Always use deterministic filename so re-uploads overwrite the same R2 object
+                    val fileName = "mms_${mmsId}_${partId}.$ext"
                     val uploadResponse = retryWithBackoff("MMS part $partId upload") {
                         val response = vpsClient.getUploadUrl(
                             fileName = fileName,
@@ -461,6 +491,7 @@ class VPSSyncService(context: Context) {
             }
         }
 
+        Log.d(TAG, "MMS $mmsId: extracted ${attachments.size} attachments")
         return attachments
     }
 

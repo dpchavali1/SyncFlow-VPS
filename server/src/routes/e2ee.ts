@@ -26,8 +26,16 @@ const publicKeySchema = z.object({
 });
 
 const deviceKeySchema = z.object({
-  encryptedKey: z.string(),
+  encryptedKey: z.string().optional(),
+  publicKeyX963: z.string().optional(),
   keyType: z.string().default('signal'),
+  format: z.string().optional(),
+  keyVersion: z.number().optional(),
+  platform: z.string().optional(),
+  fromDevice: z.string().optional(),
+  timestamp: z.number().optional(),
+}).refine(data => data.encryptedKey || data.publicKeyX963, {
+  message: 'Either encryptedKey or publicKeyX963 must be provided',
 });
 
 // GET /e2ee/public-key/:userId - Get user's public E2EE key
@@ -103,6 +111,7 @@ router.get('/device-keys/:userId', async (req: Request, res: Response) => {
     for (const key of keys) {
       keyMap[key.device_id] = {
         encryptedKey: key.encrypted_key,
+        publicKeyX963: key.encrypted_key, // Android reads this field name
         createdAt: new Date(key.created_at).getTime(),
         updatedAt: key.updated_at ? new Date(key.updated_at).getTime() : null,
       };
@@ -127,7 +136,10 @@ router.post('/device-key/:deviceId', async (req: Request, res: Response) => {
     const body = deviceKeySchema.parse(req.body);
     const userId = req.userId!;
 
-    console.log(`[E2EE] Storing key for userId=${userId}, deviceId=${deviceId}, keyLength=${body.encryptedKey.length}`);
+    // Accept either encryptedKey (from DesktopSyncService) or publicKeyX963 (from SignalProtocolManager)
+    const keyValue = body.encryptedKey || body.publicKeyX963!;
+
+    console.log(`[E2EE] Storing key for userId=${userId}, deviceId=${deviceId}, keyLength=${keyValue.length}, format=${body.format || 'default'}`);
 
     await query(
       `INSERT INTO user_e2ee_keys (user_id, device_id, encrypted_key, created_at, updated_at)
@@ -135,7 +147,7 @@ router.post('/device-key/:deviceId', async (req: Request, res: Response) => {
        ON CONFLICT (user_id, device_id) DO UPDATE SET
          encrypted_key = EXCLUDED.encrypted_key,
          updated_at = NOW()`,
-      [userId, deviceId, body.encryptedKey]
+      [userId, deviceId, keyValue]
     );
 
     console.log(`[E2EE] Key stored successfully for userId=${userId}, deviceId=${deviceId}`);

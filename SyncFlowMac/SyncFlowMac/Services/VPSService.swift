@@ -1,12 +1,70 @@
 /**
- * VPS Service - Replacement for FirebaseService
+ * VPS Service
  *
- * This service handles all communication with the VPS server instead of Firebase.
- * It provides similar functionality to FirebaseService but uses REST API WebSocket.
+ * This service handles all communication with the VPS server.
+ * It provides REST API and WebSocket connectivity.
  */
 
 import Foundation
 import Combine
+
+// MARK: - Shared Models
+
+/// SIM card information from Android device
+struct SimInfo: Identifiable {
+    let subscriptionId: Int
+    let slotIndex: Int
+    let displayName: String
+    let carrierName: String
+    let phoneNumber: String?
+    let isEmbedded: Bool
+    let isActive: Bool
+
+    var id: Int { subscriptionId }
+
+    var formattedDisplayName: String {
+        if !carrierName.isEmpty {
+            return "\(displayName) (\(carrierName))"
+        }
+        return displayName
+    }
+}
+
+/// Status of a phone call request
+enum CallRequestStatus {
+    case completed
+    case failed(error: String)
+
+    var description: String {
+        switch self {
+        case .completed:
+            return "Call initiated successfully"
+        case .failed(let error):
+            return "Call failed: \(error)"
+        }
+    }
+}
+
+/// Pairing session data for QR code pairing flow
+struct PairingSession {
+    let token: String
+    let qrPayload: String
+    let expiresAt: Double // ms since epoch
+    let version: Int
+
+    var timeRemaining: TimeInterval {
+        let expiresDate = Date(timeIntervalSince1970: expiresAt / 1000)
+        return max(0, expiresDate.timeIntervalSince(Date()))
+    }
+}
+
+/// Pairing approval status
+enum PairingStatus {
+    case pending
+    case approved(pairedUid: String, deviceId: String?)
+    case rejected
+    case expired
+}
 
 // MARK: - VPS Models
 
@@ -63,9 +121,10 @@ public struct VPSMessage: Codable, Identifiable {
     let encryptedNonce: String?
     let keyMap: [String: String]?
     let mmsParts: [[String: Any]]?
+    let deliveryStatus: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, threadId, address, contactName, body, date, type, read, isMms, encrypted, encryptedBody, encryptedNonce, keyMap, mmsParts
+        case id, threadId, address, contactName, body, date, type, read, isMms, encrypted, encryptedBody, encryptedNonce, keyMap, mmsParts, deliveryStatus
     }
 
     public init(from decoder: Decoder) throws {
@@ -93,7 +152,10 @@ public struct VPSMessage: Codable, Identifiable {
         }
 
         // Decode mmsParts from JSON - may be array of dicts, JSON string, or nested JSON
-        if let partsData = try? container.decodeIfPresent([[String: AnyCodableValue]].self, forKey: .mmsParts) {
+        if !container.contains(.mmsParts) || (try? container.decodeNil(forKey: .mmsParts)) == true {
+            // Key missing or explicitly null — expected for SMS messages
+            mmsParts = nil
+        } else if let partsData = try? container.decodeIfPresent([[String: AnyCodableValue]].self, forKey: .mmsParts) {
             mmsParts = partsData.map { dict in
                 var result: [String: Any] = [:]
                 for (key, value) in dict {
@@ -110,6 +172,8 @@ public struct VPSMessage: Codable, Identifiable {
         } else {
             mmsParts = nil
         }
+
+        deliveryStatus = try container.decodeIfPresent(String.self, forKey: .deliveryStatus)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -127,6 +191,7 @@ public struct VPSMessage: Codable, Identifiable {
         try container.encodeIfPresent(encryptedBody, forKey: .encryptedBody)
         try container.encodeIfPresent(encryptedNonce, forKey: .encryptedNonce)
         try container.encodeIfPresent(keyMap, forKey: .keyMap)
+        try container.encodeIfPresent(deliveryStatus, forKey: .deliveryStatus)
     }
 
     private static func extractMmsParts(from value: AnyCodableValue) -> [[String: Any]]? {
@@ -248,11 +313,11 @@ public struct VPSFileTransfer: Codable {
     let id: String
     let fileName: String
     let fileSize: Int64
-    let contentType: String
+    let contentType: String?
     let r2Key: String?
     let downloadUrl: String?
-    let source: String
-    let status: String
+    let source: String?
+    let status: String?
     let timestamp: Double?
 }
 
@@ -272,9 +337,20 @@ private struct VPSSuccessResponse: Codable {
 
 public struct VPSUsageInfo: Codable {
     let plan: String
+    let planExpiresAt: Int64?
+    let trialStartedAt: Int64?
+    let storageBytes: Int64?
+    let monthlyUploadBytes: Int64?
+    let monthlyMmsBytes: Int64?
+    let monthlyFileBytes: Int64?
+    let monthlyPhotoBytes: Int64?
+    let messageCount: Int64?
+    let contactCount: Int64?
+    let lastUpdatedAt: Int64?
 }
 
 public struct VPSUsageResponse: Codable {
+    let success: Bool?
     let usage: VPSUsageInfo
 }
 
@@ -459,6 +535,12 @@ public class VPSService: NSObject, ObservableObject {
     @Published public private(set) var userId: String?
     @Published public private(set) var deviceId: String?
     @Published public private(set) var isAuthenticated: Bool = false
+
+    /// Returns "Bearer <token>" if authenticated, nil otherwise.
+    public var authorizationHeader: String? {
+        guard let token = accessToken else { return nil }
+        return "Bearer \(token)"
+    }
     @Published public private(set) var isConnected: Bool = false
 
     // WebSocket
@@ -477,6 +559,16 @@ public class VPSService: NSObject, ObservableObject {
     public let contactDeleted = PassthroughSubject<String, Never>()
     public let callAdded = PassthroughSubject<VPSCallHistoryEntry, Never>()
     public let deviceRemoved = PassthroughSubject<String, Never>()
+
+    // Publishers for service sync
+    public let mediaStatusUpdated = PassthroughSubject<[String: Any], Never>()
+    public let phoneStatusUpdated = PassthroughSubject<[String: Any], Never>()
+    public let clipboardUpdated = PassthroughSubject<[String: Any], Never>()
+    public let dndStatusUpdated = PassthroughSubject<[String: Any], Never>()
+    public let hotspotStatusUpdated = PassthroughSubject<[String: Any], Never>()
+    public let voicemailUpdated = PassthroughSubject<[String: Any], Never>()
+    public let spamUpdated = PassthroughSubject<[String: Any], Never>()
+    public let deliveryStatusChanged = PassthroughSubject<(String, String), Never>() // (messageId, deliveryStatus)
 
     /// Set to true when server pushes e2ee_key_available for this device
     public var e2eeKeyPushReceived = false
@@ -848,7 +940,7 @@ public class VPSService: NSObject, ObservableObject {
         return try await get(path)
     }
 
-    public func sendMessage(address: String, body: String, simSubscriptionId: Int? = nil) async throws {
+    public func sendMessage(address: String, body: String, simSubscriptionId: Int? = nil) async throws -> String {
         var requestBody: [String: Any] = [
             "address": address,
             "body": body
@@ -857,11 +949,34 @@ public class VPSService: NSObject, ObservableObject {
             requestBody["simSubscriptionId"] = simId
         }
 
-        let _: [String: String] = try await post("/api/messages/send", body: requestBody)
+        let response: [String: String] = try await post("/api/messages/send", body: requestBody)
+        return response["id"] ?? "out_\(Int(Date().timeIntervalSince1970 * 1000))"
+    }
+
+    public func syncSentMessage(_ message: [String: Any]) async throws {
+        let body: [String: Any] = ["messages": [message]]
+        let _: VPSGenericResponse = try await post("/api/messages/sync", body: body)
     }
 
     public func markMessageRead(messageId: String) async throws {
         let _: [String: Bool] = try await put("/api/messages/\(messageId)/read", body: nil)
+    }
+
+    public func deleteMessages(messageIds: [String]) async throws {
+        let body: [String: Any] = ["messageIds": messageIds]
+        let _: VPSGenericResponse = try await request("DELETE", "/api/messages", body: body)
+    }
+
+    @discardableResult
+    public func sendMmsMessage(address: String, body: String, attachments: [[String: String]]) async throws -> String {
+        let requestBody: [String: Any] = [
+            "address": address,
+            "body": body,
+            "isMms": true,
+            "attachments": attachments
+        ]
+        let response: [String: String] = try await post("/api/messages/send", body: requestBody)
+        return response["id"] ?? "out_\(Int(Date().timeIntervalSince1970 * 1000))"
     }
 
     // MARK: - Contacts
@@ -885,17 +1000,131 @@ public class VPSService: NSObject, ObservableObject {
     }
 
     public func requestCall(phoneNumber: String, simSubscriptionId: Int? = nil) async throws {
-        var body: [String: Any] = ["phoneNumber": phoneNumber]
+        var body: [String: Any] = ["phoneNumber": PhoneNumberNormalizer.shared.toE164(phoneNumber)]
         if let simId = simSubscriptionId {
             body["simSubscriptionId"] = simId
         }
         let _: [String: String] = try await post("/api/calls/request", body: body)
     }
 
+    // MARK: - SyncFlow Calls & WebRTC Signaling
+
+    public func getTurnCredentials() async throws -> [String: Any] {
+        guard let url = URL(string: baseUrl + "/api/calls/turn-credentials") else {
+            throw VPSError.invalidResponse
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = accessToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            let msg = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw VPSError.httpError((response as? HTTPURLResponse)?.statusCode ?? 500, msg)
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw VPSError.invalidResponse
+        }
+        return json
+    }
+
+    public struct CreateCallResponse: Codable {
+        let callId: String
+        let status: String
+    }
+
+    public func createSyncFlowCall(calleeId: String, calleeName: String, callType: String) async throws -> [String: String] {
+        let body: [String: Any] = [
+            "calleeId": PhoneNumberNormalizer.shared.toE164(calleeId),
+            "calleeName": calleeName,
+            "callerName": Host.current().localizedName ?? "Mac",
+            "callerPlatform": "macos",
+            "callType": callType
+        ]
+        let response: CreateCallResponse = try await post("/api/calls/syncflow", body: body)
+        return ["callId": response.callId, "status": response.status]
+    }
+
+    public func updateSyncFlowCallStatus(callId: String, status: String) async throws {
+        let _: [String: Bool] = try await put("/api/calls/syncflow/\(callId)/status", body: ["status": status])
+    }
+
+    public func sendSignal(callId: String, signalType: String, signalData: [String: Any], toDevice: String? = nil) async throws {
+        var body: [String: Any] = [
+            "callId": callId,
+            "signalType": signalType,
+            "signalData": signalData
+        ]
+        if let toDevice = toDevice {
+            body["toDevice"] = toDevice
+        }
+        let _: [String: Bool] = try await post("/api/calls/signaling", body: body)
+    }
+
+    public func getSignals(callId: String) async throws -> [[String: Any]] {
+        struct SignalsResponse: Codable {
+            let signals: [[String: AnyCodableValue]]
+        }
+        let response: SignalsResponse = try await get("/api/calls/signaling/\(callId)")
+        return response.signals.map { signal in
+            var dict: [String: Any] = [:]
+            for (key, value) in signal {
+                dict[key] = value.anyValue
+            }
+            return dict
+        }
+    }
+
+    public func deleteSignals(callId: String) async throws {
+        let _: [String: Bool] = try await delete("/api/calls/signaling/\(callId)")
+    }
+
     // MARK: - Devices
 
     public func getDevices() async throws -> VPSDevicesResponse {
         return try await get("/api/devices")
+    }
+
+    func getAvailableSims(userId: String) async throws -> [SimInfo] {
+        struct SimsResponse: Codable {
+            let sims: [VPSSim]
+        }
+        struct VPSSim: Codable {
+            let id: String
+            let subscriptionId: Int?
+            let displayName: String?
+            let carrierName: String?
+            let phoneNumber: String?
+            let isDefault: Bool?
+        }
+        let response: SimsResponse = try await get("/api/devices/sims")
+        return response.sims.map { sim in
+            SimInfo(
+                subscriptionId: sim.subscriptionId ?? 0,
+                slotIndex: 0,
+                displayName: sim.displayName ?? "SIM",
+                carrierName: sim.carrierName ?? "",
+                phoneNumber: sim.phoneNumber,
+                isEmbedded: false,
+                isActive: true
+            )
+        }
+    }
+
+    func getPairedDevices(userId: String) async throws -> [SyncFlowDevice] {
+        let response = try await getDevices()
+        return response.devices.compactMap { device in
+            SyncFlowDevice(
+                id: device.id,
+                name: device.name ?? "Unknown Device",
+                platform: device.deviceType,
+                online: true,
+                lastSeen: Date()
+            )
+        }
     }
 
     public func removeDevice(deviceId: String) async throws {
@@ -955,6 +1184,18 @@ public class VPSService: NSObject, ObservableObject {
 
     public func getUsage() async throws -> VPSUsageResponse {
         return try await get("/api/usage")
+    }
+
+    public func recordUsage(bytes: Int, category: String, countsTowardStorage: Bool = true) async throws {
+        let _: VPSGenericResponse = try await post("/api/usage/record", body: [
+            "bytes": bytes,
+            "category": category,
+            "countsTowardStorage": countsTowardStorage,
+        ])
+    }
+
+    public func resetStorage() async throws {
+        let _: VPSGenericResponse = try await post("/api/usage/reset-storage", body: [:])
     }
 
     // MARK: - File Transfers
@@ -1021,6 +1262,240 @@ public class VPSService: NSObject, ObservableObject {
 
     public func deleteR2File(fileKey: String) async throws {
         let _: VPSGenericResponse = try await post("/api/file-transfers/delete-file", body: ["fileKey": fileKey])
+    }
+
+    // MARK: - Photos
+
+    public struct VPSPhoto: Codable {
+        let id: String
+        let fileName: String?
+        let storageUrl: String?
+        let r2Key: String?
+        let fileSize: Int64?
+        let contentType: String?
+        let metadata: [String: AnyCodableValue]?
+        let takenAt: Int64?
+        let syncedAt: Int64?
+    }
+
+    public struct VPSPhotosResponse: Codable {
+        let photos: [VPSPhoto]
+    }
+
+    public func getPhotos(limit: Int = 50, before: Int64? = nil) async throws -> VPSPhotosResponse {
+        var path = "/api/photos?limit=\(limit)"
+        if let before = before {
+            path += "&before=\(before)"
+        }
+        return try await get(path)
+    }
+
+    public func getPhotoDownloadUrl(r2Key: String) async throws -> String {
+        let response: [String: String] = try await post("/api/photos/download-url", body: ["r2Key": r2Key])
+        guard let url = response["downloadUrl"] else {
+            throw VPSError.invalidResponse
+        }
+        return url
+    }
+
+    // MARK: - Notifications
+
+    public struct VPSNotification: Codable {
+        let id: String
+        let appPackage: String
+        let appName: String?
+        let title: String?
+        let body: String?
+        let timestamp: Int64
+        let isRead: Bool?
+    }
+
+    public struct VPSNotificationsResponse: Codable {
+        let notifications: [VPSNotification]
+    }
+
+    public func getNotifications(limit: Int = 50, since: Int64? = nil) async throws -> VPSNotificationsResponse {
+        var path = "/api/notifications/mirror?limit=\(limit)"
+        if let since = since {
+            path += "&since=\(since)"
+        }
+        return try await get(path)
+    }
+
+    public func deleteNotification(id: String) async throws {
+        let _: VPSGenericResponse = try await delete("/api/notifications/mirror/\(id)")
+    }
+
+    public func clearAllNotifications() async throws {
+        let _: VPSGenericResponse = try await delete("/api/notifications/mirror?all=true")
+    }
+
+    // MARK: - Account Deletion
+
+    public struct AccountDeletionStatus: Decodable {
+        let scheduled: Bool
+        let scheduledDate: Int64?
+        let reason: String?
+        let requestedAt: Int64?
+        let daysRemaining: Int
+        let isScheduledForDeletion: Bool?
+        let scheduledDeletionAt: Int64?
+    }
+
+    public func getAccountDeletionStatus() async throws -> AccountDeletionStatus {
+        return try await get("/api/account/deletion-status")
+    }
+
+    public func requestAccountDeletion(reason: String) async throws {
+        let _: VPSGenericResponse = try await post("/api/account/delete", body: ["reason": reason])
+    }
+
+    public func cancelAccountDeletion() async throws {
+        let _: VPSGenericResponse = try await post("/api/account/cancel-deletion", body: [:])
+    }
+
+    // MARK: - Media Control
+
+    public func getMediaStatus() async throws -> [String: Any] {
+        guard let url = URL(string: baseUrl + "/api/media/status") else { throw VPSError.invalidResponse }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = accessToken { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+            throw VPSError.httpError((response as? HTTPURLResponse)?.statusCode ?? 500, nil)
+        }
+        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
+    public func sendMediaCommand(action: String, volume: Int? = nil) async throws {
+        var body: [String: Any] = ["action": action]
+        if let volume = volume { body["volume"] = volume }
+        let _: VPSGenericResponse = try await post("/api/media/commands", body: body)
+    }
+
+    // MARK: - Phone Status
+
+    public func getPhoneStatus() async throws -> [String: Any] {
+        guard let url = URL(string: baseUrl + "/api/phone-status") else { throw VPSError.invalidResponse }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = accessToken { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+            throw VPSError.httpError((response as? HTTPURLResponse)?.statusCode ?? 500, nil)
+        }
+        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
+    public func requestPhoneStatusRefresh() async throws {
+        let _: VPSGenericResponse = try await post("/api/phone-status/refresh", body: [:])
+    }
+
+    // MARK: - Clipboard Sync
+
+    public func getClipboard() async throws -> [String: Any] {
+        guard let url = URL(string: baseUrl + "/api/clipboard") else { throw VPSError.invalidResponse }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = accessToken { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+            throw VPSError.httpError((response as? HTTPURLResponse)?.statusCode ?? 500, nil)
+        }
+        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
+    public func syncClipboard(text: String, source: String = "macos") async throws {
+        let body: [String: Any] = [
+            "text": text,
+            "timestamp": Int64(Date().timeIntervalSince1970 * 1000),
+            "source": source,
+            "type": "text"
+        ]
+        let _: VPSGenericResponse = try await post("/api/clipboard", body: body)
+    }
+
+    // MARK: - DND Sync
+
+    public func getDndStatus() async throws -> [String: Any] {
+        guard let url = URL(string: baseUrl + "/api/dnd/status") else { throw VPSError.invalidResponse }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = accessToken { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+            throw VPSError.httpError((response as? HTTPURLResponse)?.statusCode ?? 500, nil)
+        }
+        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
+    public func sendDndCommand(action: String) async throws {
+        let _: VPSGenericResponse = try await post("/api/dnd/commands", body: ["action": action])
+    }
+
+    // MARK: - Hotspot Control
+
+    public func getHotspotStatus() async throws -> [String: Any] {
+        guard let url = URL(string: baseUrl + "/api/hotspot/status") else { throw VPSError.invalidResponse }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = accessToken { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+            throw VPSError.httpError((response as? HTTPURLResponse)?.statusCode ?? 500, nil)
+        }
+        return (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
+    public func sendHotspotCommand(action: String) async throws {
+        let _: VPSGenericResponse = try await post("/api/hotspot/commands", body: ["action": action])
+    }
+
+    // MARK: - Voicemail Sync
+
+    public func getVoicemails() async throws -> [[String: Any]] {
+        guard let url = URL(string: baseUrl + "/api/voicemails") else { throw VPSError.invalidResponse }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token = accessToken { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+            throw VPSError.httpError((response as? HTTPURLResponse)?.statusCode ?? 500, nil)
+        }
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let voicemails = json["voicemails"] as? [[String: Any]] {
+            return voicemails
+        }
+        return []
+    }
+
+    public func markVoicemailRead(voicemailId: String) async throws {
+        let _: VPSGenericResponse = try await put("/api/voicemails/\(voicemailId)/read", body: ["isRead": true])
+    }
+
+    public func deleteVoicemail(voicemailId: String) async throws {
+        let _: VPSGenericResponse = try await delete("/api/voicemails/\(voicemailId)")
+    }
+
+    // MARK: - Find My Phone
+
+    public func sendFindPhoneRequest(action: String) async throws {
+        let _: VPSGenericResponse = try await post("/api/find-phone/request", body: ["action": action])
+    }
+
+    // MARK: - Link Sharing
+
+    public func shareLink(url: String, title: String? = nil) async throws {
+        var body: [String: Any] = ["url": url]
+        if let title = title { body["title"] = title }
+        let _: VPSGenericResponse = try await post("/api/links/share", body: body)
     }
 
     // MARK: - WebSocket
@@ -1126,6 +1601,16 @@ public class VPSService: NSObject, ObservableObject {
                 }
             }
 
+        case "messages_deleted":
+            if let data = json["data"] as? [String: Any],
+               let messageIds = data["messageIds"] as? [String] {
+                DispatchQueue.main.async {
+                    for id in messageIds {
+                        self.messageDeleted.send(id)
+                    }
+                }
+            }
+
         case "contact_added":
             if let contactData = json["data"] as? [String: Any],
                let jsonData = try? JSONSerialization.data(withJSONObject: contactData),
@@ -1183,6 +1668,116 @@ public class VPSService: NSObject, ObservableObject {
                 }
             }
 
+        case "webrtc_signal":
+            if let signalData = json["data"] as? [String: Any] ?? json["signal"] as? [String: Any],
+               let callId = signalData["callId"] as? String,
+               let signalType = signalData["signalType"] as? String {
+                let fromDevice = signalData["fromDevice"] as? String ?? ""
+                let signalPayload = signalData["signalData"] ?? signalData["data"] ?? [:]
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: .webRTCSignalReceived,
+                        object: nil,
+                        userInfo: [
+                            "callId": callId,
+                            "signalType": signalType,
+                            "signalData": signalPayload,
+                            "fromDevice": fromDevice
+                        ]
+                    )
+                }
+            }
+
+        case "syncflow_call_incoming":
+            if let callData = json["data"] as? [String: Any],
+               let callId = callData["callId"] as? String ?? callData["id"] as? String {
+                let callerId = callData["callerId"] as? String ?? ""
+                let callerName = callData["callerName"] as? String ?? "Unknown"
+                let callerPlatform = callData["callerPlatform"] as? String ?? "android"
+                let callType = callData["callType"] as? String ?? "audio"
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: .syncFlowCallIncoming,
+                        object: nil,
+                        userInfo: [
+                            "callId": callId,
+                            "callerId": callerId,
+                            "callerName": callerName,
+                            "callerPlatform": callerPlatform,
+                            "callType": callType
+                        ]
+                    )
+                }
+            }
+
+        case "syncflow_call_status":
+            if let statusData = json["data"] as? [String: Any],
+               let callId = statusData["callId"] as? String ?? statusData["id"] as? String,
+               let status = statusData["status"] as? String {
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: .syncFlowCallStatusChanged,
+                        object: nil,
+                        userInfo: [
+                            "callId": callId,
+                            "status": status
+                        ]
+                    )
+                }
+            }
+
+        case "media_status_updated":
+            if let data = json["data"] as? [String: Any] {
+                DispatchQueue.main.async { self.mediaStatusUpdated.send(data) }
+            }
+
+        case "phone_status_updated":
+            if let data = json["data"] as? [String: Any] {
+                DispatchQueue.main.async { self.phoneStatusUpdated.send(data) }
+            }
+
+        case "clipboard_updated":
+            if let data = json["data"] as? [String: Any] {
+                DispatchQueue.main.async { self.clipboardUpdated.send(data) }
+            }
+
+        case "dnd_status_updated":
+            if let data = json["data"] as? [String: Any] {
+                DispatchQueue.main.async { self.dndStatusUpdated.send(data) }
+            }
+
+        case "hotspot_status_updated":
+            if let data = json["data"] as? [String: Any] {
+                DispatchQueue.main.async { self.hotspotStatusUpdated.send(data) }
+            }
+
+        case "voicemail_added", "voicemail_updated", "voicemail_deleted":
+            var data = json["data"] as? [String: Any] ?? [:]
+            data["eventType"] = type
+            DispatchQueue.main.async { self.voicemailUpdated.send(data) }
+
+        case "spam_updated":
+            let data = json["data"] as? [String: Any] ?? [:]
+            DispatchQueue.main.async { self.spamUpdated.send(data) }
+
+        case "outgoing_status_changed":
+            if let data = json["data"] as? [String: Any],
+               let id = data["id"] as? String,
+               let status = data["status"] as? String {
+                DispatchQueue.main.async {
+                    self.deliveryStatusChanged.send((id, status))
+                }
+            }
+
+        case "delivery_status_changed":
+            if let data = json["data"] as? [String: Any],
+               let id = data["id"] as? String,
+               let deliveryStatus = data["deliveryStatus"] as? String {
+                DispatchQueue.main.async {
+                    self.deliveryStatusChanged.send((id, deliveryStatus))
+                }
+            }
+
         case "pong":
             // Heartbeat response
             break
@@ -1194,7 +1789,7 @@ public class VPSService: NSObject, ObservableObject {
 
     private func subscribeToUser(_ userId: String) {
         // Subscribe to each channel individually (server expects single channel per message)
-        let channels = ["messages", "contacts", "calls", "devices"]
+        let channels = ["messages", "contacts", "calls", "devices", "media", "phone_status", "clipboard", "dnd", "hotspot", "voicemails", "spam"]
 
         for channel in channels {
             let subscription: [String: Any] = [
@@ -1321,4 +1916,22 @@ public class VPSService: NSObject, ObservableObject {
 
         throw VPSError.pairingExpired
     }
+
+    // MARK: - E2EE Key Publishing
+
+    public func publishE2eePublicKey(publicKeyX963Base64: String) async throws {
+        let body: [String: Any] = [
+            "publicKeyX963": publicKeyX963Base64,
+            "platform": "macos"
+        ]
+        let _: VPSGenericResponse = try await post("/api/e2ee/publish-key", body: body)
+    }
+}
+
+// MARK: - WebRTC Signal Notification Names
+
+extension Notification.Name {
+    static let webRTCSignalReceived = Notification.Name("webRTCSignalReceived")
+    static let syncFlowCallIncoming = Notification.Name("syncFlowCallIncoming")
+    static let syncFlowCallStatusChanged = Notification.Name("syncFlowCallStatusChanged")
 }
