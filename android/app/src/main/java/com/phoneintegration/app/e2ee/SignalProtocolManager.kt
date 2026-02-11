@@ -150,8 +150,15 @@ class SignalProtocolManager(private val context: Context) {
     fun initializeKeys() {
         if (isInitialized()) {
             loadExistingKeys()
-            ensureEcdhKeys()
-            return
+            if (privateKeysetHandle != null) {
+                ensureEcdhKeys()
+                return
+            }
+            // Tink keys corrupted (e.g. Keystore destroyed after reinstall
+            // but e2ee_prefs restored from Auto Backup) — clear everything
+            // and regenerate all keys from scratch
+            Log.w(TAG, "Tink keys corrupted (Keystore mismatch), clearing and regenerating all E2EE keys")
+            prefs.edit().clear().apply()
         }
 
         try {
@@ -228,8 +235,18 @@ class SignalProtocolManager(private val context: Context) {
     private fun ensureEcdhKeys() {
         if (prefs.getBoolean(KEY_ECDH_INITIALIZED, false)) {
             loadEcdhKeys()
-            publishDevicePublicKey()
-            return
+            if (ecdhKeyPair != null) {
+                publishDevicePublicKey()
+                return
+            }
+            // loadEcdhKeys failed (e.g. Keystore corruption) — regenerate
+            Log.w(TAG, "ECDH keys corrupted, clearing and regenerating")
+            prefs.edit()
+                .remove(KEY_ECDH_PRIVATE)
+                .remove(KEY_ECDH_PRIVATE_IV)
+                .remove(KEY_ECDH_PUBLIC)
+                .putBoolean(KEY_ECDH_INITIALIZED, false)
+                .apply()
         }
 
         try {
