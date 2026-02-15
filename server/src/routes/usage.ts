@@ -1,3 +1,23 @@
+/**
+ * Usage tracking, plan limits, and Stripe subscription management.
+ *
+ * Plan tiers:
+ *   - Free: 500 MB/month upload, 100 MB storage, 50 MB max file size
+ *   - Pro (monthly/yearly/lifetime): 2 GB/month upload, 1 GB storage, 1 GB max file size
+ *
+ * Usage is tracked per-user in user_usage (storage_bytes, bandwidth_bytes_month).
+ * The GET /usage endpoint derives monthly totals from actual DB queries across
+ * MMS attachments, file transfers, and photos rather than relying solely on the
+ * accumulated counter, which can drift.
+ *
+ * Stripe integration:
+ *   - Webhook endpoint (unauthenticated, signature-verified) handles checkout
+ *     completions, subscription updates, cancellations, and payment failures.
+ *   - Checkout/portal/cancel endpoints require authentication.
+ *   - Stripe is loaded conditionally; the server still boots if the package
+ *     or keys are missing (billing endpoints return 501).
+ */
+
 import { Router, Request, Response } from 'express';
 import express from 'express';
 import { z } from 'zod';
@@ -16,6 +36,45 @@ const s3Client = config.r2.endpoint ? new S3Client({
     secretAccessKey: config.r2.secretAccessKey,
   },
 }) : null;
+
+// Resolve effective plan by checking subscription + expiry
+export async function getEffectivePlan(userId: string): Promise<{ plan: string; expiresAt: Date | null }> {
+  const sub = await queryOne(
+    'SELECT plan, expires_at FROM user_subscriptions WHERE user_id = $1',
+    [userId]
+  );
+  if (!sub) return { plan: 'free', expiresAt: null };
+
+  const plan = sub.plan || 'free';
+  const expiresAt = sub.expires_at ? new Date(sub.expires_at) : null;
+
+  // Check if expired
+  if (expiresAt && expiresAt < new Date() && plan !== 'free') {
+    return { plan: 'free', expiresAt };
+  }
+
+  return { plan, expiresAt };
+}
+
+// Plan limits by tier
+export function getPlanLimits(plan: string) {
+  const GB = 1024 * 1024 * 1024;
+  const MB = 1024 * 1024;
+
+  switch (plan) {
+    case '3year':
+    case 'lifetime':
+      return { monthlyUploadLimit: 6 * GB, storageLimit: 3 * GB, maxFileSize: 2 * GB, maxDevices: 5 };
+    case 'yearly':
+    case 'pro_yearly':
+      return { monthlyUploadLimit: 4 * GB, storageLimit: 2 * GB, maxFileSize: 1 * GB, maxDevices: 5 };
+    case 'monthly':
+    case 'pro_monthly':
+      return { monthlyUploadLimit: 2 * GB, storageLimit: 1 * GB, maxFileSize: 500 * MB, maxDevices: 5 };
+    default: // free
+      return { monthlyUploadLimit: 200 * MB, storageLimit: 100 * MB, maxFileSize: 50 * MB, maxDevices: 2 };
+  }
+}
 
 const router = Router();
 
@@ -61,7 +120,7 @@ router.post(
       );
     } catch (err: any) {
       console.error('Stripe webhook signature verification failed:', err.message);
-      res.status(400).json({ error: `Webhook signature verification failed: ${err.message}` });
+      res.status(400).json({ error: 'Webhook verification failed' });
       return;
     }
 
@@ -81,9 +140,9 @@ router.post(
 
           // Calculate expiration based on plan
           let expiresAt: string;
-          if (plan === 'lifetime') {
-            // Lifetime plan: set expiry far in the future
-            expiresAt = new Date(Date.now() + 100 * 365 * 24 * 60 * 60 * 1000).toISOString();
+          if (plan === '3year') {
+            // 3-year plan: one-time payment
+            expiresAt = new Date(Date.now() + 3 * 365 * 24 * 60 * 60 * 1000).toISOString();
           } else if (plan === 'yearly' || plan === 'pro_yearly') {
             expiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
           } else {
@@ -186,12 +245,44 @@ const recordUsageSchema = z.object({
   countsTowardStorage: z.boolean().default(true),
 });
 
+// Auto-reset bandwidth counter if last_reset is older than 30 days.
+// Returns the (possibly updated) last_reset timestamp.
+async function ensureMonthlyReset(userId: string): Promise<Date> {
+  const usage = await queryOne(
+    'SELECT last_reset FROM user_usage WHERE user_id = $1',
+    [userId]
+  );
+
+  const lastReset = usage?.last_reset ? new Date(usage.last_reset) : null;
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+  if (!lastReset || lastReset < thirtyDaysAgo) {
+    // Reset the counter and set last_reset to now
+    await query(
+      `INSERT INTO user_usage (user_id, bandwidth_bytes_month, last_reset, updated_at)
+       VALUES ($1, 0, NOW(), NOW())
+       ON CONFLICT (user_id) DO UPDATE SET
+         bandwidth_bytes_month = 0,
+         last_reset = NOW(),
+         updated_at = NOW()`,
+      [userId]
+    );
+    return new Date();
+  }
+
+  return lastReset;
+}
+
 // GET /usage - Get user usage
 router.get('/', async (req: Request, res: Response) => {
   try {
     const userId = req.userId!;
 
-    // Get usage data
+    // Auto-reset monthly counter if overdue
+    const lastReset = await ensureMonthlyReset(userId);
+    const nextReset = new Date(lastReset.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+    // Get usage data (after potential reset)
     const usage = await queryOne(
       `SELECT storage_bytes, bandwidth_bytes_month, message_count, last_reset, updated_at
        FROM user_usage
@@ -199,11 +290,12 @@ router.get('/', async (req: Request, res: Response) => {
       [userId]
     );
 
-    // Get subscription data
+    // Get effective plan (checks expiry)
+    const { plan: effectivePlan, expiresAt: planExpiresAt } = await getEffectivePlan(userId);
+
+    // Get subscription metadata (started_at) separately
     const subscription = await queryOne(
-      `SELECT plan, status, started_at, expires_at
-       FROM user_subscriptions
-       WHERE user_id = $1`,
+      `SELECT started_at FROM user_subscriptions WHERE user_id = $1`,
       [userId]
     );
 
@@ -218,7 +310,9 @@ router.get('/', async (req: Request, res: Response) => {
       [userId]
     );
 
-    // Calculate MMS attachment sizes from stored mms_parts JSONB
+    // Calculate monthly uploads since last reset (per-category breakdown)
+    const resetTs = lastReset.toISOString();
+
     const mmsBytes = await queryOne(
       `SELECT COALESCE(SUM(
         (SELECT COALESCE(SUM((part->>'fileSize')::bigint), 0)
@@ -227,48 +321,82 @@ router.get('/', async (req: Request, res: Response) => {
       ), 0) as total
        FROM user_messages
        WHERE user_id = $1 AND is_mms = true AND mms_parts IS NOT NULL
-         AND date > $2`,
-      [userId, Date.now() - 30 * 24 * 60 * 60 * 1000]
+         AND created_at > $2`,
+      [userId, resetTs]
     );
 
-    // Calculate file transfer sizes for current month
     const fileBytes = await queryOne(
       `SELECT COALESCE(SUM(file_size), 0) as total
        FROM user_file_transfers
        WHERE user_id = $1 AND status = 'completed'
-         AND timestamp > $2`,
-      [userId, Date.now() - 30 * 24 * 60 * 60 * 1000]
+         AND created_at > $2
+         AND r2_key NOT LIKE $3`,
+      [userId, resetTs, `%/mms/%`]
     );
 
-    // Calculate photo sizes for current month
     const photoBytes = await queryOne(
       `SELECT COALESCE(SUM(file_size), 0) as total
        FROM user_photos
        WHERE user_id = $1
-         AND synced_at > NOW() - INTERVAL '30 days'`,
+         AND synced_at > $2`,
+      [userId, resetTs]
+    );
+
+    const monthlyMms = parseInt(mmsBytes?.total || '0');
+    const monthlyFiles = parseInt(fileBytes?.total || '0');
+    const monthlyPhotos = parseInt(photoBytes?.total || '0');
+    const monthlyTotal = monthlyMms + monthlyFiles + monthlyPhotos;
+
+    // Compute actual total storage from DB (not time-limited)
+    const totalPhotoStorage = await queryOne(
+      `SELECT COALESCE(SUM(file_size), 0) as total FROM user_photos WHERE user_id = $1`,
       [userId]
     );
+    const totalMmsStorage = await queryOne(
+      `SELECT COALESCE(SUM(
+        (SELECT COALESCE(SUM((part->>'fileSize')::bigint), 0)
+         FROM jsonb_array_elements(mms_parts) AS part
+         WHERE part->>'fileSize' IS NOT NULL)
+      ), 0) as total
+       FROM user_messages
+       WHERE user_id = $1 AND is_mms = true AND mms_parts IS NOT NULL`,
+      [userId]
+    );
+    const totalFileStorage = await queryOne(
+      `SELECT COALESCE(SUM(file_size), 0) as total
+       FROM user_file_transfers
+       WHERE user_id = $1 AND status = 'completed' AND r2_key NOT LIKE $2`,
+      [userId, `%/mms/%`]
+    );
+    const actualStorageBytes = parseInt(totalPhotoStorage?.total || '0')
+      + parseInt(totalMmsStorage?.total || '0')
+      + parseInt(totalFileStorage?.total || '0');
+
+    const limits = getPlanLimits(effectivePlan);
 
     res.json({
       success: true,
       usage: {
-        plan: subscription?.plan || 'free',
-        planExpiresAt: subscription?.expires_at
-          ? new Date(subscription.expires_at).getTime()
-          : null,
+        plan: effectivePlan,
+        planExpiresAt: planExpiresAt ? planExpiresAt.getTime() : null,
         trialStartedAt: subscription?.started_at
           ? new Date(subscription.started_at).getTime()
           : null,
-        storageBytes: parseInt(usage?.storage_bytes || '0'),
-        monthlyUploadBytes: parseInt(usage?.bandwidth_bytes_month || '0'),
-        monthlyMmsBytes: parseInt(mmsBytes?.total || '0'),
-        monthlyFileBytes: parseInt(fileBytes?.total || '0'),
-        monthlyPhotoBytes: parseInt(photoBytes?.total || '0'),
+        storageBytes: actualStorageBytes,
+        monthlyUploadBytes: monthlyTotal,
+        monthlyMmsBytes: monthlyMms,
+        monthlyFileBytes: monthlyFiles,
+        monthlyPhotoBytes: monthlyPhotos,
         messageCount: parseInt(msgCount?.count || '0'),
         contactCount: parseInt(contactCount?.count || '0'),
         lastUpdatedAt: usage?.updated_at
           ? new Date(usage.updated_at).getTime()
           : null,
+        monthlyUploadLimit: limits.monthlyUploadLimit,
+        storageLimit: limits.storageLimit,
+        maxFileSize: limits.maxFileSize,
+        maxDevices: limits.maxDevices,
+        monthlyResetDate: nextReset.getTime(),
       },
     });
   } catch (error) {
@@ -301,6 +429,113 @@ router.post('/record', async (req: Request, res: Response) => {
     }
     console.error('Record usage error:', error);
     res.status(500).json({ error: 'Failed to record usage' });
+  }
+});
+
+// POST /usage/check-limit - Pre-upload limit check
+router.post('/check-limit', async (req: Request, res: Response) => {
+  try {
+    const { bytes } = req.body;
+    const userId = req.userId!;
+
+    if (typeof bytes !== 'number' || bytes <= 0) {
+      res.status(400).json({ error: 'bytes must be a positive number' });
+      return;
+    }
+
+    // Auto-reset monthly counter if overdue
+    const lastReset = await ensureMonthlyReset(userId);
+    const resetTs = lastReset.toISOString();
+
+    const { plan: effectivePlan } = await getEffectivePlan(userId);
+    const limits = getPlanLimits(effectivePlan);
+
+    // Compute actual monthly uploads since last reset
+    const monthlyMms = await queryOne(
+      `SELECT COALESCE(SUM(
+        (SELECT COALESCE(SUM((part->>'fileSize')::bigint), 0)
+         FROM jsonb_array_elements(mms_parts) AS part
+         WHERE part->>'fileSize' IS NOT NULL)
+      ), 0) as total
+       FROM user_messages
+       WHERE user_id = $1 AND is_mms = true AND mms_parts IS NOT NULL AND created_at > $2`,
+      [userId, resetTs]
+    );
+    const monthlyFiles = await queryOne(
+      `SELECT COALESCE(SUM(file_size), 0) as total
+       FROM user_file_transfers
+       WHERE user_id = $1 AND status = 'completed' AND created_at > $2 AND r2_key NOT LIKE $3`,
+      [userId, resetTs, `%/mms/%`]
+    );
+    const monthlyPhotos = await queryOne(
+      `SELECT COALESCE(SUM(file_size), 0) as total FROM user_photos WHERE user_id = $1 AND synced_at > $2`,
+      [userId, resetTs]
+    );
+    const currentMonthly = parseInt(monthlyMms?.total || '0')
+      + parseInt(monthlyFiles?.total || '0')
+      + parseInt(monthlyPhotos?.total || '0');
+
+    // Compute actual storage from DB tables
+    const photoStorage = await queryOne(
+      `SELECT COALESCE(SUM(file_size), 0) as total FROM user_photos WHERE user_id = $1`,
+      [userId]
+    );
+    const mmsStorage = await queryOne(
+      `SELECT COALESCE(SUM(
+        (SELECT COALESCE(SUM((part->>'fileSize')::bigint), 0)
+         FROM jsonb_array_elements(mms_parts) AS part
+         WHERE part->>'fileSize' IS NOT NULL)
+      ), 0) as total
+       FROM user_messages
+       WHERE user_id = $1 AND is_mms = true AND mms_parts IS NOT NULL`,
+      [userId]
+    );
+    const fileStorage = await queryOne(
+      `SELECT COALESCE(SUM(file_size), 0) as total
+       FROM user_file_transfers
+       WHERE user_id = $1 AND status = 'completed' AND r2_key NOT LIKE $2`,
+      [userId, `%/mms/%`]
+    );
+    const currentStorage = parseInt(photoStorage?.total || '0')
+      + parseInt(mmsStorage?.total || '0')
+      + parseInt(fileStorage?.total || '0');
+
+    if (bytes > limits.maxFileSize) {
+      res.status(413).json({
+        error: `File too large. Max ${Math.round(limits.maxFileSize / (1024 * 1024))} MB for your plan.`,
+        upgrade: true,
+      });
+      return;
+    }
+
+    if (currentMonthly + bytes > limits.monthlyUploadLimit) {
+      res.status(429).json({
+        error: 'Monthly upload limit reached',
+        limit: limits.monthlyUploadLimit,
+        current: currentMonthly,
+        upgrade: true,
+      });
+      return;
+    }
+
+    if (currentStorage + bytes > limits.storageLimit) {
+      res.status(429).json({
+        error: 'Storage limit reached. Delete existing data or upgrade to Pro.',
+        limit: limits.storageLimit,
+        current: currentStorage,
+        upgrade: true,
+      });
+      return;
+    }
+
+    res.json({
+      allowed: true,
+      remainingMonthly: limits.monthlyUploadLimit - currentMonthly,
+      remainingStorage: limits.storageLimit - currentStorage,
+    });
+  } catch (error) {
+    console.error('Check limit error:', error);
+    res.status(500).json({ error: 'Failed to check limits' });
   }
 });
 
@@ -373,6 +608,44 @@ router.post('/reset-storage', async (req: Request, res: Response) => {
   }
 });
 
+// POST /usage/recalculate-storage - Recalculate storage_bytes from actual DB contents
+router.post('/recalculate-storage', async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId!;
+
+    // Sum actual photo sizes
+    const photoBytes = await queryOne(
+      `SELECT COALESCE(SUM(file_size), 0) as total FROM user_photos WHERE user_id = $1`,
+      [userId]
+    );
+
+    // Sum actual MMS attachment sizes
+    const mmsBytes = await queryOne(
+      `SELECT COALESCE(SUM(
+        (SELECT COALESCE(SUM((part->>'fileSize')::bigint), 0)
+         FROM jsonb_array_elements(mms_parts) AS part
+         WHERE part->>'fileSize' IS NOT NULL)
+      ), 0) as total
+       FROM user_messages
+       WHERE user_id = $1 AND is_mms = true AND mms_parts IS NOT NULL`,
+      [userId]
+    );
+
+    const actualStorage = parseInt(photoBytes?.total || '0') + parseInt(mmsBytes?.total || '0');
+
+    await query(
+      `UPDATE user_usage SET storage_bytes = $2, updated_at = NOW() WHERE user_id = $1`,
+      [userId, actualStorage]
+    );
+
+    console.log(`[Usage] Recalculated storage for user ${userId}: ${actualStorage} bytes`);
+    res.json({ success: true, storageBytes: actualStorage });
+  } catch (error) {
+    console.error('Recalculate storage error:', error);
+    res.status(500).json({ error: 'Failed to recalculate storage' });
+  }
+});
+
 // POST /usage/reset-monthly - Reset monthly usage
 router.post('/reset-monthly', async (req: Request, res: Response) => {
   try {
@@ -404,12 +677,14 @@ router.get('/subscription', async (req: Request, res: Response) => {
     );
 
     if (!subscription) {
+      const freeLimits = getPlanLimits('free');
       res.json({
         plan: 'free',
         status: 'active',
+        hasStripeCustomer: false,
         features: {
-          maxDevices: 2,
-          maxFileSize: 50 * 1024 * 1024, // 50MB
+          maxDevices: freeLimits.maxDevices,
+          maxFileSize: freeLimits.maxFileSize,
           photoSync: true,
           mediaControl: false,
         },
@@ -418,15 +693,17 @@ router.get('/subscription', async (req: Request, res: Response) => {
     }
 
     const isPro = subscription.plan !== 'free' && subscription.status === 'active';
+    const subLimits = getPlanLimits(subscription.plan || 'free');
 
     res.json({
       plan: subscription.plan,
       status: subscription.status,
       startedAt: subscription.started_at ? new Date(subscription.started_at).getTime() : null,
       expiresAt: subscription.expires_at ? new Date(subscription.expires_at).getTime() : null,
+      hasStripeCustomer: !!subscription.stripe_customer_id,
       features: {
-        maxDevices: isPro ? 10 : 2,
-        maxFileSize: isPro ? 1024 * 1024 * 1024 : 50 * 1024 * 1024, // 1GB vs 50MB
+        maxDevices: subLimits.maxDevices,
+        maxFileSize: subLimits.maxFileSize,
         photoSync: isPro,
         mediaControl: isPro,
       },
@@ -443,10 +720,10 @@ router.post('/subscription/checkout', async (req: Request, res: Response) => {
 
   try {
     const userId = req.userId!;
-    const { plan } = req.body;
+    const { plan, returnUrl } = req.body;
 
-    if (!plan || !['monthly', 'yearly', 'lifetime'].includes(plan)) {
-      res.status(400).json({ error: 'Invalid plan. Must be one of: monthly, yearly, lifetime' });
+    if (!plan || !['monthly', 'yearly', '3year'].includes(plan)) {
+      res.status(400).json({ error: 'Invalid plan. Must be one of: monthly, yearly, 3year' });
       return;
     }
 
@@ -454,7 +731,7 @@ router.post('/subscription/checkout', async (req: Request, res: Response) => {
     const priceMap: Record<string, string> = {
       monthly: config.stripe.priceMonthly,
       yearly: config.stripe.priceYearly,
-      lifetime: config.stripe.priceLifetime,
+      '3year': config.stripe.price3Year,
     };
 
     const priceId = priceMap[plan];
@@ -469,8 +746,12 @@ router.post('/subscription/checkout', async (req: Request, res: Response) => {
       [userId]
     );
 
+    // Determine redirect base URL: client-provided returnUrl > Origin header > first production CORS origin > first CORS origin
+    const productionOrigin = config.corsOrigins.find((o: string) => !o.includes('localhost')) || config.corsOrigins[0];
+    const redirectBase = returnUrl || req.headers.origin || productionOrigin;
+
     const sessionParams: any = {
-      mode: plan === 'lifetime' ? 'payment' : 'subscription',
+      mode: plan === '3year' ? 'payment' : 'subscription',
       payment_method_types: ['card'],
       line_items: [
         {
@@ -480,10 +761,10 @@ router.post('/subscription/checkout', async (req: Request, res: Response) => {
       ],
       metadata: {
         userId,
-        plan: plan === 'lifetime' ? 'lifetime' : `pro_${plan}`,
+        plan: plan === '3year' ? '3year' : `pro_${plan}`,
       },
-      success_url: `${config.corsOrigins[0]}/settings?subscription=success`,
-      cancel_url: `${config.corsOrigins[0]}/settings?subscription=cancelled`,
+      success_url: `${redirectBase}/subscription/success`,
+      cancel_url: `${redirectBase}/settings?subscription=cancelled`,
     };
 
     // Reuse existing customer if available
@@ -568,6 +849,74 @@ router.post('/subscription/cancel', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Cancel subscription error:', error);
     res.status(500).json({ error: 'Failed to cancel subscription' });
+  }
+});
+
+// POST /subscription/sync - Check Stripe for completed checkouts and sync to DB
+// This allows plan activation without webhooks (e.g., after checkout redirect)
+router.post('/subscription/sync', async (req: Request, res: Response) => {
+  if (!requireStripe(res)) return;
+
+  try {
+    const userId = req.userId!;
+
+    // Check if already have an active paid subscription
+    const existing = await queryOne(
+      `SELECT plan, status, stripe_customer_id FROM user_subscriptions WHERE user_id = $1`,
+      [userId]
+    );
+    if (existing && existing.plan !== 'free' && existing.status === 'active') {
+      res.json({ synced: false, message: 'Already have an active subscription', plan: existing.plan });
+      return;
+    }
+
+    // Search recent checkout sessions for this user
+    const sessions = await stripe!.checkout.sessions.list({
+      limit: 10,
+    });
+
+    // Find a completed session for this user
+    const userSession = sessions.data.find(
+      (s: any) => s.metadata?.userId === userId && s.payment_status === 'paid'
+    );
+
+    if (!userSession) {
+      res.json({ synced: false, message: 'No completed checkout found' });
+      return;
+    }
+
+    const plan = userSession.metadata?.plan || 'pro_monthly';
+    const customerId = userSession.customer as string;
+    const subscriptionId = userSession.subscription as string;
+
+    // Calculate expiration based on plan
+    let expiresAt: string;
+    if (plan === '3year') {
+      expiresAt = new Date(Date.now() + 3 * 365 * 24 * 60 * 60 * 1000).toISOString();
+    } else if (plan === 'yearly' || plan === 'pro_yearly') {
+      expiresAt = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+    } else {
+      expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+    }
+
+    await query(
+      `INSERT INTO user_subscriptions (user_id, plan, status, started_at, expires_at, stripe_customer_id, stripe_subscription_id)
+       VALUES ($1, $2, 'active', NOW(), $3, $4, $5)
+       ON CONFLICT (user_id) DO UPDATE SET
+         plan = $2,
+         status = 'active',
+         started_at = NOW(),
+         expires_at = $3,
+         stripe_customer_id = $4,
+         stripe_subscription_id = $5`,
+      [userId, plan, expiresAt, customerId, subscriptionId || null]
+    );
+
+    console.log(`[Stripe Sync] Subscription activated for user ${userId}: plan=${plan}`);
+    res.json({ synced: true, plan, expiresAt });
+  } catch (error) {
+    console.error('Subscription sync error:', error);
+    res.status(500).json({ error: 'Failed to sync subscription' });
   }
 });
 

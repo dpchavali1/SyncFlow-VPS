@@ -1,3 +1,25 @@
+/**
+ * Browser-side End-to-End Encryption (E2EE) using Web Crypto API.
+ *
+ * Implements ECDH P-256 key agreement with HKDF-derived AES-256-GCM for
+ * message encryption. Keypairs can be stored either as plaintext JWK in
+ * IndexedDB ("legacy") or encrypted with a user passphrase via PBKDF2
+ * ("encrypted"). The encrypted path protects keys at rest so that even
+ * XSS cannot extract the raw private key without the passphrase.
+ *
+ * Wire format (v2 envelope):
+ *   "v2:" + base64( ephemeralPublicKey(65B) || nonce(12B) || AES-GCM ciphertext )
+ *
+ * Key lifecycle:
+ *   1. getOrCreateKeyPair  - generate or load legacy keypair
+ *   2. setPassphraseAndEncrypt - migrate to passphrase-protected storage
+ *   3. unlockKeyPairWithPassphrase - decrypt keys into memory for use
+ *   4. lockKeyPair - wipe in-memory keys (e.g. on idle timeout)
+ *
+ * Cross-device key sync:
+ *   importSyncGroupKeypair() accepts a PKCS#8 private key + X9.63 public
+ *   key pushed from the Android device so all platforms share one identity.
+ */
 'use client'
 
 import { secureStorage, initSecureStorage } from './secureStorage'
@@ -6,8 +28,12 @@ const DEVICE_ID_KEY = 'syncflow_device_id'
 const E2EE_KEYPAIR_KEY = 'syncflow_e2ee_jwk'
 const E2EE_KEYPAIR_ENCRYPTED_KEY = 'syncflow_e2ee_jwk_encrypted'
 const E2EE_PUBLIC_KEY_X963_KEY = 'syncflow_e2ee_public_key_x963'
+const E2EE_SIGNING_KEYPAIR_KEY = 'syncflow_e2ee_signing_jwk'
+const E2EE_KEY_VERSIONS_KEY = 'syncflow_e2ee_key_versions'
 const E2EE_CONTEXT = 'SyncFlow-E2EE-v2'
-const E2EE_PBKDF2_ITERATIONS = 150000
+const E2EE_PBKDF2_ITERATIONS = 400000
+const E2EE_PBKDF2_ITERATIONS_LEGACY = 150000
+const IDLE_LOCK_MS = 15 * 60 * 1000 // 15 minutes
 
 type StoredKeyPair = {
   privateKeyJwk: JsonWebKey
@@ -96,7 +122,7 @@ export const getOrCreateDeviceId = async (): Promise<string | null> => {
   await initSecureStorage()
   const existing = await secureStorage.getItem(DEVICE_ID_KEY)
   if (existing) return existing
-  const id = `web_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+  const id = crypto.randomUUID()
   await secureStorage.setItem(DEVICE_ID_KEY, id)
   return id
 }
@@ -126,6 +152,14 @@ export const lockKeyPair = () => {
   cachedKeyPairJwk = null
   cachedEncryptionKey = null
   cachedEncryptionSalt = null
+}
+
+/** Clear all E2EE keys from both memory and persistent storage (IndexedDB). */
+export const clearAllE2EEKeys = async () => {
+  lockKeyPair()
+  await secureStorage.removeItem(E2EE_KEYPAIR_KEY)
+  await secureStorage.removeItem(E2EE_KEYPAIR_ENCRYPTED_KEY)
+  await secureStorage.removeItem(E2EE_PUBLIC_KEY_X963_KEY)
 }
 
 const loadLegacyKeyPair = async (): Promise<StoredKeyPair | null> => {
@@ -626,19 +660,339 @@ export const decryptMessageBody = async (
  */
 export async function migrateE2EEKeysToIndexedDB(): Promise<void> {
   try {
-    console.log('[E2EE] Checking for keys to migrate from localStorage...')
-
     const keysToMigrate = [
       E2EE_KEYPAIR_KEY,
       E2EE_KEYPAIR_ENCRYPTED_KEY,
       E2EE_PUBLIC_KEY_X963_KEY,
+      E2EE_SIGNING_KEYPAIR_KEY,
+      E2EE_KEY_VERSIONS_KEY,
     ]
 
     await initSecureStorage(keysToMigrate)
-
-    console.log('[E2EE] Migration to IndexedDB complete')
   } catch (error) {
     console.error('[E2EE] Failed to migrate keys to IndexedDB:', error)
     // Don't throw - allow app to continue with localStorage fallback
   }
+}
+
+// MARK: - ECDSA Signing Keypair
+
+type StoredSigningKeyPair = {
+  privateKeyJwk: JsonWebKey
+  publicKeyJwk: JsonWebKey
+}
+
+/**
+ * Get or create ECDSA P-256 signing keypair for device authentication.
+ * Returns the public key in X9.63 format (Base64 encoded).
+ */
+export const getOrCreateSigningKeyPair = async (): Promise<string | null> => {
+  if (typeof window === 'undefined') return null
+  await initSecureStorage()
+
+  // Check if signing key already exists
+  const existing = await secureStorage.getItem(E2EE_SIGNING_KEYPAIR_KEY)
+  if (existing) {
+    try {
+      const parsed = JSON.parse(existing) as StoredSigningKeyPair
+      const publicKey = await crypto.subtle.importKey(
+        'jwk',
+        parsed.publicKeyJwk,
+        { name: 'ECDSA', namedCurve: 'P-256' },
+        true,
+        ['verify']
+      )
+      const raw = await crypto.subtle.exportKey('raw', publicKey)
+      return bytesToBase64(new Uint8Array(raw))
+    } catch {
+      // Corrupt, regenerate
+      await secureStorage.removeItem(E2EE_SIGNING_KEYPAIR_KEY)
+    }
+  }
+
+  // Generate new signing keypair
+  const keyPair = await crypto.subtle.generateKey(
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    true,
+    ['sign', 'verify']
+  )
+
+  const privateKeyJwk = await crypto.subtle.exportKey('jwk', keyPair.privateKey)
+  const publicKeyJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey)
+
+  await secureStorage.setItem(
+    E2EE_SIGNING_KEYPAIR_KEY,
+    JSON.stringify({ privateKeyJwk, publicKeyJwk })
+  )
+
+  const raw = await crypto.subtle.exportKey('raw', keyPair.publicKey)
+  return bytesToBase64(new Uint8Array(raw))
+}
+
+/**
+ * Verify an ECDSA signature on data using a provided signing public key.
+ */
+export const verifySignature = async (
+  data: Uint8Array,
+  signature: Uint8Array,
+  signingPublicKeyX963Base64: string
+): Promise<boolean> => {
+  try {
+    const publicKeyBytes = base64ToBytes(signingPublicKeyX963Base64)
+    const publicKey = await crypto.subtle.importKey(
+      'raw',
+      publicKeyBytes,
+      { name: 'ECDSA', namedCurve: 'P-256' },
+      false,
+      ['verify']
+    )
+
+    return crypto.subtle.verify(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      publicKey,
+      signature.buffer as ArrayBuffer,
+      data.buffer as ArrayBuffer
+    )
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Derive a safety number from the sync group public key.
+ * SHA-256(publicKeyX963) → first 30 bytes → 12 groups of 5 digits.
+ */
+export const deriveSafetyNumber = async (): Promise<string | null> => {
+  const publicKeyX963 = await getPublicKeyX963Base64()
+  if (!publicKeyX963) return null
+
+  try {
+    const publicKeyBytes = base64ToBytes(publicKeyX963)
+    const hashBuffer = await crypto.subtle.digest('SHA-256', publicKeyBytes)
+    const hashBytes = new Uint8Array(hashBuffer)
+    const groups: string[] = []
+
+    for (let i = 0; i < 30; i += 5) {
+      const chunk = hashBytes.slice(i, i + 5)
+      let value = 0n
+      for (const byte of chunk) {
+        value = (value << 8n) | BigInt(byte)
+      }
+      groups.push(String(Number(value % 100000n)).padStart(5, '0'))
+    }
+
+    return groups.join(' ')
+  } catch {
+    return null
+  }
+}
+
+// MARK: - Key Versioning
+
+/**
+ * Import a sync group keypair with a specific key version.
+ */
+export const importSyncGroupKeypairVersioned = async (
+  privateKeyPKCS8Base64: string,
+  publicKeyX963Base64: string,
+  keyVersion: number
+): Promise<boolean> => {
+  const result = await importSyncGroupKeypair(privateKeyPKCS8Base64, publicKeyX963Base64)
+  if (!result) return false
+
+  // Store version mapping
+  try {
+    await initSecureStorage()
+    const existingRaw = await secureStorage.getItem(E2EE_KEY_VERSIONS_KEY)
+    const versions: Record<string, JsonWebKey> = existingRaw ? JSON.parse(existingRaw) : {}
+
+    if (cachedKeyPairJwk) {
+      versions[String(keyVersion)] = cachedKeyPairJwk.privateKeyJwk
+      await secureStorage.setItem(E2EE_KEY_VERSIONS_KEY, JSON.stringify(versions))
+    }
+  } catch {
+    // Non-fatal
+  }
+
+  return true
+}
+
+/**
+ * Decrypt a data key, trying the specified key version and falling back to all stored versions.
+ */
+export const decryptDataKeyWithVersion = async (
+  envelope: string,
+  keyVersion?: number
+): Promise<Uint8Array | null> => {
+  // Try current key first
+  const result = await decryptDataKey(envelope)
+  if (result) return result
+
+  // Try versioned keys
+  try {
+    await initSecureStorage()
+    const versionsRaw = await secureStorage.getItem(E2EE_KEY_VERSIONS_KEY)
+    if (!versionsRaw) return null
+    const versions: Record<string, JsonWebKey> = JSON.parse(versionsRaw)
+
+    // Try specific version first if provided
+    const versionOrder = keyVersion
+      ? [String(keyVersion), ...Object.keys(versions).filter(v => v !== String(keyVersion)).sort((a, b) => Number(b) - Number(a))]
+      : Object.keys(versions).sort((a, b) => Number(b) - Number(a))
+
+    for (const v of versionOrder) {
+      const jwk = versions[v]
+      if (!jwk) continue
+      const vResult = await tryDecryptWithJwk(envelope, jwk)
+      if (vResult) return vResult
+    }
+  } catch {
+    // Fall through
+  }
+
+  return null
+}
+
+const tryDecryptWithJwk = async (
+  envelope: string,
+  privateKeyJwk: JsonWebKey
+): Promise<Uint8Array | null> => {
+  try {
+    const privateKey = await crypto.subtle.importKey(
+      'jwk',
+      privateKeyJwk,
+      { name: 'ECDH', namedCurve: 'P-256' },
+      false,
+      ['deriveBits']
+    )
+
+    const payload = envelope.replace(/^v2:/, '')
+    const bytes = base64ToBytes(payload)
+    if (bytes.length < 65 + 12 + 16) return null
+
+    const ephemeralPublic = bytes.slice(0, 65)
+    const nonce = bytes.slice(65, 77)
+    const ciphertext = bytes.slice(77)
+
+    const publicKey = await crypto.subtle.importKey(
+      'raw',
+      ephemeralPublic,
+      { name: 'ECDH', namedCurve: 'P-256' },
+      false,
+      []
+    )
+
+    const sharedSecret = await crypto.subtle.deriveBits(
+      { name: 'ECDH', public: publicKey },
+      privateKey,
+      256
+    )
+
+    const aesKey = await deriveAesKey(sharedSecret)
+    const dataKey = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: nonce },
+      aesKey,
+      ciphertext
+    )
+    return new Uint8Array(dataKey)
+  } catch {
+    return null
+  }
+}
+
+// MARK: - Key Backup & Recovery
+
+type KeyBackup = {
+  encryptedBackup: string
+  salt: string
+  iterations: number
+  keyVersion: number
+  createdAt: number
+}
+
+/**
+ * Restore sync group keys from encrypted server backups.
+ * Decrypts each backup using the user's passphrase and imports the keys.
+ */
+export const restoreFromBackup = async (
+  passphrase: string,
+  backups: KeyBackup[]
+): Promise<boolean> => {
+  if (typeof window === 'undefined') return false
+
+  try {
+    for (const backup of backups) {
+      const combined = base64ToBytes(backup.encryptedBackup)
+      const salt = base64ToBytes(backup.salt)
+
+      if (combined.length <= 12) continue
+
+      // Derive AES-256 key from passphrase using PBKDF2
+      const baseKey = await crypto.subtle.importKey(
+        'raw',
+        encodeUtf8(passphrase),
+        'PBKDF2',
+        false,
+        ['deriveKey']
+      )
+
+      const aesKey = await crypto.subtle.deriveKey(
+        {
+          name: 'PBKDF2',
+          salt,
+          iterations: backup.iterations,
+          hash: 'SHA-256',
+        },
+        baseKey,
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['decrypt']
+      )
+
+      // Decrypt: first 12 bytes = nonce, rest = ciphertext + tag
+      const nonce = combined.slice(0, 12)
+      const ciphertext = combined.slice(12)
+
+      const plaintext = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: nonce },
+        aesKey,
+        ciphertext
+      )
+
+      const json = JSON.parse(new TextDecoder().decode(plaintext))
+      const privateKeyPKCS8 = json.privateKeyPKCS8 as string
+      const publicKeyX963 = json.publicKeyX963 as string | undefined
+
+      if (privateKeyPKCS8 && publicKeyX963) {
+        await importSyncGroupKeypairVersioned(privateKeyPKCS8, publicKeyX963, backup.keyVersion)
+      }
+    }
+
+    return true
+  } catch (error) {
+    console.error('[E2EE] Failed to restore from backup:', error)
+    return false
+  }
+}
+
+// MARK: - Idle Auto-Lock
+
+let idleTimer: ReturnType<typeof setTimeout> | null = null
+
+/**
+ * Reset the idle auto-lock timer. Only active when passphrase-protected keys exist.
+ * After IDLE_LOCK_MS of inactivity, keys are wiped from memory.
+ */
+export const resetIdleTimer = async () => {
+  if (typeof window === 'undefined') return
+
+  // Only auto-lock if passphrase-protected keypair exists
+  const hasEncrypted = await hasEncryptedKeyPair()
+  if (!hasEncrypted) return
+
+  if (idleTimer) clearTimeout(idleTimer)
+  idleTimer = setTimeout(() => {
+    lockKeyPair()
+    console.log('[E2EE] Keys auto-locked due to inactivity')
+  }, IDLE_LOCK_MS)
 }

@@ -99,6 +99,122 @@ fun PrivacySettingsScreen(
                 }
             )
 
+            // Key Backup
+            var backupPassphrase by remember { mutableStateOf("") }
+            var confirmBackupPassphrase by remember { mutableStateOf("") }
+            var backupLoading by remember { mutableStateOf(false) }
+            var backupStatus by remember { mutableStateOf<String?>(null) }
+
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "Backup Encryption Keys",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "Protect your encryption keys with a passphrase so you can restore them after reinstalling.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = backupPassphrase,
+                        onValueChange = { backupPassphrase = it },
+                        label = { Text("Backup passphrase (min 8 chars)") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation()
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    OutlinedTextField(
+                        value = confirmBackupPassphrase,
+                        onValueChange = { confirmBackupPassphrase = it },
+                        label = { Text("Confirm passphrase") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation()
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            if (backupPassphrase.length < 8) {
+                                backupStatus = "Passphrase must be at least 8 characters."
+                                return@Button
+                            }
+                            if (backupPassphrase != confirmBackupPassphrase) {
+                                backupStatus = "Passphrases do not match."
+                                return@Button
+                            }
+                            backupLoading = true
+                            backupStatus = null
+                            scope.launch {
+                                try {
+                                    withContext(Dispatchers.IO) {
+                                        SignalProtocolManager(context).createKeyBackup(backupPassphrase)
+                                    }
+                                    backupStatus = "Keys backed up successfully."
+                                    backupPassphrase = ""
+                                    confirmBackupPassphrase = ""
+                                } catch (e: Exception) {
+                                    backupStatus = "Backup failed: ${e.message}"
+                                } finally {
+                                    backupLoading = false
+                                }
+                            }
+                        },
+                        enabled = !backupLoading,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        if (backupLoading) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(16.dp),
+                                strokeWidth = 2.dp
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                        }
+                        Text(if (backupLoading) "Backing up..." else "Backup Keys")
+                    }
+                    if (backupStatus != null) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            backupStatus!!,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (backupStatus!!.contains("failed") || backupStatus!!.contains("must") || backupStatus!!.contains("match"))
+                                MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
+
+            val safetyNumber = remember {
+                try { SignalProtocolManager(context).deriveSafetyNumber() } catch (_: Exception) { null }
+            }
+            if (safetyNumber != null) {
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(16.dp)) {
+                        Text(
+                            "Safety Number",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            safetyNumber,
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            ),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "Compare this number with your other devices to verify encryption keys match.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+
             Divider(modifier = Modifier.padding(vertical = 8.dp))
 
             Text(

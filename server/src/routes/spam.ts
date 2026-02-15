@@ -70,6 +70,7 @@ router.post('/messages', async (req: Request, res: Response) => {
        (id, user_id, address, body, date, spam_score, spam_reason)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (id) DO UPDATE SET
+         user_id = EXCLUDED.user_id,
          spam_score = EXCLUDED.spam_score,
          spam_reason = EXCLUDED.spam_reason`,
       [messageId, userId, body.address, body.body, body.date,

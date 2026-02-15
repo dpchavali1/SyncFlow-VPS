@@ -99,17 +99,20 @@ export async function registerDevice(
     name?: string;
     type: 'android' | 'macos' | 'web';
     fcmToken?: string;
+    signingKey?: string;
   }
 ): Promise<void> {
   await query(
-    `INSERT INTO user_devices (id, user_id, name, device_type, fcm_token, paired_at, last_seen)
-     VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+    `INSERT INTO user_devices (id, user_id, name, device_type, fcm_token, device_signing_key, paired_at, last_seen)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
      ON CONFLICT (id) DO UPDATE SET
+       user_id = EXCLUDED.user_id,
        name = EXCLUDED.name,
        device_type = EXCLUDED.device_type,
        fcm_token = EXCLUDED.fcm_token,
+       device_signing_key = COALESCE(EXCLUDED.device_signing_key, user_devices.device_signing_key),
        last_seen = NOW()`,
-    [deviceId, userId, deviceInfo.name, deviceInfo.type, deviceInfo.fcmToken]
+    [deviceId, userId, deviceInfo.name, deviceInfo.type, deviceInfo.fcmToken, deviceInfo.signingKey]
   );
 }
 
@@ -262,8 +265,11 @@ export async function redeemPairingToken(
 }
 
 // Get or create user by Firebase UID (device fingerprint)
-export async function getOrCreateUserByFirebaseUid(firebaseUid: string): Promise<string> {
-  // Check if user exists with this Firebase UID (device fingerprint)
+// Returns { userId, migrationPerformed, existingUser }
+//   - migrationPerformed: data was migrated from a legacy account
+//   - existingUser: this fingerprint already had a user (i.e. reinstall, not first-time)
+export async function getOrCreateUserByFirebaseUid(firebaseUid: string): Promise<{ userId: string; migrationPerformed: boolean; existingUser: boolean }> {
+  // Step 1: Check if user exists with this device fingerprint
   const existing = await queryOne<{ uid: string }>(
     `SELECT uid FROM users WHERE firebase_uid = $1`,
     [firebaseUid]
@@ -271,78 +277,95 @@ export async function getOrCreateUserByFirebaseUid(firebaseUid: string): Promise
 
   if (existing) {
     console.log(`[Auth] Found existing user ${existing.uid} for device fingerprint ${firebaseUid.substring(0, 8)}...`);
-    return existing.uid;
+    return { userId: existing.uid, migrationPerformed: false, existingUser: true };
   }
 
-  // Check if there's an orphaned user without firebase_uid that has data we should claim
-  // This handles the case where anonymous auth was used before
-  const orphanedUser = await queryOne<{ uid: string; message_count: string }>(
-    `SELECT u.uid, COUNT(m.id) as message_count
-     FROM users u
-     LEFT JOIN user_messages m ON m.user_id = u.uid
-     WHERE u.firebase_uid IS NULL
-     GROUP BY u.uid
-     ORDER BY COUNT(m.id) DESC
-     LIMIT 1`,
-    []
-  );
+  // Step 2: Legacy/orphan user migration REMOVED.
+  // Previously, Steps 2 and 3 searched globally for any legacy user (firebase_uid = uid)
+  // or orphaned user (firebase_uid IS NULL) with the most messages and claimed them for
+  // the new device. This was dangerously unscoped — any new device could inherit any
+  // unrelated user's account and data. Use admin /auth/admin/migrate for manual migration.
 
-  if (orphanedUser && parseInt(orphanedUser.message_count) > 0) {
-    // Claim this orphaned user by setting the firebase_uid
-    console.log(`[Auth] Claiming orphaned user ${orphanedUser.uid} with ${orphanedUser.message_count} messages for device ${firebaseUid.substring(0, 8)}...`);
-    await query(
-      `UPDATE users SET firebase_uid = $1 WHERE uid = $2`,
-      [firebaseUid, orphanedUser.uid]
-    );
-    return orphanedUser.uid;
-  }
-
-  // Create new user with Firebase UID as the primary user ID
-  console.log(`[Auth] Creating new user for device fingerprint ${firebaseUid.substring(0, 8)}...`);
+  // Step 3: Create new user with a unique UUID (NOT the fingerprint as uid).
+  // Previously uid = fingerprint, which caused collisions when two devices generated
+  // the same fingerprint (same model + same ANDROID_ID). Now uid is always a fresh UUID,
+  // and firebase_uid stores the fingerprint for lookup only.
+  const userId = uuidv4();
+  console.log(`[Auth] Creating new user ${userId} for device fingerprint ${firebaseUid.substring(0, 8)}...`);
   await query(
-    `INSERT INTO users (uid, firebase_uid, created_at) VALUES ($1, $1, NOW())
-     ON CONFLICT (uid) DO UPDATE SET firebase_uid = EXCLUDED.firebase_uid`,
-    [firebaseUid]
+    `INSERT INTO users (uid, firebase_uid, created_at) VALUES ($1, $2, NOW())`,
+    [userId, firebaseUid]
   );
 
-  return firebaseUid;
+  return { userId, migrationPerformed: false, existingUser: false };
 }
 
-// Migrate all data from one user to another
+// Migrate all data from one user to another (skips duplicates via WHERE NOT EXISTS)
 export async function migrateUserData(fromUserId: string, toUserId: string): Promise<{ migrated: boolean; counts: Record<string, number> }> {
   const counts: Record<string, number> = {};
 
   try {
-    // Migrate messages
-    const msgResult = await query(
-      `UPDATE user_messages SET user_id = $1 WHERE user_id = $2`,
+    // Helper: migrate rows from a table, skipping any with duplicate primary keys
+    const migrateTable = async (table: string, idCol: string = 'id') => {
+      const result = await query(
+        `UPDATE ${table} SET user_id = $1 WHERE user_id = $2
+         AND ${idCol} NOT IN (SELECT ${idCol} FROM ${table} WHERE user_id = $1)`,
+        [toUserId, fromUserId]
+      );
+      return result.length || 0;
+    };
+
+    // Messages
+    counts.messages = await migrateTable('user_messages');
+    counts.outgoing_messages = await migrateTable('user_outgoing_messages');
+    counts.spam_messages = await migrateTable('user_spam_messages');
+    counts.scheduled_messages = await migrateTable('user_scheduled_messages');
+
+    // Contacts & groups
+    counts.contacts = await migrateTable('user_contacts');
+    counts.groups = await migrateTable('user_groups');
+
+    // Calls
+    counts.calls = await migrateTable('user_call_history');
+    counts.call_requests = await migrateTable('user_call_requests');
+
+    // Files & photos
+    counts.file_transfers = await migrateTable('user_file_transfers');
+    counts.photos = await migrateTable('user_photos');
+    counts.voicemails = await migrateTable('user_voicemails');
+
+    // Notifications
+    counts.notifications = await migrateTable('user_notifications');
+
+    // Subscriptions (UNIQUE on user_id - only migrate if target doesn't have one)
+    const subResult = await query(
+      `UPDATE user_subscriptions SET user_id = $1 WHERE user_id = $2
+       AND NOT EXISTS (SELECT 1 FROM user_subscriptions WHERE user_id = $1)`,
       [toUserId, fromUserId]
     );
-    counts.messages = msgResult.length || 0;
+    counts.subscriptions = subResult.length || 0;
 
-    // Migrate contacts
-    const contactResult = await query(
-      `UPDATE user_contacts SET user_id = $1 WHERE user_id = $2`,
+    // Sync groups
+    await query(
+      `UPDATE sync_groups SET owner_uid = $1 WHERE owner_uid = $2
+       AND id NOT IN (SELECT id FROM sync_groups WHERE owner_uid = $1)`,
       [toUserId, fromUserId]
     );
-    counts.contacts = contactResult.length || 0;
 
-    // Migrate call history
-    const callResult = await query(
-      `UPDATE user_call_history SET user_id = $1 WHERE user_id = $2`,
+    // Phone-UID mapping
+    await query(
+      `UPDATE phone_uid_mapping SET uid = $1 WHERE uid = $2`,
       [toUserId, fromUserId]
     );
-    counts.calls = callResult.length || 0;
 
-    // Delete old user's devices instead of migrating (they're stale)
-    // The new user already has their own device from authentication
+    // Delete old user's devices (stale from uninstalled app)
     const deviceResult = await query(
       `DELETE FROM user_devices WHERE user_id = $1 RETURNING id`,
       [fromUserId]
     );
     counts.devicesDeleted = deviceResult.length || 0;
 
-    // Optionally delete the old user record
+    // Clean up any remaining old user data, then delete the old user (CASCADE handles FKs)
     await query(`DELETE FROM users WHERE uid = $1`, [fromUserId]);
 
     console.log(`[Auth] Migrated data from ${fromUserId} to ${toUserId}:`, counts);

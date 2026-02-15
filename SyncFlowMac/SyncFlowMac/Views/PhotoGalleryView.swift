@@ -12,6 +12,8 @@ struct PhotoGalleryView: View {
     @Environment(\.dismiss) var dismiss
     @State private var selectedPhoto: SyncedPhoto?
     @State private var showingPreview = false
+    @State private var photoToDelete: SyncedPhoto?
+    @State private var showDeleteConfirmation = false
 
     private let columns = [
         GridItem(.adaptive(minimum: 120, maximum: 150), spacing: 8)
@@ -81,6 +83,13 @@ struct PhotoGalleryView: View {
 
                                     Divider()
 
+                                    Button("Delete", role: .destructive) {
+                                        photoToDelete = photo
+                                        showDeleteConfirmation = true
+                                    }
+
+                                    Divider()
+
                                     Text("Taken: \(photo.formattedDate)")
                                     Text("Size: \(photo.formattedSize)")
                                 }
@@ -95,6 +104,16 @@ struct PhotoGalleryView: View {
             if let photo = selectedPhoto {
                 PhotoPreviewView(photo: photo, photoService: photoService)
             }
+        }
+        .alert("Delete Photo?", isPresented: $showDeleteConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Delete", role: .destructive) {
+                if let photo = photoToDelete {
+                    Task { await photoService.deletePhoto(photo) }
+                }
+            }
+        } message: {
+            Text("This will permanently delete this photo from cloud storage and free up your storage quota.")
         }
     }
 }
@@ -138,6 +157,7 @@ struct PhotoPreviewView: View {
     let photo: SyncedPhoto
     let photoService: PhotoSyncService
     @Environment(\.dismiss) var dismiss
+    @State private var showDeleteConfirmation = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -158,6 +178,10 @@ struct PhotoPreviewView: View {
                     dismiss()
                 }
                 .disabled(!photo.isDownloaded)
+
+                Button("Delete", role: .destructive) {
+                    showDeleteConfirmation = true
+                }
 
                 Button("Close") {
                     dismiss()
@@ -194,6 +218,17 @@ struct PhotoPreviewView: View {
             .padding()
         }
         .frame(width: 600, height: 500)
+        .alert("Delete Photo?", isPresented: $showDeleteConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Delete", role: .destructive) {
+                Task {
+                    await photoService.deletePhoto(photo)
+                    dismiss()
+                }
+            }
+        } message: {
+            Text("This will permanently delete this photo from cloud storage.")
+        }
     }
 }
 

@@ -1,9 +1,8 @@
 /**
- * VPS Sync Service - Replacement for Firebase-based DesktopSyncService
- *
- * This service handles syncing messages, contacts, and calls to the VPS server
- * instead of Firebase. It provides similar functionality to DesktopSyncService
- * but uses REST API and WebSocket instead of Firebase Realtime Database.
+ * VPS Sync Service - Central hub for syncing Android data (messages, contacts, calls) to the
+ * VPS server via REST API and receiving real-time events via WebSocket. Handles MMS attachment
+ * extraction and upload to Cloudflare R2, E2EE encryption of message bodies, and dispatches
+ * incoming commands (outgoing messages, call requests) from paired desktop/web clients.
  */
 
 package com.phoneintegration.app.vps
@@ -12,6 +11,7 @@ import android.content.Context
 import android.net.Uri
 import android.provider.Telephony
 import android.util.Log
+import com.phoneintegration.app.BuildConfig
 import com.phoneintegration.app.SmsMessage
 import com.phoneintegration.app.e2ee.SignalProtocolManager
 import com.phoneintegration.app.data.PreferencesManager
@@ -48,6 +48,21 @@ class VPSSyncService(context: Context) {
     private val e2eeManager = SignalProtocolManager(appContext)
     private val preferencesManager = PreferencesManager(appContext)
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    // Local read-thread timestamps from SmsViewModel (for non-default-app mode)
+    private val localReadThreads: Map<Long, Long> by lazy {
+        val prefs = appContext.getSharedPreferences("read_threads", android.content.Context.MODE_PRIVATE)
+        val result = mutableMapOf<Long, Long>()
+        for ((key, value) in prefs.all) {
+            val threadId = key.toLongOrNull() ?: continue
+            val ts = value as? Long ?: continue
+            result[threadId] = ts
+        }
+        result
+    }
+
+    // Cache address → threadId lookups to avoid repeated content provider queries
+    private val addressThreadIdCache = mutableMapOf<String, Long?>()
 
     // HTTP client for R2 uploads
     private val httpClient = OkHttpClient.Builder()
@@ -93,11 +108,11 @@ class VPSSyncService(context: Context) {
         // Set up WebSocket listener for real-time events
         vpsClient.setWebSocketListener(object : VPSWebSocketListener {
             override fun onConnected() {
-                Log.d(TAG, "WebSocket connected")
+                if (BuildConfig.DEBUG) Log.d(TAG, "WebSocket connected")
             }
 
             override fun onDisconnected() {
-                Log.d(TAG, "WebSocket disconnected")
+                if (BuildConfig.DEBUG) Log.d(TAG, "WebSocket disconnected")
             }
 
             override fun onError(error: String) {
@@ -105,37 +120,36 @@ class VPSSyncService(context: Context) {
             }
 
             override fun onMessageAdded(message: VPSMessage) {
-                // Handle new message from other device
-                Log.d(TAG, "Message added: ${message.id}")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Message added: ${message.id}")
             }
 
             override fun onMessageUpdated(message: VPSMessage) {
-                Log.d(TAG, "Message updated: ${message.id}")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Message updated: ${message.id}")
             }
 
             override fun onMessageDeleted(messageId: String) {
-                Log.d(TAG, "Message deleted: $messageId")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Message deleted: $messageId")
             }
 
             override fun onContactAdded(contact: VPSContact) {
-                Log.d(TAG, "Contact added: ${contact.id}")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Contact added: ${contact.id}")
             }
 
             override fun onContactUpdated(contact: VPSContact) {
-                Log.d(TAG, "Contact updated: ${contact.id}")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Contact updated: ${contact.id}")
             }
 
             override fun onContactDeleted(contactId: String) {
-                Log.d(TAG, "Contact deleted: $contactId")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Contact deleted: $contactId")
             }
 
             override fun onCallAdded(call: VPSCallHistoryEntry) {
-                Log.d(TAG, "Call added: ${call.id}")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Call added: ${call.id}")
             }
 
             override fun onOutgoingMessage(message: VPSOutgoingMessage) {
                 // Outgoing message from desktop - need to send via Android
-                Log.d(TAG, "Outgoing message received: ${message.id}")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Outgoing message received: ${message.id}")
                 scope.launch {
                     _outgoingMessages.emit(message)
                 }
@@ -143,7 +157,7 @@ class VPSSyncService(context: Context) {
 
             override fun onCallRequest(request: VPSCallRequest) {
                 // Call request from desktop
-                Log.d(TAG, "Call request received: ${request.id}")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Call request received: ${request.id}")
                 scope.launch {
                     _callRequests.emit(request)
                 }
@@ -151,7 +165,7 @@ class VPSSyncService(context: Context) {
 
             override fun onCallCommand(command: VPSCallCommand) {
                 // Call command from desktop (answer/reject/end)
-                Log.d(TAG, "Call command received: ${command.command}")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Call command received: ${command.command}")
                 scope.launch {
                     _callCommands.emit(command)
                 }
@@ -168,7 +182,7 @@ class VPSSyncService(context: Context) {
                     }
                     vpsClient.logout()
                 } else {
-                    Log.d(TAG, "Another device was removed: $deviceId")
+                    if (BuildConfig.DEBUG) Log.d(TAG, "Another device was removed: $deviceId")
                     // Invalidate the in-memory cache so re-entering DesktopIntegrationScreen
                     // fetches fresh data from server instead of serving stale cached list
                     com.phoneintegration.app.ui.desktop.PairedDevicesCache.clear()
@@ -181,7 +195,7 @@ class VPSSyncService(context: Context) {
             override fun onDeviceAdded(deviceId: String, deviceName: String?, deviceType: String?) {
                 val currentDeviceId = vpsClient.deviceId
                 if (deviceId != currentDeviceId) {
-                    Log.d(TAG, "New device added: $deviceId (name=$deviceName, type=$deviceType)")
+                    if (BuildConfig.DEBUG) Log.d(TAG, "New device added: $deviceId (name=$deviceName, type=$deviceType)")
                     scope.launch {
                         _deviceAdded.emit(deviceId)
                     }
@@ -189,7 +203,7 @@ class VPSSyncService(context: Context) {
             }
 
             override fun onE2eeKeyRequest(requestingDeviceId: String, requestingPublicKey: String?) {
-                Log.d(TAG, "E2EE key request from device $requestingDeviceId (hasPublicKey=${requestingPublicKey != null})")
+                if (BuildConfig.DEBUG) Log.d(TAG, "E2EE key request from device $requestingDeviceId (hasPublicKey=${requestingPublicKey != null})")
                 if (requestingPublicKey != null) {
                     scope.launch(Dispatchers.IO) {
                         try {
@@ -207,6 +221,17 @@ class VPSSyncService(context: Context) {
                     Log.w(TAG, "E2EE key request without public key from $requestingDeviceId - cannot push keys")
                 }
             }
+
+            override fun onSyncMessagesRequested() {
+                Log.i(TAG, "Message re-sync requested by remote device (encryption repair)")
+                scope.launch(Dispatchers.IO) {
+                    try {
+                        resyncAllMessages()
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to re-sync messages for encryption repair: ${e.message}", e)
+                    }
+                }
+            }
         })
     }
 
@@ -215,7 +240,7 @@ class VPSSyncService(context: Context) {
     suspend fun initialize(): Boolean {
         return try {
             val success = vpsClient.initialize()
-            if (success) {
+            if (success && BuildConfig.DEBUG) {
                 Log.d(TAG, "VPS initialized successfully")
             }
             success
@@ -271,7 +296,7 @@ class VPSSyncService(context: Context) {
             val messages = listOf(messageMap)
 
             val response = vpsClient.syncMessages(messages)
-            Log.d(TAG, "Synced message: ${message.id}, response: synced=${response.synced}")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Synced message: ${message.id}, response: synced=${response.synced}")
 
             _syncState.value = SyncState.Success
         } catch (e: Exception) {
@@ -290,13 +315,83 @@ class VPSSyncService(context: Context) {
             messages.chunked(50).forEach { batch ->
                 val messageMaps = batch.map { buildMessageMap(it, skipAttachments = false) }
                 val response = vpsClient.syncMessages(messageMaps)
-                Log.d(TAG, "Synced batch: synced=${response.synced}, skipped=${response.skipped}")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Synced batch: synced=${response.synced}, skipped=${response.skipped}")
             }
 
             _syncState.value = SyncState.Success
         } catch (e: Exception) {
             Log.e(TAG, "Failed to sync messages: ${e.message}")
             _syncState.value = SyncState.Error(e.message ?: "Unknown error")
+            throw e
+        }
+    }
+
+    /**
+     * Batch sync with skip-attachments support and parallel MMS upload.
+     * Used by bulk history sync to avoid one-at-a-time API calls.
+     */
+    suspend fun syncMessagesBatch(messages: List<SmsMessage>, skipAttachments: Boolean) {
+        try {
+            // Build message maps with limited parallelism for MMS uploads
+            val messageMaps = if (skipAttachments) {
+                messages.map { buildMessageMap(it, skipAttachments = true) }
+            } else {
+                // Parallelize MMS attachment uploads (up to 4 concurrent)
+                val semaphore = kotlinx.coroutines.sync.Semaphore(4)
+                coroutineScope {
+                    messages.map { msg ->
+                        async(Dispatchers.IO) {
+                            semaphore.acquire()
+                            try {
+                                buildMessageMap(msg, skipAttachments = false)
+                            } finally {
+                                semaphore.release()
+                            }
+                        }
+                    }.awaitAll()
+                }
+            }
+
+            val response = vpsClient.syncMessages(messageMaps)
+            Log.d(TAG, "Synced batch of ${messages.size}: synced=${response.synced}, skipped=${response.skipped}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to sync batch of ${messages.size}: ${e.message}")
+            throw e
+        }
+    }
+
+    /**
+     * Re-sync messages from the device content provider, limited to the number
+     * already stored on the VPS. Used by the "Repair Encryption" flow to
+     * re-encrypt existing messages with current keys.
+     */
+    suspend fun resyncAllMessages() {
+        Log.i(TAG, "Starting message re-sync for encryption repair")
+
+        // Only re-sync as many messages as currently exist on the server
+        val vpsCount = vpsClient.getMessageCount()
+        if (vpsCount == 0) {
+            Log.i(TAG, "No messages on VPS, nothing to re-sync")
+            return
+        }
+        Log.i(TAG, "VPS has $vpsCount messages, reading that many from content provider")
+
+        val smsRepository = com.phoneintegration.app.SmsRepository(appContext)
+        val messages = smsRepository.getAllMessages(limit = vpsCount)
+        Log.i(TAG, "Read ${messages.size} messages from content provider for re-sync")
+
+        if (messages.isEmpty()) return
+
+        _syncState.value = SyncState.Syncing
+        try {
+            messages.chunked(100).forEach { batch ->
+                syncMessagesBatch(batch, skipAttachments = false)
+            }
+            _syncState.value = SyncState.Success
+            Log.i(TAG, "Message re-sync completed: ${messages.size} messages")
+        } catch (e: Exception) {
+            Log.e(TAG, "Message re-sync failed: ${e.message}", e)
+            _syncState.value = SyncState.Error(e.message ?: "Re-sync failed")
             throw e
         }
     }
@@ -309,11 +404,15 @@ class VPSSyncService(context: Context) {
         var encryptedNonce: String? = null
         var keyMap: Map<String, String>? = null
 
-        // Encrypt if E2EE is enabled and message has content
+        // E2EE encryption: generate per-message data key, encrypt body with AES-GCM,
+        // then wrap the data key with the sync group's ECDH public key so all paired devices can decrypt.
         if (isE2eeEnabled && message.body.isNotEmpty()) {
             try {
                 // Ensure ECDH keys are initialized (idempotent - returns immediately if already set up)
                 e2eeManager.initializeKeys()
+
+                // Check if key rotation is due (> 30 days)
+                e2eeManager.checkAndRotateKeys()
 
                 // Get sync group public key first - if not available, skip encryption entirely
                 val publicKeyX963 = e2eeManager.getSyncGroupPublicKeyX963()
@@ -331,34 +430,37 @@ class VPSSyncService(context: Context) {
                         if (encryptedDataKey != null) {
                             encryptedBody = android.util.Base64.encodeToString(ciphertext, android.util.Base64.NO_WRAP)
                             encryptedNonce = android.util.Base64.encodeToString(nonce, android.util.Base64.NO_WRAP)
-                            keyMap = mapOf("syncGroup" to encryptedDataKey)
+                            keyMap = mapOf(
+                                "syncGroup" to encryptedDataKey,
+                                "keyVersion" to e2eeManager.getCurrentKeyVersion().toString()
+                            )
                             // Clear plaintext body only when fully encrypted with keyMap
                             body = ""
-                            Log.d(TAG, "Message encrypted with E2EE")
+                            if (BuildConfig.DEBUG) Log.d(TAG, "Message encrypted with E2EE")
                         } else {
                             Log.w(TAG, "E2EE: encryptDataKeyForDevice failed, sending unencrypted")
                         }
                     }
                 } else {
-                    Log.w(TAG, "E2EE: sync group keys not available, sending unencrypted")
+                    Log.w(TAG, "E2EE keys unavailable - message will be sent unencrypted")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "E2EE encryption failed, sending unencrypted", e)
             }
         }
 
-        // Handle MMS attachments - upload to R2
+        // Upload MMS media parts (images/video/audio) to R2 via presigned URLs.
         // Only send mmsParts when we have actual data to prevent overwriting existing
-        // DB entries via ON CONFLICT (COALESCE on server preserves existing if null)
+        // DB entries via ON CONFLICT (COALESCE on server preserves existing if null).
         var mmsParts: List<Map<String, Any>>? = null
         if (message.isMms && !skipAttachments) {
             try {
                 val extracted = extractAndUploadMmsAttachments(message.id)
                 if (extracted.isNotEmpty()) {
                     mmsParts = extracted
-                    Log.d(TAG, "MMS ${message.id}: ${extracted.size} attachments uploaded to R2")
+                    if (BuildConfig.DEBUG) Log.d(TAG, "MMS ${message.id}: ${extracted.size} attachments uploaded to R2")
                 } else {
-                    Log.d(TAG, "MMS ${message.id}: no media parts extracted, preserving existing DB data")
+                    if (BuildConfig.DEBUG) Log.d(TAG, "MMS ${message.id}: no media parts extracted, preserving existing DB data")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to upload MMS attachments for ${message.id}", e)
@@ -370,14 +472,35 @@ class VPSSyncService(context: Context) {
         // (SMS and MMS use separate ContentProviders with independent ID spaces)
         val messageId = if (message.isMms) "mms_${message.id}" else message.id.toString()
 
+        // Cross-reference local read status: when not the default SMS app,
+        // the content provider may still show messages as unread even though the
+        // user has already viewed them in SyncFlow. Check our local overrides.
+        var isRead = message.isRead
+        if (!isRead && localReadThreads.isNotEmpty()) {
+            val threadId = addressThreadIdCache.getOrPut(message.address) {
+                try {
+                    Telephony.Threads.getOrCreateThreadId(appContext, setOf(message.address))
+                } catch (e: Exception) {
+                    null
+                }
+            }
+            if (threadId != null) {
+                val readAt = localReadThreads[threadId]
+                if (readAt != null && readAt >= message.date) {
+                    isRead = true
+                }
+            }
+        }
+
         return mapOf(
             "id" to messageId,
             "threadId" to 0, // Not directly available on SmsMessage, will be resolved on server
             "address" to message.address,
+            "contactName" to message.contactName,
             "body" to body,
             "date" to message.date,
             "type" to message.type,
-            "read" to message.isRead,
+            "read" to isRead,
             "isMms" to message.isMms,
             "mmsParts" to mmsParts,
             "encrypted" to (encryptedBody != null),
@@ -389,8 +512,9 @@ class VPSSyncService(context: Context) {
     }
 
     /**
-     * Extract non-text MMS parts (images, audio, video) and upload them to R2.
-     * Returns a list of attachment metadata with R2 keys for storage in mmsParts.
+     * Extract non-text MMS parts (images, audio, video) from the MMS content provider and upload
+     * them to Cloudflare R2 via presigned URLs. Uses deterministic filenames so re-syncs overwrite
+     * rather than duplicate. Returns a list of attachment metadata with R2 keys for mmsParts.
      */
     private suspend fun extractAndUploadMmsAttachments(mmsId: Long): List<Map<String, Any>> {
         val attachments = mutableListOf<Map<String, Any>>()
@@ -415,7 +539,7 @@ class VPSSyncService(context: Context) {
             return emptyList()
         }
 
-        Log.d(TAG, "MMS $mmsId: found ${cursor.count} parts")
+        if (BuildConfig.DEBUG) Log.d(TAG, "MMS $mmsId: found ${cursor.count} parts")
 
         cursor.use {
             while (it.moveToNext()) {
@@ -423,9 +547,11 @@ class VPSSyncService(context: Context) {
                 val contentType = it.getString(1) ?: continue
                 val name = it.getString(2)
 
-                // Skip text and SMIL parts - only process media attachments
-                if (contentType.startsWith("text/") || contentType == "application/smil") {
-                    Log.d(TAG, "MMS $mmsId part $partId: skipping $contentType")
+                // Skip text, SMIL, and RCS bot message parts - only process media attachments
+                if (contentType.startsWith("text/") ||
+                    contentType == "application/smil" ||
+                    contentType.startsWith("application/vnd.gsma.")) {
+                    if (BuildConfig.DEBUG) Log.d(TAG, "MMS $mmsId part $partId: skipping $contentType")
                     continue
                 }
 
@@ -449,7 +575,7 @@ class VPSSyncService(context: Context) {
                     continue
                 }
 
-                Log.d(TAG, "MMS $mmsId part $partId: ${bytes.size} bytes, type=$contentType, name=$name")
+                if (BuildConfig.DEBUG) Log.d(TAG, "MMS $mmsId part $partId: ${bytes.size} bytes, type=$contentType, name=$name")
 
                 // Upload to R2
                 try {
@@ -484,19 +610,20 @@ class VPSSyncService(context: Context) {
                         "contentType" to contentType,
                         "fileSize" to bytes.size
                     ))
-                    Log.d(TAG, "MMS attachment uploaded: $fileName (${bytes.size} bytes)")
+                    if (BuildConfig.DEBUG) Log.d(TAG, "MMS attachment uploaded: $fileName (${bytes.size} bytes)")
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to upload MMS attachment part $partId", e)
                 }
             }
         }
 
-        Log.d(TAG, "MMS $mmsId: extracted ${attachments.size} attachments")
+        if (BuildConfig.DEBUG) Log.d(TAG, "MMS $mmsId: extracted ${attachments.size} attachments")
         return attachments
     }
 
     /**
-     * Upload raw bytes directly to R2 via presigned URL.
+     * Upload raw bytes directly to R2 via presigned PUT URL. Uses a separate OkHttp client
+     * with generous timeouts since MMS media can be several MB over mobile data.
      */
     private fun uploadToR2(uploadUrl: String, data: ByteArray, contentType: String): Boolean {
         return try {
@@ -573,7 +700,7 @@ class VPSSyncService(context: Context) {
             // Sync in batches of 100
             contacts.chunked(100).forEach { batch ->
                 val response = vpsClient.syncContacts(batch)
-                Log.d(TAG, "Synced contacts batch: synced=${response.synced}")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Synced contacts batch: synced=${response.synced}")
             }
 
             _syncState.value = SyncState.Success
@@ -603,7 +730,7 @@ class VPSSyncService(context: Context) {
             // Sync in batches of 100
             calls.chunked(100).forEach { batch ->
                 val response = vpsClient.syncCallHistory(batch)
-                Log.d(TAG, "Synced call history batch: synced=${response.synced}")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Synced call history batch: synced=${response.synced}")
             }
 
             _syncState.value = SyncState.Success
@@ -681,7 +808,7 @@ class VPSSyncService(context: Context) {
                 timestamp = System.currentTimeMillis()
             )
             vpsClient.syncActiveCall(activeCall)
-            Log.d(TAG, "Active call synced: $callId - $state")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Active call synced: $callId - $state")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to sync active call: ${e.message}")
         }
@@ -690,7 +817,7 @@ class VPSSyncService(context: Context) {
     suspend fun updateActiveCallState(callId: String, state: String) {
         try {
             vpsClient.updateActiveCallState(callId, state)
-            Log.d(TAG, "Active call state updated: $callId - $state")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Active call state updated: $callId - $state")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to update active call state: ${e.message}")
         }
@@ -699,7 +826,7 @@ class VPSSyncService(context: Context) {
     suspend fun clearActiveCall(callId: String) {
         try {
             vpsClient.clearActiveCall(callId)
-            Log.d(TAG, "Active call cleared: $callId")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Active call cleared: $callId")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to clear active call: ${e.message}")
         }
@@ -737,7 +864,7 @@ class VPSSyncService(context: Context) {
     suspend fun removeDevice(deviceId: String) {
         try {
             vpsClient.removeDevice(deviceId)
-            Log.d(TAG, "Device removed successfully: $deviceId")
+            if (BuildConfig.DEBUG) Log.d(TAG, "Device removed successfully: $deviceId")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to remove device: ${e.message}", e)
             throw e  // Propagate so caller can show error to user

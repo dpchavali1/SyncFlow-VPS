@@ -116,12 +116,14 @@ class IncrementalSyncManager {
       const syncState = await this.loadSyncState(userId, dataType)
       const lastSyncTimestamp = syncState?.lastSyncTimestamp || 0
 
-      console.log(
-        `[IncrementalSync] Starting ${dataType} sync for user ${userId}`,
-        lastSyncTimestamp > 0
-          ? `(resuming from ${new Date(lastSyncTimestamp).toISOString()})`
-          : '(initial sync)'
-      )
+      if (process.env.NODE_ENV === 'development') {
+        console.log(
+          `[IncrementalSync] Starting ${dataType} sync for user ${userId}`,
+          lastSyncTimestamp > 0
+            ? `(resuming from ${new Date(lastSyncTimestamp).toISOString()})`
+            : '(initial sync)'
+        )
+      }
 
       // Build Firebase query
       // CRITICAL: Always limit initial sync to prevent downloading entire message history
@@ -197,9 +199,11 @@ class IncrementalSyncManager {
           onInitialSyncComplete(initialSyncCount)
         }
 
-        console.log(
-          `[IncrementalSync] Initial sync complete for ${userId}:${dataType} (${initialSyncCount} items)`
-        )
+        if (process.env.NODE_ENV === 'development') {
+          console.log(
+            `[IncrementalSync] Initial sync complete for ${userId}:${dataType} (${initialSyncCount} items)`
+          )
+        }
       }, 2000)
 
       // Create cleanup function
@@ -207,7 +211,6 @@ class IncrementalSyncManager {
         off(syncQuery, 'child_added', addedListener)
         off(syncQuery, 'child_changed', changedListener)
         off(syncQuery, 'child_removed', removedListener)
-        console.log(`[IncrementalSync] Stopped sync for ${userId}:${dataType}`)
       }
 
       // Track active listener
@@ -263,7 +266,9 @@ class IncrementalSyncManager {
       this.activeListeners.delete(key)
     }
 
-    console.log(`[IncrementalSync] Stopped all syncs for user ${userId}`)
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`[IncrementalSync] Stopped all syncs for user ${userId}`)
+    }
   }
 
   /**
@@ -283,7 +288,6 @@ class IncrementalSyncManager {
       }
 
       const cached = JSON.parse(cachedJson)
-      console.log(`[IncrementalSync] Loaded ${cached.length} cached ${dataType} for user ${userId}`)
       return cached
     } catch (error) {
       console.error(`[IncrementalSync] Error loading cache:`, error)
@@ -355,9 +359,11 @@ class IncrementalSyncManager {
     }
 
     try {
-      console.log(
-        `[IncrementalSync] Loading ${pageSize} older ${dataType} before ${new Date(oldestTimestamp).toISOString()}`
-      )
+      if (process.env.NODE_ENV === 'development') {
+        console.log(
+          `[IncrementalSync] Loading ${pageSize} older ${dataType} before ${new Date(oldestTimestamp).toISOString()}`
+        )
+      }
 
       const dataRef = this.getDataRef(userId, dataType)
 
@@ -375,7 +381,6 @@ class IncrementalSyncManager {
       const snapshot = await get(olderQuery)
 
       if (!snapshot.exists()) {
-        console.log(`[IncrementalSync] No older ${dataType} found`)
         return []
       }
 
@@ -389,7 +394,6 @@ class IncrementalSyncManager {
         await this.cacheItem(userId, dataType, item)
       }
 
-      console.log(`[IncrementalSync] Loaded ${items.length} older ${dataType}`)
       return items
     } catch (error) {
       console.error(`[IncrementalSync] Error loading older ${dataType}:`, error)
@@ -454,7 +458,9 @@ class IncrementalSyncManager {
       await secureStorage.removeItem(stateKey)
     }
 
-    console.log(`[IncrementalSync] Cleared all cache for user ${userId}`)
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`[IncrementalSync] Cleared all cache for user ${userId}`)
+    }
   }
 
   // ===== PRIVATE METHODS =====
@@ -597,7 +603,9 @@ export async function initIncrementalSync(
       onMessagesUpdated(updated)
     },
     onInitialSyncComplete: (count) => {
-      console.log(`[IncrementalSync] Initial sync complete: ${count} new messages`)
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`[IncrementalSync] Initial sync complete: ${count} new messages`)
+      }
     },
     onError: (error) => {
       console.error('[IncrementalSync] Sync error:', error)

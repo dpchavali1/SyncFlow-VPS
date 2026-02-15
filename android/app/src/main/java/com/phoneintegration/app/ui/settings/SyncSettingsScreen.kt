@@ -9,6 +9,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -16,6 +17,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.phoneintegration.app.desktop.DesktopSyncService
+import com.phoneintegration.app.utils.NetworkUtils
 import kotlinx.coroutines.launch
 import java.util.Locale
 
@@ -28,15 +31,28 @@ fun SyncSettingsScreen(
     val syncState by SyncManager.syncState.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
 
+    val hasPairedDevices = remember { DesktopSyncService.hasPairedDevices(context) }
+    val isOnWifi = remember { NetworkUtils.isWifiConnected(context) }
+    val canSync = hasPairedDevices && isOnWifi
+
     var selectedDays by remember { mutableStateOf(30) }
     var showEstimateDialog by remember { mutableStateOf(false) }
     var estimateLoading by remember { mutableStateOf(false) }
     var estimateError by remember { mutableStateOf<String?>(null) }
     var estimateResult by remember { mutableStateOf<SyncManager.SyncEstimate?>(null) }
 
-    // BANDWIDTH OPTIMIZATION: Free users limited to 30 days to stay within Firebase free tier
     // Pro users get extended sync options
-    val isProUser = false // TODO: Implement pro subscription check
+    val preferencesManager = remember { com.phoneintegration.app.data.PreferencesManager(context) }
+    var isProUser by remember { mutableStateOf(preferencesManager.isPaidUser()) }
+
+    // Refresh plan from server so pro status is up-to-date
+    LaunchedEffect(Unit) {
+        try {
+            val usageTracker = com.phoneintegration.app.usage.UsageTracker(context)
+            usageTracker.getUsageStats("")
+            isProUser = preferencesManager.isPaidUser()
+        } catch (_: Exception) { }
+    }
 
     val dayOptions = listOf(
         30 to "Last 30 days" to false, // Always available
@@ -184,6 +200,62 @@ fun SyncSettingsScreen(
                 }
             }
 
+            // Pairing required banner
+            if (!hasPairedDevices) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Icon(
+                            Icons.Filled.Warning,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Text(
+                            text = "Pair a Mac or Web client first to sync your message history. Open SyncFlow on your Mac or visit sfweb.app to pair.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+            }
+
+            // WiFi required banner
+            if (hasPairedDevices && !isOnWifi) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.Top
+                    ) {
+                        Icon(
+                            Icons.Filled.Warning,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                            tint = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Text(
+                            text = "Connect to WiFi to sync message history. Bulk sync uploads MMS attachments and requires a WiFi connection.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+            }
+
             // Description
             Text(
                 "By default, SyncFlow syncs the last 30 days of messages. " +
@@ -320,7 +392,7 @@ fun SyncSettingsScreen(
             Button(
                 onClick = { requestEstimate() },
                 modifier = Modifier.fillMaxWidth(),
-                enabled = !syncState.isSyncing
+                enabled = !syncState.isSyncing && canSync
             ) {
                 if (syncState.isSyncing) {
                     CircularProgressIndicator(

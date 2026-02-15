@@ -1,9 +1,9 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import Link from 'next/link'
-import { getFunctions, httpsCallable } from 'firebase/functions'
-import { app } from '@/lib/firebase'
+
+const VPS_BASE_URL = process.env.NEXT_PUBLIC_VPS_URL || 'https://api.sfweb.app';
 
 export default function SupportPage() {
   const [formData, setFormData] = useState({
@@ -14,6 +14,11 @@ export default function SupportPage() {
   })
   const [status, setStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle')
   const [errorMessage, setErrorMessage] = useState('')
+  const [isPaired, setIsPaired] = useState(false)
+
+  useEffect(() => {
+    setIsPaired(!!localStorage.getItem('syncflow_user_id'))
+  }, [])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -21,15 +26,22 @@ export default function SupportPage() {
     setErrorMessage('')
 
     try {
-      const functions = getFunctions(app)
-      const sendSupportEmail = httpsCallable(functions, 'sendSupportEmail')
-
-      await sendSupportEmail({
-        name: formData.name,
-        email: formData.email,
-        subject: formData.subject,
-        message: formData.message,
+      const response = await fetch(`${VPS_BASE_URL}/api/support/contact`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: formData.name,
+          email: formData.email,
+          subject: formData.subject,
+          message: formData.message,
+        }),
       })
+
+      const data = await response.json()
+
+      if (!response.ok || !data.success) {
+        throw new Error(data.error || 'Failed to send message')
+      }
 
       setStatus('success')
       setFormData({ name: '', email: '', subject: '', message: '' })
@@ -38,7 +50,7 @@ export default function SupportPage() {
       setTimeout(() => setStatus('idle'), 5000)
     } catch (error: any) {
       setStatus('error')
-      setErrorMessage(error.message || 'Failed to send message. Please try again.')
+      setErrorMessage(error.message || 'Failed to send message. Please try emailing syncflow.contact@gmail.com directly.')
     }
   }
 
@@ -58,6 +70,9 @@ export default function SupportPage() {
             SyncFlow
           </Link>
           <nav className="flex gap-6">
+            {isPaired && (
+              <Link href="/messages" className="text-blue-600 dark:text-blue-400 hover:text-blue-700 font-medium">Messages</Link>
+            )}
             <Link href="/download" className="text-slate-600 dark:text-slate-300 hover:text-blue-600">Download</Link>
             <Link href="/privacy" className="text-slate-600 dark:text-slate-300 hover:text-blue-600">Privacy</Link>
             <Link href="/terms" className="text-slate-600 dark:text-slate-300 hover:text-blue-600">Terms</Link>

@@ -1,13 +1,40 @@
 import { Router, Request, Response } from 'express';
 import { query, queryOne } from '../services/database';
 import { optionalAuth } from '../middleware/auth';
+import { sendSupportContactEmail } from '../services/email';
 
 const router = Router();
 
+// POST /contact - Handle support contact form submission (email)
+router.post('/contact', handleContactForm);
 // POST /chat - Handle support chat message (web client)
 router.post('/chat', optionalAuth, handleChat);
 // POST / - Handle support chat message (Mac client hits /api/support-chat)
 router.post('/', optionalAuth, handleChat);
+
+async function handleContactForm(req: Request, res: Response) {
+  try {
+    const { name, email, subject, message } = req.body;
+
+    if (!name || !email || !subject || !message) {
+      res.status(400).json({ error: 'All fields are required' });
+      return;
+    }
+
+    if (typeof email !== 'string' || !email.includes('@')) {
+      res.status(400).json({ error: 'Invalid email address' });
+      return;
+    }
+
+    // Send notification email to admin via Resend
+    await sendSupportContactEmail(name, email, subject, message);
+
+    res.json({ success: true, message: 'Support request received. We will respond within 24-48 hours.' });
+  } catch (error) {
+    console.error('[Support] Contact form error:', error);
+    res.status(500).json({ error: 'Failed to submit support request. Please try emailing syncflow.contact@gmail.com directly.' });
+  }
+}
 
 async function handleChat(req: Request, res: Response) {
   try {
@@ -19,8 +46,8 @@ async function handleChat(req: Request, res: Response) {
     }
 
     const msg = message.toLowerCase().trim();
-    // Prefer JWT-authenticated userId, fallback to body param
-    const userId = req.userId || syncGroupUserId || null;
+    // Only use JWT-authenticated userId — NEVER trust userId from request body
+    const userId = req.userId || null;
     const queryType = detectUserQueryType(msg);
 
     let response: string;
@@ -111,6 +138,9 @@ async function handleChat(req: Request, res: Response) {
         break;
       case 'delivery_status':
         response = handleDeliveryStatusQuery();
+        break;
+      case 'encryption':
+        response = await handleEncryptionQuery(userId);
         break;
       case 'photo_sync':
         response = handlePhotoSyncQuery();
@@ -228,6 +258,14 @@ function detectUserQueryType(msg: string): string {
   if (msg.includes('delivery') || msg.includes('delivered') || msg.includes('checkmark') || msg.includes('check mark')) return 'delivery_status';
   if (msg.includes('sent') && (msg.includes('status') || msg.includes('confirm'))) return 'delivery_status';
 
+  // Encryption / E2EE / decryption / repair encryption / safety number / key backup / rotation
+  if (msg.includes('encrypt') || msg.includes('decrypt') || msg.includes('e2ee') || msg.includes('end-to-end') || msg.includes('end to end')) return 'encryption';
+  if (msg.includes('repair') && (msg.includes('key') || msg.includes('crypto') || msg.includes('encrypt'))) return 'encryption';
+  if (msg.includes('key') && (msg.includes('sync') || msg.includes('mismatch') || msg.includes('fail') || msg.includes('backup') || msg.includes('restore') || msg.includes('rotation') || msg.includes('rotate') || msg.includes('version'))) return 'encryption';
+  if (msg.includes('can\'t decrypt') || msg.includes('cannot decrypt') || msg.includes('not decrypting')) return 'encryption';
+  if (msg.includes('safety number') || msg.includes('security code') || msg.includes('verification code')) return 'encryption';
+  if (msg.includes('signing key') || msg.includes('device verification') || msg.includes('key backup') || msg.includes('key recovery')) return 'encryption';
+
   // Photo sync (specific — before general data usage)
   if (msg.includes('photo') && (msg.includes('sync') || msg.includes('gallery') || msg.includes('backup'))) return 'photo_sync';
 
@@ -282,8 +320,8 @@ async function handleDataUsageQuery(userId: string | null): Promise<string> {
     const monthlyBytes = parseInt(usage?.bandwidth_bytes_month || '0');
     const plan = subscription?.plan || 'free';
     const isPaid = plan !== 'free' && subscription?.status === 'active';
-    const storageLimit = isPaid ? 2 * 1024 * 1024 * 1024 : 100 * 1024 * 1024;
-    const monthlyLimit = isPaid ? 10 * 1024 * 1024 * 1024 : 500 * 1024 * 1024;
+    const storageLimit = isPaid ? 1 * 1024 * 1024 * 1024 : 100 * 1024 * 1024;
+    const monthlyLimit = isPaid ? 2 * 1024 * 1024 * 1024 : 500 * 1024 * 1024;
 
     let response = `**Your Data Usage**\n\n`;
     response += `**Storage Used:** ${formatBytes(storageBytes)} / ${formatBytes(storageLimit)}\n`;
@@ -295,7 +333,7 @@ async function handleDataUsageQuery(userId: string | null): Promise<string> {
     }
 
     if (storageBytes > storageLimit * 0.8) {
-      response += `\n\n**Note:** You're approaching your storage limit. Consider clearing MMS & photo data in Settings > Usage & Limits, or upgrade to Pro for 2GB storage.`;
+      response += `\n\n**Note:** You're approaching your storage limit. Consider clearing MMS & photo data in Settings > Usage & Limits, or upgrade to Pro for 1GB storage.`;
     }
 
     return response;
@@ -327,7 +365,7 @@ async function handleSubscriptionQuery(userId: string | null): Promise<string> {
       response += `- 500MB/month uploads\n`;
       response += `- 50MB max file size\n`;
       response += `- SMS/MMS sync, calls, contacts, photo sync\n\n`;
-      response += `**Upgrade to Pro** for 10 devices, 2GB storage, 10GB/month uploads, media control, and more.`;
+      response += `**Upgrade to Pro** for 5 devices, 1GB storage, 2GB/month uploads, media control, and more.`;
       return response;
     }
 
@@ -360,9 +398,9 @@ async function handleSubscriptionQuery(userId: string | null): Promise<string> {
     }
 
     response += `\n**What's included:**\n`;
-    response += `- 10 devices\n`;
-    response += `- 2GB storage\n`;
-    response += `- 10GB/month uploads\n`;
+    response += `- 5 devices\n`;
+    response += `- 1GB storage\n`;
+    response += `- 2GB/month uploads\n`;
     response += `- 1GB max file size\n`;
     response += `- Media control\n`;
 
@@ -697,6 +735,58 @@ function handleVoicemailQuery(): string {
   return `**Voicemail Sync**\n\nAccess your voicemails on Mac/Web.\n\n**Features:**\n- Voicemails synced from your Android phone\n- Transcriptions available (when supported by carrier)\n- Play voicemails directly on Mac/Web\n- See caller info and timestamp\n\n**Requirements:**\n- Visual voicemail must be supported by your carrier\n- Grant voicemail permissions to SyncFlow on Android\n\n**Note:** Voicemail access depends on your carrier's support for visual voicemail APIs.`;
 }
 
+async function handleEncryptionQuery(userId: string | null): Promise<string> {
+  let statusSection = '';
+
+  if (userId) {
+    try {
+      const [keyCount, deviceCount, msgTotal, encryptedCount, publicKeyCount, maxKeyVersion, signingKeyCount, backupCount] = await Promise.all([
+        queryOne('SELECT COUNT(*) as count FROM user_e2ee_keys WHERE user_id = $1', [userId]),
+        queryOne('SELECT COUNT(*) as count FROM user_devices WHERE user_id = $1', [userId]),
+        queryOne('SELECT COUNT(*) as count FROM user_messages WHERE user_id = $1', [userId]),
+        queryOne('SELECT COUNT(*) as count FROM user_messages WHERE user_id = $1 AND is_encrypted = true', [userId]),
+        queryOne('SELECT COUNT(*) as count FROM e2ee_public_keys WHERE uid = $1', [userId]),
+        queryOne('SELECT COALESCE(MAX(key_version), 1) as version FROM user_e2ee_keys WHERE user_id = $1', [userId]),
+        queryOne('SELECT COUNT(*) as count FROM user_devices WHERE user_id = $1 AND device_signing_key IS NOT NULL', [userId]),
+        queryOne('SELECT COUNT(*) as count FROM e2ee_key_backups WHERE user_id = $1', [userId]),
+      ]);
+
+      const keys = parseInt(keyCount?.count || '0');
+      const devices = parseInt(deviceCount?.count || '0');
+      const total = parseInt(msgTotal?.count || '0');
+      const encrypted = parseInt(encryptedCount?.count || '0');
+      const publicKeys = parseInt(publicKeyCount?.count || '0');
+      const keyVersion = parseInt(maxKeyVersion?.version || '1');
+      const signingKeys = parseInt(signingKeyCount?.count || '0');
+      const backups = parseInt(backupCount?.count || '0');
+
+      statusSection = `\n\n---\n\n**Your Encryption Status**\n\n`;
+      statusSection += `**Devices:** ${devices}\n`;
+      statusSection += `**E2EE Key Pairs on Server:** ${keys}\n`;
+      statusSection += `**Current Key Version:** ${keyVersion}\n`;
+      statusSection += `**Public Keys Published:** ${publicKeys}\n`;
+      statusSection += `**Devices with Signing Keys:** ${signingKeys} / ${devices}\n`;
+      statusSection += `**Key Backups:** ${backups > 0 ? `${backups} version(s) backed up` : 'None — set a backup passphrase in Android Settings'}\n`;
+      statusSection += `**Total Messages:** ${total.toLocaleString()}\n`;
+      statusSection += `**Encrypted Messages:** ${encrypted.toLocaleString()}\n`;
+
+      if (keys === 0 && devices > 0) {
+        statusSection += `\n**Warning:** No E2EE keys found on the server. Your devices may need to re-negotiate keys. Use "Repair Encryption" in Settings.`;
+      }
+      if (signingKeys < devices && devices > 0) {
+        statusSection += `\n**Note:** Some devices don't have signing keys yet. Update SyncFlow on all devices for full device verification.`;
+      }
+      if (backups === 0 && keys > 0) {
+        statusSection += `\n**Recommendation:** Set a backup passphrase on your Android device (Settings > Privacy & Security > Backup Encryption Keys) to protect against key loss.`;
+      }
+    } catch (error) {
+      console.error('[Support] Error fetching encryption status:', error);
+    }
+  }
+
+  return `**End-to-End Encryption (E2EE)**\n\nAll messages in SyncFlow are encrypted end-to-end using **AES-256-GCM** with **ECDH P-256** key agreement. Only your paired devices can decrypt your messages — the server never sees plaintext.\n\n**How E2EE works:**\n- During pairing, your devices exchange encryption keys via an encrypted channel\n- A shared "sync group keypair" encrypts/decrypts all messages\n- Each device also has a unique **ECDSA P-256 signing keypair** that authenticates key exchanges\n- Keys are stored securely in the **Android Keystore**, **macOS Keychain**, or **browser IndexedDB**\n- Web keys are protected with **PBKDF2 (400,000 iterations)** if you set a passphrase\n\n**Key Rotation:**\n- Encryption keys are automatically rotated every **30 days** for forward secrecy\n- Old keys are kept so older messages can still be decrypted\n- New messages always use the latest key version\n- Key rotation happens transparently — no action needed\n\n**Safety Number:**\n- Each sync group has a unique **Safety Number** (12 groups of 5 digits)\n- Compare this number across your devices to verify encryption keys match\n- Find it in **Settings > Account** (Web), **Settings > Security** (Mac), or **Settings > Privacy & Security** (Android)\n- If safety numbers differ between devices, use "Repair Encryption"\n\n**Key Backup & Recovery:**\n- After first pairing, you'll be prompted to protect your keys with a **backup passphrase**\n- Encrypted backups are stored on the server (encrypted with your passphrase — we can't read them)\n- If you reinstall, restore your keys by entering your backup passphrase\n- Find "Backup Encryption Keys" in Android Settings > Privacy & Security\n- Find "Restore from Backup" in Mac/Web Settings when keys are missing\n\n**Device Verification:**\n- Key exchanges are signed with each device's ECDSA signing key\n- Receiving devices verify signatures before accepting new keys\n- Prevents man-in-the-middle attacks during key exchange\n- If a signature is invalid, the key import is rejected\n\n**Web Security:**\n- Set a passphrase in Settings > Account > "Web key protection" to encrypt keys at rest\n- Keys auto-lock after **15 minutes** of inactivity when passphrase-protected\n- Keys are stored in IndexedDB (more secure than localStorage)\n\n---\n\n**Common issues:**\n\n**"Encrypted message — sync keys to decrypt"**\nYour device doesn't have the correct decryption keys. Causes:\n- You reinstalled the Android or Mac app\n- Your browser storage was cleared\n- Keys were corrupted or rotated while a device was offline\n\n**How to fix:**\n\n**Option 1 — Restore from Backup (if you set a backup passphrase):**\n- On Mac: Settings > Security > "Restore from Backup"\n- On Web: Settings > Account > "Restore from Backup"\n- Enter your backup passphrase — all key versions will be restored\n\n**Option 2 — Repair Encryption:**\n\n*On Mac:*\n1. Open SyncFlow > Settings > General > Security section\n2. Click **"Repair Encryption"**\n3. Wait for completion — messages will reload decrypted\n\n*On Web (sfweb.app):*\n1. Go to Settings > Account tab\n2. Click **"Repair Encryption"**\n3. Wait for completion\n\n**What Repair Encryption does:**\n1. Clears stale encryption keys from the server\n2. Tells your Android phone to re-sync all messages with fresh encryption\n3. Re-negotiates new encryption keys between your devices\n4. Messages reload and decrypt with the new keys\n\n**Requirements for repair:**\n- Your Android phone must be **online** with SyncFlow running\n- Allow 30-60 seconds for the full process\n- Rate limited to once per hour to prevent abuse\n\n**Auto-repair:** SyncFlow automatically detects when most messages fail to decrypt after pairing and triggers repair without any action needed.\n\n**Still having issues?**\n- Make sure your Android phone is online and SyncFlow is running\n- Check your Safety Number matches across devices\n- Try unpairing and re-pairing all devices\n- Contact syncflow.contact@gmail.com for assistance${statusSection}`;
+}
+
 function handleDeliveryStatusQuery(): string {
   return `**Delivery Status & Checkmarks**\n\nSyncFlow shows delivery status for messages you send:\n\n**Status indicators:**\n- **Clock icon** = Sending (message queued)\n- **Single checkmark** ✓ = Sent (carrier accepted the message)\n- **Double checkmark** ✓✓ = Delivered (carrier confirmed delivery to recipient)\n- **Exclamation mark** ! = Failed (message could not be sent)\n\n**How it works:**\n- When you send SMS from Mac/Web, the message goes to your Android phone\n- Android sends it via your carrier\n- Carrier provides delivery confirmation\n- Status updates in real-time on all your devices\n\n**Note:** MMS delivery reports are carrier-dependent and may not always be available. SMS delivery tracking is more reliable.`;
 }
@@ -706,7 +796,7 @@ function handlePhotoSyncQuery(): string {
 }
 
 function getHelpResponse(): string {
-  return `**Hi! I'm the SyncFlow Support Assistant.**\n\nI can help you with your account. Here's what you can ask:\n\n**Account & Security:**\n- "What's my user ID?" / "How does account recovery work?"\n- "Show my account info"\n\n**Messages & Sync:**\n- "How many messages synced?" / "Sync status"\n- "Schedule a message" / "Delivery status checkmarks"\n- "Read receipts" / "Typing indicators"\n\n**Devices & Features:**\n- "Show my devices" / "Unpair a device"\n- "Clipboard sync" / "Find my phone"\n- "Notification mirroring" / "Do Not Disturb sync"\n- "Media control" / "Hotspot control"\n- "Share links" / "Phone battery status"\n\n**Photos & Storage:**\n- "Photo sync" / "Voicemail sync"\n- "How much data have I used?" / "Storage quota"\n\n**Subscription & Billing:**\n- "What's my plan?" / "Show billing history"\n- "Cancel subscription"\n\n**Spam:**\n- "Spam settings" / "How many spam blocked?"\n\n**Troubleshooting:**\n- "Messages not syncing" / "Reset my sync"\n- "How do I pair?" / "Delete my account"\n\nJust type your question!`;
+  return `**Hi! I'm the SyncFlow Support Assistant.**\n\nI can help you with your account. Here's what you can ask:\n\n**Account & Security:**\n- "What's my user ID?" / "How does account recovery work?"\n- "Show my account info"\n- "Encryption status" / "Repair encryption" / "Messages not decrypting"\n- "Safety number" / "Key backup" / "Key rotation"\n\n**Messages & Sync:**\n- "How many messages synced?" / "Sync status"\n- "Schedule a message" / "Delivery status checkmarks"\n- "Read receipts" / "Typing indicators"\n\n**Devices & Features:**\n- "Show my devices" / "Unpair a device"\n- "Clipboard sync" / "Find my phone"\n- "Notification mirroring" / "Do Not Disturb sync"\n- "Media control" / "Hotspot control"\n- "Share links" / "Phone battery status"\n\n**Photos & Storage:**\n- "Photo sync" / "Voicemail sync"\n- "How much data have I used?" / "Storage quota"\n\n**Subscription & Billing:**\n- "What's my plan?" / "Show billing history"\n- "Cancel subscription"\n\n**Spam:**\n- "Spam settings" / "How many spam blocked?"\n\n**Troubleshooting:**\n- "Messages not syncing" / "Reset my sync"\n- "How do I pair?" / "Delete my account"\n\nJust type your question!`;
 }
 
 function getGeneralResponse(msg: string): string {
@@ -727,7 +817,7 @@ function getGeneralResponse(msg: string): string {
 
   // Pricing
   if (msg.includes('pro') || msg.includes('premium') || msg.includes('upgrade') || msg.includes('price') || msg.includes('cost')) {
-    return `**SyncFlow Plans & Pricing**\n\n**Free — $0.00**\n- 2 devices, 100MB storage, 500MB/month uploads\n- SMS/MMS sync, calls, contacts, file transfer, photo sync\n\n**Pro Monthly — $4.99/month**\n- 10 devices, 2GB storage, 10GB/month uploads\n- 1GB max file size, media control\n\n**Pro Yearly — $39.99/year** (save 33%)\n- Same features as Pro Monthly\n\n**Pro 3-Year — $79.99 one-time** (best value)\n- Same features, pay once for 3 years\n\nUpgrade in Settings > Subscription.`;
+    return `**SyncFlow Plans & Pricing**\n\n**Free — $0.00**\n- 2 devices, 100MB storage, 500MB/month uploads\n- SMS/MMS sync, calls, contacts, file transfer, photo sync\n\n**Pro Monthly — $4.99/month**\n- 5 devices, 1GB storage, 2GB/month uploads\n- 1GB max file size, media control\n\n**Pro Yearly — $39.99/year** (save 33%)\n- Same features as Pro Monthly\n\n**Pro 3-Year — $79.99 one-time** (best value)\n- Same features, pay once for 3 years\n\nUpgrade in Settings > Subscription.`;
   }
 
   // File transfer
@@ -745,9 +835,9 @@ function getGeneralResponse(msg: string): string {
     return `**MMS & Group Messages:**\n\n- Full MMS support (images, videos, audio)\n- Group MMS conversations supported\n- View all participants in group chats\n- Send media from Mac/Web\n\n**Note:** MMS images sync from Android via cloud storage. If images aren't showing, check your storage quota in Settings > Usage & Limits.`;
   }
 
-  // E2EE
-  if (msg.includes('encrypt') || msg.includes('e2ee') || msg.includes('security') || msg.includes('privacy')) {
-    return `**End-to-End Encryption (E2EE)**\n\n- Messages are encrypted before leaving your device\n- Only your paired devices can decrypt them\n- Server cannot read encrypted messages\n- E2EE is enabled by default for all messages\n\n**Key sync is automatic:**\n- Keys are synced during device pairing\n- Keys are also synced automatically on app startup\n- No manual action needed\n\n**If you see "Encrypted message - sync keys to decrypt":**\n- Make sure your Android phone is online and SyncFlow is running\n- Restart the Mac/Web app — keys will sync automatically\n- If the issue persists, try unpairing and re-pairing your device`;
+  // Security / privacy (encryption queries now handled by dedicated 'encryption' type)
+  if (msg.includes('security') || msg.includes('privacy')) {
+    return `**Security & Privacy**\n\n- All messages are end-to-end encrypted (E2EE) using **AES-256-GCM** with **ECDH P-256**\n- Only your paired devices can decrypt your messages — server never sees plaintext\n- Keys stored in **Android Keystore** / **macOS Keychain** / **browser IndexedDB**\n- Each device has an **ECDSA signing key** to authenticate key exchanges\n- Keys automatically **rotate every 30 days** for forward secrecy\n- **Safety Numbers** let you verify encryption across devices\n- **Key backups** protected by your passphrase can restore keys after reinstall\n- Web keys protected with **PBKDF2 (400k iterations)** and auto-lock after 15 min idle\n- Device IDs generated with **cryptographic UUIDs** (not predictable)\n- Key exchange payloads are signed and verified to prevent MITM attacks\n\nFor encryption troubleshooting, ask: **"repair encryption"**, **"safety number"**, **"key backup"**, or **"messages not decrypting"**`;
   }
 
   // Platform
@@ -756,7 +846,7 @@ function getGeneralResponse(msg: string): string {
   }
 
   // Default
-  return `I can help with:\n\n**Account & Data:**\n- "What's my user ID?" / "Recovery code"\n- "My subscription" / "Data usage" / "My devices"\n\n**Features:**\n- "Clipboard sync" / "Find my phone" / "Notifications"\n- "Schedule message" / "Delivery status" / "Photo sync"\n- "Media control" / "DND sync" / "Hotspot" / "Voicemail"\n- "Pair devices" / "File transfer" / "Share links"\n\n**Troubleshooting:**\n- "Messages not syncing" / "Reset sync" / "E2EE encryption"\n\nType **"help"** for the full list, or contact syncflow.contact@gmail.com!`;
+  return `I can help with:\n\n**Account & Data:**\n- "What's my user ID?" / "Recovery code"\n- "My subscription" / "Data usage" / "My devices"\n\n**Features:**\n- "Clipboard sync" / "Find my phone" / "Notifications"\n- "Schedule message" / "Delivery status" / "Photo sync"\n- "Media control" / "DND sync" / "Hotspot" / "Voicemail"\n- "Pair devices" / "File transfer" / "Share links"\n\n**Troubleshooting:**\n- "Messages not syncing" / "Reset sync"\n- "Encryption status" / "Repair encryption" / "Not decrypting"\n\nType **"help"** for the full list, or contact syncflow.contact@gmail.com!`;
 }
 
 // ---------------------------------------------------------------------------

@@ -19,6 +19,7 @@ import android.telephony.PhoneStateListener
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import android.util.Log
+import com.phoneintegration.app.BuildConfig
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import com.phoneintegration.app.vps.VPSCallCommand
@@ -34,10 +35,10 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * CallMonitorService - VPS Backend Only
- *
- * Monitors phone calls and syncs call state to VPS server.
- * Handles incoming call notifications and call commands from desktop/web.
+ * Foreground service that monitors telephony call state (ringing/active/ended) and syncs it
+ * to the VPS server so paired desktop/web clients see live call status. Also processes call
+ * commands (answer/reject/end/make_call) received from desktop via WebSocket, and syncs the
+ * device call log on startup. Uses InCallService broadcasts for fast caller-ID resolution.
  */
 class CallMonitorService : Service() {
 
@@ -92,28 +93,23 @@ class CallMonitorService : Service() {
     // Broadcast receiver for phone number from InCallService/CallScreeningService
     private val incomingCallReceiver = object : android.content.BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            Log.d(TAG, "📞📞📞 BROADCAST RECEIVED! action=${intent?.action}")
             if (intent?.action == DesktopInCallService.ACTION_INCOMING_CALL) {
                 val phoneNumber = intent.getStringExtra(DesktopInCallService.EXTRA_PHONE_NUMBER)
                 val callIdFromBroadcast = intent.getStringExtra("call_id")
                 val callState = intent.getStringExtra(DesktopInCallService.EXTRA_CALL_STATE)
-                Log.d(TAG, "📞📞📞 INCOMING_CALL broadcast - phoneNumber: $phoneNumber, callId: $callIdFromBroadcast, state: $callState")
 
                 if (!phoneNumber.isNullOrEmpty()) {
                     pendingPhoneNumber = phoneNumber
 
                     if (!callIdFromBroadcast.isNullOrEmpty()) {
-                        Log.d(TAG, "📞 Setting currentCallId from broadcast: $callIdFromBroadcast")
                         currentCallId = callIdFromBroadcast
 
                         // OPTIMIZATION: Sync to VPS IMMEDIATELY when we receive the broadcast
                         if (callState == "ringing") {
-                            Log.d(TAG, "📞 FAST PATH: Syncing ringing call immediately from broadcast!")
                             serviceScope.launch(NonCancellable) {
                                 try {
                                     val contactHelper = ContactHelper(this@CallMonitorService)
                                     val contactName = contactHelper.getContactName(phoneNumber)
-                                    Log.d(TAG, "📞 Contact lookup: $phoneNumber -> ${contactName ?: "null"}")
 
                                     // Sync to VPS
                                     syncActiveCall(
@@ -131,10 +127,8 @@ class CallMonitorService : Service() {
                                         callType = "incoming",
                                         callState = "ringing"
                                     )
-
-                                    Log.d(TAG, "📞 FAST PATH: Call synced to VPS!")
                                 } catch (e: Exception) {
-                                    Log.e(TAG, "📞 FAST PATH error: ${e.message}", e)
+                                    Log.e(TAG, "Fast path error: ${e.message}", e)
                                 }
                             }
                         }
@@ -145,7 +139,6 @@ class CallMonitorService : Service() {
                                 try {
                                     val contactHelper = ContactHelper(this@CallMonitorService)
                                     val contactName = contactHelper.getContactName(phoneNumber)
-                                    Log.d(TAG, "Updating call with real phone number: $phoneNumber, contact: $contactName")
                                     // VPS doesn't need partial updates - sync is idempotent
                                 } catch (e: Exception) {
                                     Log.e(TAG, "Error updating call phone number", e)
@@ -160,7 +153,7 @@ class CallMonitorService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "CallMonitorService created (VPS backend)")
+        if (BuildConfig.DEBUG) Log.d(TAG, "CallMonitorService created (VPS backend)")
 
         telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
         telecomManager = getSystemService(Context.TELECOM_SERVICE) as TelecomManager
@@ -170,7 +163,6 @@ class CallMonitorService : Service() {
         // Restore currentCallId from SharedPreferences in case service was recreated
         val storedCallId = getStoredCallId()
         if (storedCallId != null) {
-            Log.d(TAG, "📞 Restored currentCallId from SharedPreferences: $storedCallId")
             currentCallId = storedCallId
         }
 
@@ -185,9 +177,7 @@ class CallMonitorService : Service() {
             registerReceiver(incomingCallReceiver, filter)
         }
 
-        // Register ContentObserver to watch call log changes
         registerCallLogObserver()
-
         registerCallStateListener()
         listenForCallCommands()
         listenForCallRequests()
@@ -196,7 +186,7 @@ class CallMonitorService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "CallMonitorService started")
+        if (BuildConfig.DEBUG) Log.d(TAG, "CallMonitorService started")
         // Poll for pending call requests on each start (handles FCM wake-up + missed WebSocket events)
         pollPendingCallRequests()
         return START_STICKY
@@ -206,7 +196,7 @@ class CallMonitorService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
-        Log.d(TAG, "CallMonitorService destroyed")
+        if (BuildConfig.DEBUG) Log.d(TAG, "CallMonitorService destroyed")
         try {
             unregisterReceiver(incomingCallReceiver)
         } catch (e: Exception) {
@@ -227,13 +217,11 @@ class CallMonitorService : Service() {
         callLogObserver = object : android.database.ContentObserver(android.os.Handler(mainLooper)) {
             override fun onChange(selfChange: Boolean, uri: android.net.Uri?) {
                 super.onChange(selfChange, uri)
-                Log.d(TAG, "Call log changed: $uri")
                 // If we're waiting for a phone number and a call is ringing
                 if (currentCallId != null && pendingPhoneNumber.isNullOrEmpty()) {
                     serviceScope.launch {
                         val number = getLastIncomingCallNumber()
                         if (!number.isNullOrEmpty() && number != "Unknown") {
-                            Log.d(TAG, "Got phone number from call log observer: $number")
                             pendingPhoneNumber = number
                         }
                     }
@@ -246,14 +234,12 @@ class CallMonitorService : Service() {
             true,
             callLogObserver!!
         )
-        Log.d(TAG, "Call log observer registered")
     }
 
     private fun unregisterCallLogObserver() {
         callLogObserver?.let {
             contentResolver.unregisterContentObserver(it)
             callLogObserver = null
-            Log.d(TAG, "Call log observer unregistered")
         }
     }
 
@@ -268,12 +254,12 @@ class CallMonitorService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 telephonyCallback?.let {
                     telephonyManager.registerTelephonyCallback(mainExecutor, it)
-                    Log.d(TAG, "Registered TelephonyCallback (API 31+)")
+                    if (BuildConfig.DEBUG) Log.d(TAG, "Call state listener registered")
                 }
             } else {
                 @Suppress("DEPRECATION")
                 telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE)
-                Log.d(TAG, "Registered PhoneStateListener (API < 31)")
+                if (BuildConfig.DEBUG) Log.d(TAG, "Call state listener registered")
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error registering call state listener", e)
@@ -291,49 +277,42 @@ class CallMonitorService : Service() {
                 @Suppress("DEPRECATION")
                 telephonyManager.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE)
             }
-            Log.d(TAG, "Unregistered call state listener")
         } catch (e: Exception) {
             Log.e(TAG, "Error unregistering call state listener", e)
         }
     }
 
+    // Telephony state machine: RINGING → OFFHOOK (answered) → IDLE (ended).
+    // Phone number may come from TelephonyCallback, InCallService broadcast, SharedPreferences,
+    // or call log fallback - we try each source in priority order.
     private fun handleCallStateChange(state: Int, phoneNumber: String?) {
-        Log.d(TAG, "Call state changed: $state, number: $phoneNumber")
-
         when (state) {
             TelephonyManager.CALL_STATE_RINGING -> {
                 serviceScope.launch {
                     val number = when {
                         !phoneNumber.isNullOrEmpty() && phoneNumber != "Unknown" -> {
-                            Log.d(TAG, "Using phone number from TelephonyCallback: $phoneNumber")
                             phoneNumber
                         }
                         !pendingPhoneNumber.isNullOrEmpty() -> {
-                            Log.d(TAG, "Using phone number from InCallService: $pendingPhoneNumber")
                             pendingPhoneNumber!!
                         }
                         else -> {
                             val storedNumber = getStoredPhoneNumber()
                             if (storedNumber != null) {
-                                Log.d(TAG, "Using phone number from SharedPreferences: $storedNumber")
                                 storedNumber
                             } else {
                                 val callLogNumber = getLastIncomingCallNumber()
-                                Log.d(TAG, "Attempted call log query, result: $callLogNumber")
                                 callLogNumber ?: "Unknown"
                             }
                         }
                     }
-                    Log.d(TAG, "Incoming call from: $number")
                     onIncomingCall(number)
                 }
             }
             TelephonyManager.CALL_STATE_OFFHOOK -> {
-                Log.d(TAG, "Call active")
                 onCallActive()
             }
             TelephonyManager.CALL_STATE_IDLE -> {
-                Log.d(TAG, "Call ended")
                 onCallEnded()
             }
         }
@@ -347,7 +326,6 @@ class CallMonitorService : Service() {
             val age = System.currentTimeMillis() - storedTimestamp
 
             if (storedNumber != null && age < 30000) {
-                Log.d(TAG, "Found stored phone number: $storedNumber (age: ${age}ms)")
                 return storedNumber
             }
         } catch (e: Exception) {
@@ -364,7 +342,6 @@ class CallMonitorService : Service() {
             val age = System.currentTimeMillis() - storedTimestamp
 
             if (storedCallId != null && age < 60000) {
-                Log.d(TAG, "Found stored callId: $storedCallId (age: ${age}ms)")
                 return storedCallId
             }
         } catch (e: Exception) {
@@ -377,7 +354,6 @@ class CallMonitorService : Service() {
         try {
             val prefs = getSharedPreferences("call_screening_prefs", MODE_PRIVATE)
             prefs.edit().clear().apply()
-            Log.d(TAG, "Cleared stored phone number")
         } catch (e: Exception) {
             Log.e(TAG, "Error clearing stored phone number", e)
         }
@@ -408,7 +384,6 @@ class CallMonitorService : Service() {
             cursor?.use {
                 if (it.moveToFirst()) {
                     val number = it.getString(it.getColumnIndex(CallLog.Calls.NUMBER))
-                    Log.d(TAG, "Found incoming call number from call log: $number")
                     return@withContext number
                 }
             }
@@ -422,20 +397,14 @@ class CallMonitorService : Service() {
     }
 
     private fun onIncomingCall(phoneNumber: String) {
-        Log.d(TAG, "📞 onIncomingCall START - phoneNumber: $phoneNumber")
-
         serviceScope.launch(NonCancellable) {
             try {
-                Log.d(TAG, "📞 Processing incoming call")
-
                 val storedCallId = getStoredCallId()
                 val callId = storedCallId ?: System.currentTimeMillis().toString()
                 currentCallId = callId
-                Log.d(TAG, "📞 Using callId: $callId")
 
                 val contactHelper = ContactHelper(this@CallMonitorService)
                 val contactName = contactHelper.getContactName(phoneNumber)
-                Log.d(TAG, "📞 Contact lookup done: phoneNumber=$phoneNumber, contactName=$contactName")
 
                 // Sync to VPS
                 syncActiveCall(
@@ -453,10 +422,8 @@ class CallMonitorService : Service() {
                     callType = "incoming",
                     callState = "ringing"
                 )
-
-                Log.d(TAG, "📞 Incoming call synced to VPS")
             } catch (e: Exception) {
-                Log.e(TAG, "📞 ERROR syncing incoming call: ${e.message}", e)
+                Log.e(TAG, "Error syncing incoming call: ${e.message}", e)
             }
         }
     }
@@ -467,7 +434,6 @@ class CallMonitorService : Service() {
                 try {
                     vpsSyncService.updateActiveCallState(callId, "active")
                     vpsSyncService.clearActiveCall(callId) // Clear from active_calls to dismiss notification
-                    Log.d(TAG, "Call active state synced")
                 } catch (e: Exception) {
                     Log.e(TAG, "Error syncing call active state", e)
                 }
@@ -476,17 +442,13 @@ class CallMonitorService : Service() {
     }
 
     private fun onCallEnded() {
-        Log.d(TAG, "📞 onCallEnded called, currentCallId=$currentCallId")
-
         currentCallId?.let { callId ->
-            Log.d(TAG, "📞 Syncing ended state for call: $callId")
             serviceScope.launch {
                 try {
                     vpsSyncService.updateActiveCallState(callId, "ended")
                     vpsSyncService.clearActiveCall(callId)
-                    Log.d(TAG, "📞 Call ended state synced successfully")
                 } catch (e: Exception) {
-                    Log.e(TAG, "📞 Error syncing call ended state", e)
+                    Log.e(TAG, "Error syncing call ended state", e)
                 }
             }
         }
@@ -498,7 +460,6 @@ class CallMonitorService : Service() {
         // Auto-stop service after call ends
         serviceScope.launch {
             delay(5000)
-            Log.d(TAG, "📞 Auto-stopping CallMonitorService after call ended")
             stopSelf()
         }
     }
@@ -510,8 +471,6 @@ class CallMonitorService : Service() {
         callState: String
     ) {
         try {
-            Log.d(TAG, "📞 syncActiveCall - callId: $callId, state: $callState")
-
             vpsSyncService.syncActiveCall(
                 callId = callId,
                 phoneNumber = phoneNumber,
@@ -519,10 +478,8 @@ class CallMonitorService : Service() {
                 state = callState,
                 callType = "incoming"
             )
-
-            Log.d(TAG, "📞 Active call synced to VPS: $callId - $callState")
         } catch (e: Exception) {
-            Log.e(TAG, "📞 ERROR syncing active call: ${e.message}", e)
+            Log.e(TAG, "Error syncing active call: ${e.message}", e)
         }
     }
 
@@ -543,7 +500,6 @@ class CallMonitorService : Service() {
                 "duration" to 0L
             )
             vpsSyncService.syncCallHistory(listOf(callData))
-            Log.d(TAG, "Call event synced: $callId - $callType - $callState")
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing call event", e)
         }
@@ -552,11 +508,7 @@ class CallMonitorService : Service() {
     private fun listenForCallCommands() {
         serviceScope.launch {
             try {
-                Log.d(TAG, "Setting up call commands listener via WebSocket")
-
                 vpsSyncService.callCommands.collect { command ->
-                    Log.d(TAG, "Received call command: ${command.command}")
-
                     if (!command.processed) {
                         val commandAge = System.currentTimeMillis() - command.timestamp
                         if (commandAge <= 10000) {
@@ -578,11 +530,8 @@ class CallMonitorService : Service() {
     private fun listenForCallRequests() {
         serviceScope.launch {
             try {
-                Log.d(TAG, "Setting up call requests listener via WebSocket")
-
                 vpsSyncService.callRequests.collect { request ->
                     if (request.status == "pending") {
-                        Log.d(TAG, "Received call request for: ${request.phoneNumber}")
                         processCallRequest(request)
                     }
                 }
@@ -598,7 +547,6 @@ class CallMonitorService : Service() {
                 val requests = vpsSyncService.getCallRequests()
                 for (request in requests) {
                     if (request.status == "pending") {
-                        Log.d(TAG, "Found pending call request from poll: ${request.phoneNumber}")
                         processCallRequest(request)
                     }
                 }
@@ -629,7 +577,6 @@ class CallMonitorService : Service() {
                     makeCallDefault(request.phoneNumber)
                 }
 
-                Log.d(TAG, "Initiated call from desktop request to ${request.phoneNumber}")
                 vpsSyncService.updateCallRequestStatus(request.id, "completed")
 
                 // Sync call event
@@ -666,7 +613,6 @@ class CallMonitorService : Service() {
                         putParcelable("android.telecom.extra.PHONE_ACCOUNT_HANDLE", phoneAccountHandle)
                     }
                     telecomManager.placeCall(uri, extras)
-                    Log.d(TAG, "Call placed with SIM $subscriptionId")
                 } else {
                     makeCallDefault(phoneNumber)
                 }
@@ -685,17 +631,15 @@ class CallMonitorService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 val uri = Uri.parse("tel:$phoneNumber")
                 telecomManager.placeCall(uri, android.os.Bundle())
-                Log.d(TAG, "Call placed via TelecomManager")
             } else {
                 val callIntent = Intent(Intent.ACTION_CALL).apply {
                     data = Uri.parse("tel:$phoneNumber")
                     flags = Intent.FLAG_ACTIVITY_NEW_TASK
                 }
                 startActivity(callIntent)
-                Log.d(TAG, "Call started via Intent")
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error placing call to $phoneNumber", e)
+            Log.e(TAG, "Error placing call", e)
         }
     }
 
@@ -703,7 +647,6 @@ class CallMonitorService : Service() {
         serviceScope.launch(Dispatchers.IO) {
             try {
                 val sims = simManager.getActiveSims()
-                Log.d(TAG, "Detected ${sims.size} active SIM(s)")
                 // TODO: Sync SIM info to VPS when endpoint is available
             } catch (e: Exception) {
                 Log.e(TAG, "Error syncing SIM information", e)
@@ -713,45 +656,70 @@ class CallMonitorService : Service() {
 
     @SuppressLint("MissingPermission")
     private fun handleCallCommand(command: String, callId: String?, phoneNumber: String?) {
-        Log.d(TAG, "Handling call command: $command (callId: $callId)")
+        Log.d(TAG, "handleCallCommand: command=$command, callId=$callId, hasInCallService=${DesktopInCallService.hasActiveCall()}, callState=${DesktopInCallService.getCallState()}")
 
-        if (!checkCallPermissions()) {
-            Log.e(TAG, "Missing permissions to handle call command")
-            return
-        }
+        val hasAnswerPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ActivityCompat.checkSelfPermission(this, Manifest.permission.ANSWER_PHONE_CALLS) == PackageManager.PERMISSION_GRANTED
+        } else true
+        val hasReadPhoneState = ActivityCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED
+        Log.d(TAG, "Permissions: ANSWER_PHONE_CALLS=$hasAnswerPermission, READ_PHONE_STATE=$hasReadPhoneState")
 
         try {
             when (command) {
                 "answer" -> {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        Log.d(TAG, "Attempting to answer call via TelecomManager")
-                        telecomManager.acceptRingingCall()
-                        Log.d(TAG, "Accept ringing call executed")
+                    var answered = false
 
-                        callId?.let { id ->
-                            serviceScope.launch {
-                                delay(500)
-                                vpsSyncService.updateActiveCallState(id, "active")
-                            }
-                        }
-                    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    // Method 1: InCallService (most reliable if bound)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && DesktopInCallService.hasActiveCall()) {
+                        Log.d(TAG, "Answering via InCallService")
                         DesktopInCallService.answerCall()
+                        answered = true
+                    }
+
+                    // Method 2: TelecomManager (requires ANSWER_PHONE_CALLS permission)
+                    if (!answered && hasAnswerPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        Log.d(TAG, "Answering via TelecomManager.acceptRingingCall()")
+                        @Suppress("DEPRECATION")
+                        telecomManager.acceptRingingCall()
+                        answered = true
+                    }
+
+                    // Method 3: Media key simulation (no special permissions needed)
+                    if (!answered) {
+                        Log.d(TAG, "Answering via media key simulation")
+                        answerViaMediaKey()
+                    }
+
+                    callId?.let { id ->
+                        serviceScope.launch {
+                            delay(500)
+                            vpsSyncService.updateActiveCallState(id, "active")
+                        }
                     }
                 }
                 "reject", "end" -> {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                        Log.d(TAG, "Attempting to end call via TelecomManager")
-                        val result = telecomManager.endCall()
-                        Log.d(TAG, "End call result: $result")
+                    var ended = false
 
-                        callId?.let { id ->
-                            serviceScope.launch {
-                                delay(300)
-                                vpsSyncService.clearActiveCall(id)
-                            }
-                        }
-                    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    // Method 1: InCallService
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && DesktopInCallService.hasActiveCall()) {
+                        Log.d(TAG, "Ending via InCallService")
                         DesktopInCallService.endCall()
+                        ended = true
+                    }
+
+                    // Method 2: TelecomManager
+                    if (!ended && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        Log.d(TAG, "Ending via TelecomManager.endCall()")
+                        @Suppress("DEPRECATION")
+                        telecomManager.endCall()
+                        ended = true
+                    }
+
+                    callId?.let { id ->
+                        serviceScope.launch {
+                            delay(300)
+                            vpsSyncService.clearActiveCall(id)
+                        }
                     }
                 }
                 "make_call" -> {
@@ -776,7 +744,6 @@ class CallMonitorService : Service() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 val uri = Uri.parse("tel:$phoneNumber")
                 telecomManager.placeCall(uri, android.os.Bundle())
-                Log.d(TAG, "Initiated outgoing call to $phoneNumber")
             } else {
                 val callIntent = Intent(Intent.ACTION_CALL).apply {
                     data = Uri.parse("tel:$phoneNumber")
@@ -804,7 +771,7 @@ class CallMonitorService : Service() {
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error making outgoing call to $phoneNumber", e)
+            Log.e(TAG, "Error making outgoing call", e)
         }
     }
 
@@ -898,13 +865,27 @@ class CallMonitorService : Service() {
 
                     if (calls.isNotEmpty()) {
                         vpsSyncService.syncCallHistory(calls)
-                        Log.d(TAG, "Call history synced: ${calls.size} calls")
                     }
                 } ?: Log.w(TAG, "Call log cursor is null")
 
             } catch (e: Exception) {
                 Log.e(TAG, "Error syncing call history", e)
             }
+        }
+    }
+
+    private fun answerViaMediaKey() {
+        try {
+            val keyDown = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
+                putExtra(Intent.EXTRA_KEY_EVENT, android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_HEADSETHOOK))
+            }
+            val keyUp = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
+                putExtra(Intent.EXTRA_KEY_EVENT, android.view.KeyEvent(android.view.KeyEvent.ACTION_UP, android.view.KeyEvent.KEYCODE_HEADSETHOOK))
+            }
+            sendOrderedBroadcast(keyDown, null)
+            sendOrderedBroadcast(keyUp, null)
+        } catch (e: Exception) {
+            Log.e(TAG, "Media key answer failed", e)
         }
     }
 

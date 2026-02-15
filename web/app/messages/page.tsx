@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, useRef } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAppStore } from '@/lib/store'
 import {
@@ -17,9 +17,10 @@ import {
   waitForWebE2EEKeySyncResponse,
 } from '@/lib/firebase'
 import vpsService from '@/lib/vps'
-import { decryptDataKey, decryptMessageBody, importSyncGroupKeypair } from '@/lib/e2ee'
+import { decryptDataKey, decryptMessageBody, hasEncryptedKeyPair, hasLegacyKeyPair, importSyncGroupKeypair } from '@/lib/e2ee'
 import ConversationList from '@/components/ConversationList'
 import MessageView from '@/components/MessageView'
+import { PhotoGallery } from '@/components/PhotoGallery'
 import Header from '@/components/Header'
 import AIAssistant from '@/components/AIAssistant'
 import AdBanner from '@/components/AdBanner'
@@ -115,12 +116,15 @@ export default function MessagesPage() {
     selectedConversation,
     setSelectedConversation,
     setSelectedSpamAddress,
+    activeFolder,
     setActiveFolder,
     isConversationListVisible,
     setIsConversationListVisible,
     initializeConversationListVisibility,
   } = useAppStore()
   const [showAI, setShowAI] = useState(false)
+  const [photos, setPhotos] = useState<any[]>([])
+  const [photosLoading, setPhotosLoading] = useState(false)
   const [keySyncLoading, setKeySyncLoading] = useState(false)
   const [keySyncStatus, setKeySyncStatus] = useState<string | null>(null)
   const [reloadToken, setReloadToken] = useState(0)
@@ -132,6 +136,8 @@ export default function MessagesPage() {
     error?: string
   } | null>(null)
   const [dismissedAtFailureCount, setDismissedAtFailureCount] = useState<number | null>(null)
+  const [pollError, setPollError] = useState(false)
+  const pollFailureCountRef = useRef(0)
 
   const failureCount = messages.filter((msg) => msg.decryptionFailed).length
   const hasDecryptFailures = failureCount > 0
@@ -225,11 +231,11 @@ export default function MessagesPage() {
 
       // VPS Mode: Skip Firebase, use VPS service
       if (isVPSMode) {
-        console.log('[Messages] VPS mode enabled - using VPS for data sync')
+        // Wait for tokens to be restored from IndexedDB before checking auth
+        await vpsService.ensureTokensRestored()
 
         // Verify VPS authentication
         if (!vpsService.isAuthenticated) {
-          console.log('[Messages] VPS not authenticated, redirecting to pairing')
           router.push('/')
           return
         }
@@ -237,21 +243,30 @@ export default function MessagesPage() {
         const syncVpsE2eeKeys = async () => {
           try {
             const encryptedKey = await vpsService.waitForDeviceE2eeKey(10000, 1000)
-            if (!encryptedKey) return
+            if (!encryptedKey) return false
             const payloadBytes = await decryptDataKey(encryptedKey)
-            if (!payloadBytes) return
+            if (!payloadBytes) return false
             const payloadJson = new TextDecoder().decode(payloadBytes)
             const payload = JSON.parse(payloadJson)
             if (payload?.privateKeyPKCS8 && payload?.publicKeyX963) {
               await importSyncGroupKeypair(payload.privateKeyPKCS8, payload.publicKeyX963)
+              return true
             }
           } catch (err) {
             console.error('[Messages] VPS E2EE key sync failed', err)
           }
+          return false
         }
 
-        // Best-effort E2EE key sync before loading messages
-        await syncVpsE2eeKeys()
+        // Only wait for E2EE key sync if we don't already have keys from a previous session
+        const alreadyHaveKeys = await hasLegacyKeyPair() || await hasEncryptedKeyPair()
+        if (!alreadyHaveKeys) {
+          // No local keys - wait briefly for key sync (but don't block too long)
+          await syncVpsE2eeKeys()
+        } else {
+          // Keys already available locally - sync in background for updates, don't block
+          syncVpsE2eeKeys()
+        }
 
         // Connect WebSocket for real-time updates
         vpsService.connectWebSocket()
@@ -273,12 +288,15 @@ export default function MessagesPage() {
                   body = decrypted
                 } else {
                   decryptionFailed = true
+                  body = '\u{1F512} Encrypted message'
                 }
               } else {
                 decryptionFailed = true
+                body = '\u{1F512} Encrypted message'
               }
             } else {
               decryptionFailed = true
+              body = '\u{1F512} Encrypted message'
             }
           }
 
@@ -303,26 +321,66 @@ export default function MessagesPage() {
           }
         }
 
-        // Fetch all messages from VPS (paginate through all pages)
+        // Fetch messages from VPS - show first page immediately, load rest in background
         try {
-          let allMessages: any[] = []
-          let before: number | undefined
-          let hasMore = true
-          while (hasMore) {
-            const response = await vpsService.getMessages({ limit: 500, before })
-            allMessages.push(...response.messages)
-            hasMore = response.hasMore
-            if (response.messages.length > 0) {
-              before = response.messages[response.messages.length - 1].date
-            }
-          }
-          console.log('[Messages] VPS: Loaded', allMessages.length, 'messages')
-          const formattedMessages = await Promise.all(
-            allMessages.map((msg: any) => decryptVpsMessage(msg))
+          const firstPage = await vpsService.getMessages({ limit: 500 })
+          const firstDecrypted = await Promise.all(
+            firstPage.messages.map((msg: any) => decryptVpsMessage(msg))
           )
-          setMessages(formattedMessages)
+          setMessages(firstDecrypted)
+
+          // Load remaining pages in background
+          if (firstPage.hasMore) {
+            ;(async () => {
+              try {
+                let before = firstPage.messages[firstPage.messages.length - 1]?.date
+                let allExtra: any[] = []
+                let hasMore = true
+                while (hasMore && before) {
+                  const response = await vpsService.getMessages({ limit: 500, before })
+                  allExtra.push(...response.messages)
+                  hasMore = response.hasMore
+                  if (response.messages.length > 0) {
+                    before = response.messages[response.messages.length - 1].date
+                  }
+                }
+                if (allExtra.length > 0) {
+                  const extraDecrypted = await Promise.all(
+                    allExtra.map((msg: any) => decryptVpsMessage(msg))
+                  )
+                  const current = useAppStore.getState().messages
+                  const merged = new Map(current.map((m) => [m.id, m]))
+                  extraDecrypted.forEach((m) => merged.set(m.id, m))
+                  const mergedList = Array.from(merged.values()).sort((a, b) => b.date - a.date)
+                  setMessages(mergedList)
+                }
+              } catch (err) {
+                console.error('[Messages] VPS: Failed to load older messages', err)
+              }
+            })()
+          }
         } catch (err) {
           console.error('[Messages] VPS: Failed to load messages', err)
+        }
+
+        // Fetch spam messages from VPS
+        try {
+          const spamResponse = await vpsService.getSpamMessages()
+          const formattedSpam = (spamResponse.messages || []).map((msg: any) => ({
+            id: msg.id || msg.messageId || String(msg.date),
+            address: msg.address,
+            body: msg.body || '',
+            date: msg.date,
+            contactName: msg.contactName,
+            spamConfidence: msg.spamConfidence,
+            spamReasons: msg.spamReasons,
+            detectedAt: msg.detectedAt,
+            isUserMarked: msg.isUserMarked,
+            isRead: msg.isRead,
+          }))
+          setSpamMessages(formattedSpam)
+        } catch (err) {
+          console.error('[Messages] VPS: Failed to load spam messages', err)
         }
 
         // Set up VPS WebSocket listeners for real-time updates
@@ -384,25 +442,61 @@ export default function MessagesPage() {
           setMessages(updated)
         }
 
+        const onSpamUpdated = async () => {
+          try {
+            const spamResponse = await vpsService.getSpamMessages()
+            const formattedSpam = (spamResponse.messages || []).map((msg: any) => ({
+              id: msg.id || msg.messageId || String(msg.date),
+              address: msg.address,
+              body: msg.body || '',
+              date: msg.date,
+              contactName: msg.contactName,
+              spamConfidence: msg.spamConfidence,
+              spamReasons: msg.spamReasons,
+              detectedAt: msg.detectedAt,
+              isUserMarked: msg.isUserMarked,
+              isRead: msg.isRead,
+            }))
+            setSpamMessages(formattedSpam)
+          } catch {
+            // Silently ignore spam refresh failures
+          }
+        }
+
         vpsService.on('messages_synced', onMessagesSynced)
         vpsService.on('message_deleted', onMessageDeleted)
         vpsService.on('messages_deleted', onMessagesDeleted)
         vpsService.on('outgoing_status_changed', onOutgoingStatusChanged)
         vpsService.on('delivery_status_changed', onDeliveryStatusChanged)
+        vpsService.on('spam_updated', onSpamUpdated)
 
         // Periodic sync fallback: poll for new messages every 30s
         // Catches anything missed if WebSocket dropped temporarily
+        const POLL_TIMEOUT_MS = 30_000
+        const MAX_POLL_FAILURES = 3
         const syncInterval = setInterval(async () => {
+          const controller = new AbortController()
+          const timeoutId = setTimeout(() => controller.abort(), POLL_TIMEOUT_MS)
           try {
             const current = useAppStore.getState().messages
             // Exclude optimistic messages from newest date calculation
             const newestDate = current
               .filter(m => !m.id?.startsWith('optimistic_'))
               .reduce((max, m) => Math.max(max, m.date), 0)
-            if (newestDate === 0) return
+            if (newestDate === 0) {
+              clearTimeout(timeoutId)
+              return
+            }
 
             const response = await vpsService.getMessages({ limit: 500, after: newestDate })
-            if (response.messages.length === 0) return
+            // Poll succeeded - reset failure counter
+            pollFailureCountRef.current = 0
+            setPollError(false)
+
+            if (response.messages.length === 0) {
+              clearTimeout(timeoutId)
+              return
+            }
 
             const decrypted = await Promise.all(
               response.messages.map((msg: any) => decryptVpsMessage(msg))
@@ -420,18 +514,41 @@ export default function MessagesPage() {
             const mergedList = Array.from(merged.values()).sort((a, b) => b.date - a.date)
             setMessages(mergedList)
           } catch {
-            // Silently ignore poll failures
+            pollFailureCountRef.current += 1
+            if (pollFailureCountRef.current >= MAX_POLL_FAILURES) {
+              setPollError(true)
+            }
+          } finally {
+            clearTimeout(timeoutId)
           }
         }, 30000)
+
+        // Periodic plan refresh: check subscription expiry every 30 minutes
+        const PLAN_REFRESH_MS = 30 * 60 * 1000
+        const planRefreshInterval = setInterval(async () => {
+          try {
+            const data = await vpsService.getUsage()
+            const plan = data?.usage?.plan || 'free'
+            const prevPlan = localStorage.getItem('syncflow_user_plan')
+            localStorage.setItem('syncflow_user_plan', plan)
+            if (prevPlan && prevPlan !== 'free' && plan === 'free') {
+              console.log('[Messages] Plan downgraded to free — refreshing UI')
+            }
+          } catch {
+            // Silently ignore plan refresh failures
+          }
+        }, PLAN_REFRESH_MS)
 
         // Store cleanup refs for when effect unmounts
         const cleanupVPS = () => {
           clearInterval(syncInterval)
+          clearInterval(planRefreshInterval)
           vpsService.off('messages_synced', onMessagesSynced)
           vpsService.off('message_deleted', onMessageDeleted)
           vpsService.off('messages_deleted', onMessagesDeleted)
           vpsService.off('outgoing_status_changed', onOutgoingStatusChanged)
           vpsService.off('delivery_status_changed', onDeliveryStatusChanged)
+          vpsService.off('spam_updated', onSpamUpdated)
         }
         // Stash so the outer cleanup can call it
         ;(window as any).__vpsMessagesCleanup = cleanupVPS
@@ -453,14 +570,15 @@ export default function MessagesPage() {
         if (!currentUser) {
           // Try to sign in anonymously - the stored userId gives us data access
           // Firebase rules allow read if auth != null AND the path matches storedUserId
-          console.log('[Messages] No auth, attempting anonymous sign-in for data access')
+          if (process.env.NODE_ENV === 'development') {
+            console.log('[Messages] No auth, attempting anonymous sign-in for data access')
+          }
           try {
             const { signInAnonymously } = await import('firebase/auth')
             const { getAuth } = await import('firebase/auth')
             const auth = getAuth()
             const result = await signInAnonymously(auth)
             currentUser = result.user?.uid || null
-            console.log('[Messages] Anonymous sign-in successful:', currentUser)
           } catch (signInError) {
             console.error('[Messages] Failed to sign in anonymously:', signInError)
             // Redirect to pairing to re-establish connection
@@ -579,6 +697,53 @@ export default function MessagesPage() {
     userId,
   ])
 
+  // Load photos when Photos tab is selected
+  useEffect(() => {
+    if (activeFolder !== 'photos' || !userId) return
+    let cancelled = false
+    const loadPhotos = async () => {
+      setPhotosLoading(true)
+      try {
+        const res = await vpsService.getPhotos(100)
+        if (cancelled) return
+        const photosWithUrls = await Promise.all(
+          (res.photos || []).map(async (p: any) => {
+            let downloadUrl = ''
+            if (p.r2Key) {
+              try { downloadUrl = await vpsService.getPhotoDownloadUrl(p.r2Key) } catch {}
+            }
+            return {
+              id: p.id,
+              fileName: p.fileName || 'photo.jpg',
+              dateTaken: p.takenAt || p.syncedAt || 0,
+              size: p.fileSize || 0,
+              width: p.metadata?.width || 0,
+              height: p.metadata?.height || 0,
+              mimeType: p.contentType || 'image/jpeg',
+              uploadUrl: downloadUrl,
+              base64Data: undefined,
+            }
+          })
+        )
+        setPhotos(photosWithUrls)
+      } catch (err) {
+        console.error('Failed to load photos:', err)
+      }
+      setPhotosLoading(false)
+    }
+    loadPhotos()
+    return () => { cancelled = true }
+  }, [activeFolder, userId])
+
+  const handleDeletePhoto = async (photoId: string) => {
+    try {
+      await vpsService.deletePhoto(photoId)
+      setPhotos(prev => prev.filter(p => p.id !== photoId))
+    } catch (err) {
+      console.error('Failed to delete photo:', err)
+    }
+  }
+
   if (!userId) {
     return (
       <div className="flex items-center justify-center min-h-screen">
@@ -637,6 +802,16 @@ export default function MessagesPage() {
               </div>
             </div>
           )}
+          {pollError && (
+            <div className="flex-shrink-0 px-4 pt-2">
+              <div className="flex items-center gap-2 rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-orange-800 dark:border-orange-700/60 dark:bg-orange-900/20 dark:text-orange-200">
+                <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span className="text-xs">Having trouble syncing new messages. Check your connection.</span>
+              </div>
+            </div>
+          )}
           {!isConversationListVisible && (
             <div className="flex-shrink-0 p-4 border-b border-gray-200 dark:border-gray-700">
               <button
@@ -650,7 +825,20 @@ export default function MessagesPage() {
               </button>
             </div>
           )}
-          <MessageView onOpenAI={() => setShowAI(true)} />
+          {activeFolder === 'photos' ? (
+            <div className="flex-1 overflow-y-auto p-4">
+              <h2 className="text-lg font-semibold mb-4 text-gray-900 dark:text-white">Synced Photos</h2>
+              {photosLoading ? (
+                <div className="flex items-center justify-center py-12">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+                </div>
+              ) : (
+                <PhotoGallery photos={photos} onDelete={handleDeletePhoto} />
+              )}
+            </div>
+          ) : (
+            <MessageView onOpenAI={() => setShowAI(true)} />
+          )}
         </div>
       </div>
 

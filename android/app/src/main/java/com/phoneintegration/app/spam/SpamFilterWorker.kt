@@ -308,27 +308,35 @@ class SpamFilterWorker(
         try {
             val notificationHelper = com.phoneintegration.app.NotificationHelper(applicationContext)
             notificationHelper.showSpamScanStartedNotification()
-        } catch (_: Exception) { }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to show scan started notification", e)
+        }
     }
 
     private fun dismissScanningNotification() {
         try {
             val notificationHelper = com.phoneintegration.app.NotificationHelper(applicationContext)
             notificationHelper.dismissSpamScanningNotification()
-        } catch (_: Exception) { }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to dismiss scanning notification", e)
+        }
     }
 
     private fun showScanCompleteNotification(spamCount: Int, totalScanned: Int) {
         try {
             val notificationHelper = com.phoneintegration.app.NotificationHelper(applicationContext)
             notificationHelper.showSpamScanNotification(spamCount, totalScanned)
-        } catch (_: Exception) { }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to show scan complete notification", e)
+        }
     }
 
     private fun showProtectionActivatedNotification() {
         try {
             val notificationHelper = com.phoneintegration.app.NotificationHelper(applicationContext)
             notificationHelper.showSpamProtectionActivatedNotification()
-        } catch (_: Exception) { }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to show protection activated notification", e)
+        }
     }
 }

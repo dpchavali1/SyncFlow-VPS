@@ -73,6 +73,11 @@ import androidx.compose.material3.Switch
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 
 // =============================================================================
 // region DEVICE CACHE
@@ -219,11 +224,34 @@ fun DesktopIntegrationScreen(
     var isBackgroundSyncEnabled by remember { mutableStateOf(preferencesManager.backgroundSyncEnabled.value) }
     var hasNotificationPermission by remember { mutableStateOf(NotificationMirrorService.isEnabled(appContext)) }
     var isNotificationMirrorEnabled by remember { mutableStateOf(preferencesManager.notificationMirrorEnabled.value) }
+    var isPhotoSyncEnabled by remember { mutableStateOf(preferencesManager.photoSyncEnabled.value) }
+
+    // Photo permission helper
+    fun hasPhotoPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.checkSelfPermission(appContext, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(appContext, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    val photoPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            isPhotoSyncEnabled = true
+            preferencesManager.setPhotoSyncEnabled(true)
+        } else {
+            isPhotoSyncEnabled = false
+            errorMessage = "Photo permission is required for photo sync. Please grant it in Settings."
+        }
+    }
 
     fun refreshSettings() {
         isBackgroundSyncEnabled = preferencesManager.backgroundSyncEnabled.value
         hasNotificationPermission = NotificationMirrorService.isEnabled(appContext)
         isNotificationMirrorEnabled = preferencesManager.notificationMirrorEnabled.value
+        isPhotoSyncEnabled = preferencesManager.photoSyncEnabled.value
         android.util.Log.d("DesktopIntegrationScreen", "Settings refreshed: notificationPermission=$hasNotificationPermission, mirrorEnabled=$isNotificationMirrorEnabled")
     }
 
@@ -1169,7 +1197,12 @@ fun DesktopIntegrationScreen(
                                     style = MaterialTheme.typography.titleMedium
                                 )
                                 Text(
-                                    text = "Plan: ${userPlan.replaceFirstChar { it.uppercase() }}",
+                                    text = "Plan: ${when(userPlan.lowercase()) {
+                                        "lifetime", "3year" -> "3-Year"
+                                        "yearly", "pro_yearly" -> "Yearly"
+                                        "monthly", "pro_monthly" -> "Monthly"
+                                        else -> "Free"
+                                    }}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -1718,55 +1751,104 @@ fun DesktopIntegrationScreen(
                     modifier = Modifier.fillMaxWidth(),
                     elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
                 ) {
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                            .padding(16.dp)
                     ) {
-                        Icon(
-                            Icons.Default.Photo,
-                            "Photo Sync",
-                            modifier = Modifier.size(24.dp),
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                        Spacer(modifier = Modifier.width(16.dp))
-                        Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Photo,
+                                "Photo Sync",
+                                modifier = Modifier.size(24.dp),
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Spacer(modifier = Modifier.width(16.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Photo Sync",
+                                    style = MaterialTheme.typography.titleMedium
+                                )
+                                Text(
+                                    text = "Auto-sync recent photos to Mac/Web",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = isPhotoSyncEnabled,
+                                onCheckedChange = { enabled ->
+                                    if (enabled && !hasPhotoPermission()) {
+                                        // Request permission first — toggle will be set in the callback
+                                        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+                                            Manifest.permission.READ_MEDIA_IMAGES
+                                        else
+                                            Manifest.permission.READ_EXTERNAL_STORAGE
+                                        photoPermissionLauncher.launch(permission)
+                                    } else {
+                                        isPhotoSyncEnabled = enabled
+                                        preferencesManager.setPhotoSyncEnabled(enabled)
+                                        android.util.Log.d("DesktopIntegrationScreen", "Photo sync ${if (enabled) "enabled" else "disabled"}")
+                                    }
+                                }
+                            )
+                        }
+                        if (isPhotoSyncEnabled) {
+                            Spacer(modifier = Modifier.height(12.dp))
+
+                            // Photo limit slider
+                            var photoLimit by remember { mutableStateOf(preferencesManager.photoSyncLimit.value.toFloat()) }
                             Text(
-                                text = "Photo Sync",
-                                style = MaterialTheme.typography.titleMedium
+                                text = "Photos to sync: ${photoLimit.toInt()}",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Slider(
+                                value = photoLimit,
+                                onValueChange = { photoLimit = it },
+                                onValueChangeFinished = {
+                                    preferencesManager.setPhotoSyncLimit(photoLimit.toInt())
+                                },
+                                valueRange = 5f..100f,
+                                steps = 18, // 5,10,15,...,100 = 20 values, 18 steps between
+                                modifier = Modifier.fillMaxWidth()
                             )
                             Text(
-                                text = "Sync recent photos to desktop (Premium feature)",
+                                text = "More photos use more storage quota",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                        }
-                        TextButton(
-                            onClick = {
-                                scope.launch {
-                                    try {
-                                        isLoading = true
-                                        val photoSyncService = PhotoSyncService(appContext)
-                                        val result = photoSyncService.syncRecentPhotos()
 
-                                        result.onSuccess { message ->
-                                            successMessage = message
-                                            showSuccessDialog = true
-                                        }.onFailure { error ->
-                                            errorMessage = error.message ?: "Photo sync failed"
+                            Spacer(modifier = Modifier.height(8.dp))
+                            TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        try {
+                                            isLoading = true
+                                            val photoSyncService = PhotoSyncService(appContext)
+                                            val result = photoSyncService.syncRecentPhotos()
+
+                                            result.onSuccess { message ->
+                                                successMessage = message
+                                                showSuccessDialog = true
+                                            }.onFailure { error ->
+                                                errorMessage = error.message ?: "Photo sync failed"
+                                            }
+
+                                        } catch (e: Exception) {
+                                            errorMessage = "Photo sync failed: ${e.message}"
+                                        } finally {
+                                            isLoading = false
                                         }
-
-                                    } catch (e: Exception) {
-                                        errorMessage = "Photo sync failed: ${e.message}"
-                                    } finally {
-                                        isLoading = false
                                     }
-                                }
-                            },
-                            enabled = !isLoading
-                        ) {
-                            Text(if (isLoading) "Syncing..." else "Sync Now")
+                                },
+                                enabled = !isLoading,
+                                modifier = Modifier.align(Alignment.End)
+                            ) {
+                                Text(if (isLoading) "Syncing..." else "Sync Now")
+                            }
                         }
                     }
                 }

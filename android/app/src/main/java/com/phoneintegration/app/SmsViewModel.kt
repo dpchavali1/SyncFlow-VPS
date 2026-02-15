@@ -1,6 +1,7 @@
 package com.phoneintegration.app
 
 import android.app.Application
+import android.content.Context
 import android.database.ContentObserver
 import android.os.Handler
 import android.os.Looper
@@ -35,6 +36,7 @@ import com.phoneintegration.app.data.PreferencesManager
 import com.phoneintegration.app.realtime.ReadReceiptManager
 import com.phoneintegration.app.realtime.ReadReceipt
 import com.phoneintegration.app.realtime.ReadReceiptPayload
+import com.phoneintegration.app.utils.DefaultSmsHelper
 
 class SmsViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -60,6 +62,32 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
     private val mmsOverrides = mutableMapOf<Long, SmsMessage>()
     private val mmsCache = MmsAttachmentCache(app.applicationContext)
     private var currentConversationKey: String? = null
+
+    // Local read-thread tracking for when SyncFlow is NOT the default SMS app.
+    // Maps threadId → timestamp when the user marked it read in SyncFlow.
+    private val localReadThreads: MutableMap<Long, Long> = mutableMapOf()
+    private val readThreadsPrefs = app.applicationContext.getSharedPreferences("read_threads", Context.MODE_PRIVATE)
+
+    private fun loadLocalReadThreads() {
+        localReadThreads.clear()
+        val all = readThreadsPrefs.all
+        val now = System.currentTimeMillis()
+        val thirtyDaysMs = 30L * 24 * 60 * 60 * 1000
+        for ((key, value) in all) {
+            val threadId = key.toLongOrNull() ?: continue
+            val ts = value as? Long ?: continue
+            if (now - ts < thirtyDaysMs) {
+                localReadThreads[threadId] = ts
+            }
+        }
+        Log.d("SmsViewModel", "Loaded ${localReadThreads.size} locally-read threads")
+    }
+
+    private fun persistLocalReadThread(threadId: Long) {
+        val ts = System.currentTimeMillis()
+        localReadThreads[threadId] = ts
+        readThreadsPrefs.edit().putLong(threadId.toString(), ts).apply()
+    }
 
     private val _relatedAddresses = MutableStateFlow<List<String>>(emptyList())
     val relatedAddresses: StateFlow<List<String>> = _relatedAddresses.asStateFlow()
@@ -211,6 +239,9 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     init {
+        // Load local read-thread overrides (for non-default-app mode)
+        loadLocalReadThreads()
+
         // INSTANT: Load from persistent cache FIRST (before anything else)
         viewModelScope.launch(Dispatchers.IO) {
             loadFromPersistentCacheInstantly()
@@ -239,8 +270,6 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
 
-        // Temporarily commented out read receipts functionality
-        /*
         viewModelScope.launch {
             try {
                 readReceiptManager.observeReadReceipts().collect { receipts ->
@@ -250,7 +279,6 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
                 Log.e("SmsViewModel", "Error listening for read receipts", e)
             }
         }
-        */
 
         viewModelScope.launch(Dispatchers.IO) {
             spamMessageDao.getSpamAddressesFlow().collect { addresses ->
@@ -493,8 +521,8 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
     private val _messageReactions = MutableStateFlow<Map<Long, String>>(emptyMap())
     val messageReactions = _messageReactions.asStateFlow()
 
-    // private val _readReceipts = MutableStateFlow<Map<String, ReadReceipt>>(emptyMap())
-    // val readReceipts = _readReceipts.asStateFlow()
+    private val _readReceipts = MutableStateFlow<Map<String, ReadReceipt>>(emptyMap())
+    val readReceipts = _readReceipts.asStateFlow()
 
     // SIM filtering support
     private val _selectedSimFilter = MutableStateFlow<Int?>(null)
@@ -543,12 +571,10 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
         if (messages.isEmpty()) return
 
         val normalizedAddress = PhoneNumberUtils.normalizeForConversation(conversationAddress)
-        // val existingReceipts = _readReceipts.value // Temporarily commented out
+        val existingReceipts = _readReceipts.value
 
         val payloads = messages.asSequence()
             .filter { it.type == 1 && it.id > 0 }
-            // Temporarily commented out for compilation
-            /*
             .map { message ->
                 ReadReceiptPayload(
                     messageKey = getMessageKey(message),
@@ -558,17 +584,13 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
             }
             .filter { payload -> !existingReceipts.containsKey(payload.messageKey) }
             .distinctBy { it.messageKey }
-            */
             .toList()
 
         if (payloads.isEmpty()) return
 
-        // Temporarily commented out read receipts functionality
-        /*
         viewModelScope.launch(Dispatchers.IO) {
             readReceiptManager.markMultipleAsRead(payloads, normalizedAddress)
         }
-        */
     }
 
     fun markThreadRead(threadId: Long) {
@@ -590,10 +612,26 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
         }
 
         viewModelScope.launch(Dispatchers.IO) {
+            var wroteToProvider = true
             relatedThreadIds.forEach { id ->
-                repo.markThreadRead(id)
+                val wrote = repo.markThreadRead(id)
+                if (!wrote) wroteToProvider = false
             }
-            // Also reload to ensure consistency with system data
+
+            // If not the default SMS app, persist read status locally so it
+            // survives loadConversations() reloads from the content provider.
+            if (!wroteToProvider) {
+                relatedThreadIds.forEach { id -> persistLocalReadThread(id) }
+            }
+
+            // Sync read status to Mac/Web via VPS
+            val address = currentAddress
+            if (address.isNotEmpty()) {
+                val messages = _conversationMessages.value
+                markConversationMessagesRead(address, messages)
+            }
+
+            // Reload to ensure consistency with system data
             withContext(Dispatchers.Main) {
                 loadConversations(forceReload = true)
             }
@@ -835,11 +873,25 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
 
             Log.d("SmsViewModel", "Loaded ${smsList.size} conversations in ${System.currentTimeMillis() - startTime}ms")
 
+            // When NOT the default SMS app, the content provider still shows unread
+            // counts because we can't write to it. Apply local read overrides.
+            val finalList = if (!DefaultSmsHelper.isDefaultSmsApp(getApplication()) && localReadThreads.isNotEmpty()) {
+                smsList.map { conv ->
+                    if (conv.unreadCount > 0 && localReadThreads.containsKey(conv.threadId)) {
+                        conv.copy(unreadCount = 0)
+                    } else {
+                        conv
+                    }
+                }
+            } else {
+                smsList
+            }
+
             // INSTANT: Update UI immediately (safely)
             try {
-                cachedConversations = smsList
+                cachedConversations = finalList
                 lastLoadTime = System.currentTimeMillis()
-                _conversations.value = listOf(adsConversation) + smsList
+                _conversations.value = listOf(adsConversation) + finalList
                 _isLoading.value = false
                 initialLoadComplete = true
             } catch (e: Exception) {
@@ -852,7 +904,7 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
             // Save to persistent cache for instant startup next time
             viewModelScope.launch(Dispatchers.IO) {
                 try {
-                    saveToPersistentCache(smsList)
+                    saveToPersistentCache(finalList)
                 } catch (e: Exception) {
                     Log.e("SmsViewModel", "Error saving to persistent cache", e)
                 }
@@ -909,18 +961,31 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
                         .thenByDescending { it.timestamp }
                 )
 
-                cachedConversations = smsList
+                // Apply local read overrides when not the default SMS app
+                val finalList = if (!DefaultSmsHelper.isDefaultSmsApp(getApplication()) && localReadThreads.isNotEmpty()) {
+                    smsList.map { conv ->
+                        if (conv.unreadCount > 0 && localReadThreads.containsKey(conv.threadId)) {
+                            conv.copy(unreadCount = 0)
+                        } else {
+                            conv
+                        }
+                    }
+                } else {
+                    smsList
+                }
+
+                cachedConversations = finalList
                 lastLoadTime = System.currentTimeMillis()
 
                 withContext(Dispatchers.Main) {
-                    _conversations.value = listOf(adsConversation) + smsList
+                    _conversations.value = listOf(adsConversation) + finalList
                 }
 
                 // Save to persistent cache
-                saveToPersistentCache(smsList)
+                saveToPersistentCache(finalList)
 
                 // Also resolve names in background
-                resolveContactNamesBatch(smsList)
+                resolveContactNamesBatch(finalList)
             } catch (e: Exception) {
                 Log.e("SmsViewModel", "Background refresh failed", e)
             }

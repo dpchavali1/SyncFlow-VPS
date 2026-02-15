@@ -169,10 +169,7 @@ function ensureFirebaseInitialized() {
 
   // CRITICAL: Skip Firebase initialization in VPS mode
   if (typeof window !== 'undefined' && isVPSMode()) {
-    if (!vpsSkipLogged) {
-      console.log('[Firebase] VPS mode enabled - skipping Firebase initialization')
-      vpsSkipLogged = true
-    }
+    vpsSkipLogged = true
     return
   }
 
@@ -194,7 +191,6 @@ function ensureFirebaseInitialized() {
   storage = getStorage(app)
   functions = getFunctions(app)
 
-  console.log('[Firebase] Initialized successfully')
 }
 
 // Auto-initialize on module load (will be skipped in VPS mode)
@@ -219,13 +215,11 @@ export { app, auth, database, storage, functions }
 export const signInAnon = async () => {
   // Skip in VPS mode - VPS uses its own auth
   if (typeof window !== 'undefined' && isVPSMode()) {
-    console.log('[Firebase] signInAnon skipped - VPS mode active')
     return null
   }
 
   ensureFirebaseInitialized()
   if (!auth) {
-    console.log('[Firebase] signInAnon skipped - auth not initialized')
     return null
   }
 
@@ -341,7 +335,6 @@ export interface PairingStatus {
 export const initiatePairing = async (deviceName?: string, syncGroupId?: string): Promise<PairingSession> => {
   // Skip in VPS mode - VPS has its own pairing system
   if (typeof window !== 'undefined' && isVPSMode()) {
-    console.log('[Firebase] initiatePairing skipped - VPS mode active')
     throw new Error('Use VPS pairing in VPS mode')
   }
 
@@ -357,7 +350,9 @@ export const initiatePairing = async (deviceName?: string, syncGroupId?: string)
     // Dynamic import to avoid SSR issues
     const { getDeviceId } = await import('./deviceId')
     deviceId = await getDeviceId()
-    console.log('[Pairing] Using persistent device ID:', deviceId)
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[Pairing] Using persistent device ID:', deviceId)
+    }
   } catch (error) {
     console.warn('[Pairing] Failed to get persistent device ID, using fallback')
     deviceId = typeof window !== 'undefined' ? localStorage.getItem('syncflow_device_id') : null
@@ -374,7 +369,9 @@ export const initiatePairing = async (deviceName?: string, syncGroupId?: string)
     })
     const data = result.data as { success: boolean; token: string; qrPayload: string; expiresAt: number }
     if (data.success) {
-      console.log('[Pairing] V2 session created:', data.token?.slice(0, 8) + '...')
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[Pairing] V2 session created:', data.token?.slice(0, 8) + '...')
+      }
       return {
         token: data.token,
         qrPayload: data.qrPayload,
@@ -421,14 +418,10 @@ export const listenForPairingApproval = (
   // V1 path (pending_pairings) - legacy system
   const v1Ref = ref(database, `${PENDING_PAIRINGS_PATH}/${token}`)
 
-  console.log('[Pairing] Starting dual listener for token:', token.slice(0, 8) + '...')
-
   let hasResolved = false
 
   const handleSnapshot = async (snapshot: any, version: string) => {
     if (hasResolved) return
-
-    console.log(`[Pairing] ${version} update, exists:`, snapshot.exists())
 
     if (!snapshot.exists()) {
       // Don't mark as expired yet - might be on the other path
@@ -436,23 +429,19 @@ export const listenForPairingApproval = (
     }
 
     const data = snapshot.val()
-    console.log(`[Pairing] ${version} status:`, data.status)
     const now = Date.now()
 
     if (data.expiresAt && now > data.expiresAt) {
-      console.log(`[Pairing] ${version} token expired`)
       hasResolved = true
       callback({ status: 'expired' })
       return
     }
 
     if (data.status === 'approved' && data.customToken) {
-      console.log(`[Pairing] ${version} Approved! Signing in with custom token...`)
       hasResolved = true
       // Sign in with the custom token provided by Android approval
       try {
         await signInWithCustomToken(auth, data.customToken)
-        console.log('[Pairing] Sign-in successful, pairedUid:', data.pairedUid)
         callback({
           status: 'approved',
           pairedUid: data.pairedUid,
@@ -467,13 +456,11 @@ export const listenForPairingApproval = (
     }
 
     if (data.status === 'rejected') {
-      console.log(`[Pairing] ${version} Pairing was rejected`)
       hasResolved = true
       callback({ status: 'rejected' })
       return
     }
 
-    console.log(`[Pairing] ${version} Status is pending`)
     callback({ status: 'pending' })
   }
 
@@ -510,13 +497,11 @@ export const getCurrentUserId = () => {
 export const waitForAuth = (): Promise<string | null> => {
   // Skip in VPS mode - VPS uses its own auth
   if (typeof window !== 'undefined' && isVPSMode()) {
-    console.log('[Firebase] waitForAuth skipped - VPS mode active')
     return Promise.resolve(null)
   }
 
   ensureFirebaseInitialized()
   if (!auth) {
-    console.log('[Firebase] waitForAuth skipped - auth not initialized')
     return Promise.resolve(null)
   }
 
@@ -557,13 +542,13 @@ const TRIAL_DAYS = 7
 
 /** Trial/Free tier: 500MB upload limit per month */
 const TRIAL_MONTHLY_UPLOAD_BYTES = 500 * 1024 * 1024
-/** Trial/Free tier: 1GB total storage limit */
-const TRIAL_STORAGE_BYTES = 1 * 1024 * 1024 * 1024
+/** Trial/Free tier: 100MB total storage limit */
+const TRIAL_STORAGE_BYTES = 100 * 1024 * 1024
 
-/** Paid tier: 3GB upload limit per month */
-const PAID_MONTHLY_UPLOAD_BYTES = 3 * 1024 * 1024 * 1024
-/** Paid tier: 15GB total storage limit */
-const PAID_STORAGE_BYTES = 15 * 1024 * 1024 * 1024
+/** Paid tier: 2GB upload limit per month */
+const PAID_MONTHLY_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
+/** Paid tier: 1GB total storage limit */
+const PAID_STORAGE_BYTES = 1 * 1024 * 1024 * 1024
 
 /**
  * COST OPTIMIZATION: Cleanup configuration by plan type
@@ -611,7 +596,7 @@ const CLEANUP_CONFIG = {
     maxMessagesPerConversation: 1000, // Keep last 1000 messages
     mmsRetentionDays: 90,        // Keep MMS for 90 days (more generous than free)
     smsOnly: false,              // Paid tier: All message types allowed
-    maxStorageGB: 5,             // 5 GB per user
+    maxStorageGB: 1,             // 1 GB per user
   }
 }
 
@@ -898,6 +883,8 @@ export interface UsageSummary {
   photoBytes: number
   /** Last time usage was updated */
   lastUpdatedAt: number | null
+  /** When the monthly upload counter resets (epoch ms) */
+  monthlyResetDate: number | null
   /** Whether user has active paid subscription */
   isPaid: boolean
 }
@@ -912,7 +899,6 @@ export interface UsageSummary {
 export const getUsageSummary = async (userId: string): Promise<UsageSummary> => {
   // Skip in VPS mode - return default usage data
   if (typeof window !== 'undefined' && isVPSMode()) {
-    console.log('[Firebase] getUsageSummary skipped - VPS mode active')
     return {
       planLabel: 'VPS Mode',
       planExpiresAt: null,
@@ -925,6 +911,7 @@ export const getUsageSummary = async (userId: string): Promise<UsageSummary> => 
       fileBytes: 0,
       photoBytes: 0,
       lastUpdatedAt: null,
+      monthlyResetDate: null,
       isPaid: true, // Treat VPS mode as "paid" to avoid limits
     }
   }
@@ -984,6 +971,7 @@ export const getUsageSummary = async (userId: string): Promise<UsageSummary> => 
     fileBytes,
     photoBytes: 0,
     lastUpdatedAt,
+    monthlyResetDate: null,
     isPaid,
   }
 }
@@ -1170,7 +1158,6 @@ export const markMessageAsSpam = async (
   }
 
   await set(spamRef, payload)
-  console.log('Message marked as spam:', messageId)
 }
 
 /**
@@ -1182,7 +1169,6 @@ export const markMessageAsSpam = async (
 export const deleteSpamMessage = async (userId: string, messageId: string): Promise<void> => {
   const spamRef = ref(database, `${USERS_PATH}/${userId}/spam_messages/${messageId}`)
   await remove(spamRef)
-  console.log('Spam message deleted:', messageId)
 }
 
 /**
@@ -1194,7 +1180,6 @@ export const deleteSpamMessage = async (userId: string, messageId: string): Prom
  */
 export const unmarkMessageAsSpam = async (userId: string, messageId: string): Promise<void> => {
   await deleteSpamMessage(userId, messageId)
-  console.log('Message unmarked as spam:', messageId)
 }
 
 // ============================================
@@ -1404,8 +1389,6 @@ export const sendMmsFromWeb = async (
   body: string,
   attachments: Array<{ url: string; contentType: string; fileName: string }>
 ) => {
-  console.log(`[WebSend] Sending MMS to address: "${address}" (normalized: "${normalizePhoneNumber(address)}"), body: "${body.substring(0, 50)}${body.length > 50 ? '...' : ''}", attachments: ${attachments.length}`)
-
   const outgoingRef = ref(database, `${USERS_PATH}/${userId}/${OUTGOING_MESSAGES_PATH}`)
   const newMessageRef = push(outgoingRef)
 
@@ -1602,7 +1585,6 @@ export const ensureWebDeviceRegistered = async (userId: string, deviceName?: str
 export const ensureWebE2EEKeyPublished = async (userId: string) => {
   // Skip in VPS mode - VPS handles E2EE key management differently
   if (typeof window !== 'undefined' && isVPSMode()) {
-    console.log('[Firebase] ensureWebE2EEKeyPublished skipped - VPS mode active')
     return
   }
 
@@ -1636,7 +1618,6 @@ const getAndroidDeviceId = async (userId: string) => {
 export const ensureWebE2EEKeyBackup = async (userId: string) => {
   // Skip in VPS mode - VPS handles E2EE key management differently
   if (typeof window !== 'undefined' && isVPSMode()) {
-    console.log('[Firebase] ensureWebE2EEKeyBackup skipped - VPS mode active')
     return
   }
 
@@ -1676,7 +1657,6 @@ export const ensureWebE2EEKeyBackup = async (userId: string) => {
 export const requestWebE2EEKeySync = async (userId: string) => {
   // Skip in VPS mode - VPS handles E2EE key sync differently
   if (typeof window !== 'undefined' && isVPSMode()) {
-    console.log('[Firebase] requestWebE2EEKeySync skipped - VPS mode active')
     return
   }
 
@@ -1699,8 +1679,7 @@ export const requestWebE2EEKeySync = async (userId: string) => {
  * @deprecated Backfill no longer needed with shared sync group keypair (v3)
  */
 export const requestWebE2EEKeyBackfill = async (userId: string) => {
-  console.log('Backfill request ignored - using shared sync group keypair (v3)')
-  // No-op: Backfill not needed with shared sync group keypair
+  // No-op: Backfill not needed with shared sync group keypair (v3)
 }
 
 /**
@@ -1724,7 +1703,6 @@ export const listenToWebE2EEBackfillStatus = (
   userId: string,
   callback: (status: WebE2eeBackfillStatus | null) => void
 ) => {
-  console.log('Backfill status listener disabled - using shared sync group keypair (v3)')
   callback(null)
   return () => {}
 }
@@ -1735,7 +1713,6 @@ export const waitForWebE2EEKeySyncResponse = async (
 ) => {
   // Skip in VPS mode - VPS handles E2EE key sync differently
   if (typeof window !== 'undefined' && isVPSMode()) {
-    console.log('[Firebase] waitForWebE2EEKeySyncResponse skipped - VPS mode active')
     return true // Return success to avoid blocking UI
   }
 
@@ -1837,7 +1814,6 @@ export const listenToDeviceStatus = (
 ) => {
   // Skip in VPS mode - VPS handles device status differently
   if (typeof window !== 'undefined' && isVPSMode()) {
-    console.log('[Firebase] listenToDeviceStatus skipped - VPS mode active')
     callback(true) // Assume paired in VPS mode
     return () => {} // Return empty cleanup function
   }
@@ -2869,7 +2845,6 @@ export const cleanupEmptyUserNodes = async (inactiveDays?: number): Promise<numb
         const hasDevices = data.devices && Object.keys(data.devices).length > 0
 
         if (!hasMessages && !hasDevices && lastActivity > 0 && lastActivity < cutoff) {
-          console.log(`Deleting empty user node: ${userId} (last activity: ${new Date(lastActivity).toISOString()})`)
           deletePromises.push(remove(child.ref))
           deletedCount++
         }
@@ -2877,7 +2852,6 @@ export const cleanupEmptyUserNodes = async (inactiveDays?: number): Promise<numb
 
       if (deletePromises.length > 0) {
         await Promise.all(deletePromises)
-        console.log(`Cleaned up ${deletedCount} empty user nodes`)
       }
     }
   } catch (error) {
@@ -2908,7 +2882,6 @@ export const cleanupOrphanedUsers = async (inactiveDays: number = 30): Promise<n
         const hasMessages = data.messages && Object.keys(data.messages).length > 0
 
         if (!hasMessages && lastActivity > 0 && lastActivity < cutoff) {
-          console.log(`Deleting orphaned user: ${userId} (last activity: ${new Date(lastActivity).toISOString()})`)
           deletePromises.push(remove(child.ref))
           deletedCount++
         }
@@ -2916,7 +2889,6 @@ export const cleanupOrphanedUsers = async (inactiveDays: number = 30): Promise<n
 
       if (deletePromises.length > 0) {
         await Promise.all(deletePromises)
-        console.log(`Cleaned up ${deletedCount} orphaned users`)
         addAdminAuditLog('cleanup_orphaned_users', 'system', `Deleted ${deletedCount} orphaned user accounts`)
       }
     }
@@ -2992,8 +2964,6 @@ export const detectDuplicateUsersByDevice = async (): Promise<Array<{
             potentialMergeCandidates
           })
 
-          console.log(`Found ${userIds.length} users on device ${deviceId}:`, userIds,
-            potentialMergeCandidates ? '(Likely duplicates)' : '')
         }
       })
     }
@@ -3017,11 +2987,9 @@ export const deleteDetectedDuplicates = async (): Promise<{
   let devicesProcessed = 0
 
   try {
-    console.log('Starting duplicate user deletion...')
     const duplicates = await detectDuplicateUsersByDevice()
 
     if (duplicates.length === 0) {
-      console.log('No duplicates found to delete')
       return { success: true, deletedCount: 0, devicesProcessed: 0, details: ['No duplicates found'] }
     }
 
@@ -3082,7 +3050,6 @@ export const deleteDetectedDuplicates = async (): Promise<{
           deletedCount++
 
           const deleteReason = userInfo.hasDevices ? `has devices but older (${new Date(userInfo.lastActivity).toLocaleDateString()})` : `no devices, last activity: ${new Date(userInfo.lastActivity).toLocaleDateString()}`
-          console.log(`Deleting duplicate user: ${userId} - ${deleteReason}`)
           details.push(`  🗑️ Deleted: ${userId.substring(0, 20)}... (${deleteReason})`)
         }
 
@@ -3092,7 +3059,6 @@ export const deleteDetectedDuplicates = async (): Promise<{
       await Promise.all(deletePromises)
     }
 
-    console.log(`Duplicate deletion complete: ${deletedCount} users deleted from ${devicesProcessed} devices`)
     addAdminAuditLog('delete_duplicates', 'system', `Deleted ${deletedCount} duplicate users from ${devicesProcessed} devices`)
 
     // Send email report for manual duplicate deletion
@@ -3113,7 +3079,6 @@ export const deleteDetectedDuplicates = async (): Promise<{
 
     try {
       await sendCleanupReport(cleanupStats, 'admin', 'MANUAL')
-      console.log('✅ Duplicate deletion report email sent')
     } catch (emailError) {
       console.error('Failed to send deletion report email:', emailError)
     }
@@ -3146,7 +3111,6 @@ export const cleanupUserDataByPlan = async (userId: string): Promise<{
     const userPlan = usage.plan || 'trial'
 
     const config = getCleanupConfig(userPlan)
-    console.log(`Running cleanup for user ${userId} on plan: ${userPlan}`, config)
 
     // Run cleanup operations with plan-specific settings
     const oldNotifCount = await cleanupOldNotifications(userId, config.notificationDays)
@@ -3220,7 +3184,6 @@ export const deleteUsersWithoutDevices = async (): Promise<{
   let r2FilesDeleted = 0
 
   try {
-    console.log('Starting deletion of users without devices...')
     const usersRef = ref(database, USERS_PATH)
     const snapshot = await get(usersRef)
 
@@ -3238,7 +3201,6 @@ export const deleteUsersWithoutDevices = async (): Promise<{
               deletedCount++
               r2FilesDeleted += result.deletedData.r2Files
               details.push(`✓ Deleted user ${userId.substring(0, 20)}... (no devices, ${result.deletedData.r2Files} R2 files)`)
-              console.log(`Deleted user without devices: ${userId}`)
             } else {
               details.push(`✗ Failed to delete ${userId.substring(0, 20)}...: ${result.errors.join(', ')}`)
             }
@@ -3250,7 +3212,6 @@ export const deleteUsersWithoutDevices = async (): Promise<{
       }
     }
 
-    console.log(`Deleted ${deletedCount} users without devices, ${r2FilesDeleted} R2 files`)
     addAdminAuditLog('delete_users_no_devices', 'system', `Deleted ${deletedCount} users without devices, ${r2FilesDeleted} R2 files`)
 
     return { success: true, deletedCount, r2FilesDeleted, details }
@@ -3270,7 +3231,6 @@ export const deleteOldMessages = async (plan: string | null = null): Promise<{
   let totalDeleted = 0
 
   try {
-    console.log('Starting old message cleanup...')
     const config = getCleanupConfig(plan)
     const retentionMs = config.messageRetentionDays * 24 * 60 * 60 * 1000
     const cutoffTime = Date.now() - retentionMs
@@ -3303,7 +3263,6 @@ export const deleteOldMessages = async (plan: string | null = null): Promise<{
 
           if (userDeleted > 0) {
             detailsByUser[userId] = userDeleted
-            console.log(`Deleted ${userDeleted} old messages for user ${userId}`)
           }
         } catch (userError) {
           console.error(`Error cleaning messages for user ${userId}:`, userError)
@@ -3311,7 +3270,6 @@ export const deleteOldMessages = async (plan: string | null = null): Promise<{
       }
     }
 
-    console.log(`Total old messages deleted: ${totalDeleted}`)
     addAdminAuditLog('delete_old_messages', 'system', `Deleted ${totalDeleted} old messages`)
 
     return { success: true, messagesDeleted: totalDeleted, detailsByUser }
@@ -3335,7 +3293,6 @@ export const deleteOldMmsMessages = async (plan: string | null = null): Promise<
   let estimatedSavedMB = 0
 
   try {
-    console.log('Starting aggressive MMS cleanup...')
     const config = getCleanupConfig(plan)
     const mmsRetentionMs = config.mmsRetentionDays * 24 * 60 * 60 * 1000
     const mmssCutoffTime = Date.now() - mmsRetentionMs
@@ -3394,7 +3351,6 @@ export const deleteOldMmsMessages = async (plan: string | null = null): Promise<
 
           if (userDeleted > 0) {
             detailsByUser[userId] = userDeleted
-            console.log(`Deleted ${userDeleted} old MMS messages for user ${userId}`)
           }
         } catch (userError) {
           console.error(`Error cleaning MMS for user ${userId}:`, userError)
@@ -3402,7 +3358,6 @@ export const deleteOldMmsMessages = async (plan: string | null = null): Promise<
       }
     }
 
-    console.log(`Total MMS deleted: ${totalDeleted}, R2 files: ${r2FilesDeleted}, Estimated storage saved: ${estimatedSavedMB}MB`)
     addAdminAuditLog('delete_old_mms', 'system', `Deleted ${totalDeleted} MMS messages, ${r2FilesDeleted} R2 files, saved ~${estimatedSavedMB}MB`)
 
     return { success: true, mmsDeleted: totalDeleted, r2FilesDeleted, storageSavedMB: estimatedSavedMB, detailsByUser }
@@ -3422,7 +3377,6 @@ export const enforceSmsFreeMessages = async (): Promise<{
   let usersProcessed = 0
 
   try {
-    console.log('Starting SMS-only enforcement for free tier...')
     const usersRef = ref(database, USERS_PATH)
     const snapshot = await get(usersRef)
 
@@ -3451,7 +3405,6 @@ export const enforceSmsFreeMessages = async (): Promise<{
                   const msgRef = ref(database, `${USERS_PATH}/${userId}/messages/${messageId}`)
                   await remove(msgRef)
                   totalRemoved++
-                  console.log(`Removed non-SMS message ${messageId} for free user ${userId}`)
                 }
               }
             }
@@ -3462,7 +3415,6 @@ export const enforceSmsFreeMessages = async (): Promise<{
       }
     }
 
-    console.log(`SMS enforcement complete: ${totalRemoved} non-SMS messages removed from ${usersProcessed} free users`)
     addAdminAuditLog('enforce_sms_free', 'system', `Removed ${totalRemoved} non-SMS messages from ${usersProcessed} free users`)
 
     return { success: true, messagesRemoved: totalRemoved, usersProcessed }
@@ -3491,8 +3443,6 @@ export const runSmartGlobalCleanup = async (): Promise<{
   }
 
   try {
-    console.log('Starting smart global cleanup...')
-
     // Get all users
     const usersRef = ref(database, USERS_PATH)
     const snapshot = await get(usersRef)
@@ -3520,7 +3470,6 @@ export const runSmartGlobalCleanup = async (): Promise<{
     const duplicates = await detectDuplicateUsersByDevice()
     results.duplicatesDetected = duplicates.filter(d => d.potentialMergeCandidates).length
 
-    console.log('Smart global cleanup completed:', results)
     addAdminAuditLog('global_cleanup_complete', 'system', JSON.stringify(results))
 
     // Email report is sent by the caller (route handler) to avoid duplicates
@@ -3641,7 +3590,6 @@ export const getUserDataSummary = async (userId: string): Promise<{
     }
 
     const data = snapshot.val()
-    console.log(`User ${userId} data:`, data) // Debug log
 
     let messagesCount = 0
     let devicesCount = 0
@@ -3651,13 +3599,9 @@ export const getUserDataSummary = async (userId: string): Promise<{
     if (data.messages && typeof data.messages === 'object') {
       const messageKeys = Object.keys(data.messages)
       messagesCount = messageKeys.length
-      console.log(`User ${userId} has ${messagesCount} messages`)
 
       // Find last activity - check first few messages for timestamp structure
       if (messagesCount > 0) {
-        const sampleMessage = data.messages[messageKeys[0]]
-        console.log(`Sample message structure:`, sampleMessage)
-
         const timestamps = Object.values(data.messages)
           .map((msg: any) => {
             // Try different timestamp field names
@@ -3667,19 +3611,13 @@ export const getUserDataSummary = async (userId: string): Promise<{
 
         if (timestamps.length > 0) {
           lastActivity = Math.max(...timestamps)
-          console.log(`Last activity timestamp: ${lastActivity}`)
         }
       }
-    } else {
-      console.log(`User ${userId} has no messages object or invalid structure`)
     }
 
     // Check for devices
     if (data.devices && typeof data.devices === 'object') {
       devicesCount = Object.keys(data.devices).length
-      console.log(`User ${userId} has ${devicesCount} devices`)
-    } else {
-      console.log(`User ${userId} has no devices object or invalid structure`)
     }
 
     // Also check for other possible data structures
@@ -3694,7 +3632,6 @@ export const getUserDataSummary = async (userId: string): Promise<{
       hasData: messagesCount > 0 || devicesCount > 0 || !!data.contacts || !!data.usage
     }
 
-    console.log(`User ${userId} summary:`, result) // Debug log
     return result
   } catch (error) {
     console.error(`Error getting user data for ${userId}:`, error)
@@ -3715,7 +3652,6 @@ export const getUserDataSummary = async (userId: string): Promise<{
 // Clear admin cache (call when force refreshing)
 export const clearAdminCache = () => {
   cacheManager.clear()
-  console.log('Admin cache cleared')
 }
 
 // Admin System Overview - OPTIMIZED: single pass, no per-user fetches
@@ -3854,7 +3790,6 @@ export const trackSubscriptionByDevice = async (
     }
 
     await update(accountRef, updates)
-    console.log(`[Device ${deviceId}] Subscription tracked for user ${userId}, plan: ${plan}`)
   } catch (error) {
     console.error(`Error tracking subscription by device:`, error)
   }
@@ -3901,7 +3836,6 @@ export const markAccountDeletedByDevice = async (deviceId: string, userId: strin
             deletedAt: now,
             status: 'deleted'
           })
-          console.log(`[Device ${deviceId}] Marked user ${userId} as deleted in subscription history`)
           break
         }
       }
@@ -4142,7 +4076,6 @@ export const getSystemCleanupOverviewOptimized = async (
   if (!forceRefresh) {
     const cached = cacheManager.get<SystemCleanupOverviewType>(cacheKey)
     if (cached) {
-      console.log('[getSystemCleanupOverviewOptimized] Returning cached data')
       return cached
     }
   }
@@ -4158,13 +4091,11 @@ export const getSystemCleanupOverviewOptimized = async (
     }
 
     try {
-      console.log('[getSystemCleanupOverviewOptimized] Fetching from backend...')
       const callable = httpsCallable(functions, 'getSystemCleanupOverviewOptimized')
       const result = await callable({ forceRefresh })
 
       // Cache for 10 minutes
       cacheManager.set(cacheKey, result.data, 10 * 60 * 1000)
-      console.log('[getSystemCleanupOverviewOptimized] Data fetched and cached')
 
       return result.data as any
     } catch (error) {
@@ -4225,7 +4156,6 @@ export const getCrashReportsWithStats = async (
   if (!forceRefresh) {
     const cached = cacheManager.get<CrashReportsWithStatsType>(cacheKey)
     if (cached) {
-      console.log('[getCrashReportsWithStats] Returning cached data')
       return cached
     }
   }
@@ -4241,13 +4171,11 @@ export const getCrashReportsWithStats = async (
     }
 
     try {
-      console.log('[getCrashReportsWithStats] Fetching from backend...')
       const callable = httpsCallable(functions, 'getCrashReportsWithStats')
       const result = await callable({ limit, cursor, includeStats, forceRefresh })
 
       // Cache for 5 minutes
       cacheManager.set(cacheKey, result.data, 5 * 60 * 1000)
-      console.log('[getCrashReportsWithStats] Data fetched and cached')
 
       return result.data as any
     } catch (error) {
@@ -4330,7 +4258,9 @@ export const addAdminAuditLog = (action: string, userId: string, details: string
     details,
     ip: ip || 'web-admin'
   }
-  console.log('Admin Audit Log:', logEntry)
+  if (process.env.NODE_ENV === 'development') {
+    console.log('Admin Audit Log:', logEntry)
+  }
 }
 
 export const getAdminAuditLog = async (): Promise<Array<{
@@ -4393,47 +4323,36 @@ export const deleteUserAccount = async (userId: string): Promise<{
     let r2FilesDeleted = 0
 
     // Get actual message count before deletion
-    console.log(`Starting deletion of user: ${userId}`)
     try {
       const userRef = ref(database, `${USERS_PATH}/${userId}`)
       const userSnapshot = await get(userRef)
 
       if (userSnapshot.exists()) {
         const userData = userSnapshot.val()
-        console.log(`User data found:`, Object.keys(userData))
-
         // Count actual messages
         if (userData.messages) {
           messagesDeleted = Object.keys(userData.messages).length
-          console.log(`Found ${messagesDeleted} messages for user ${userId}`)
-        } else {
-          console.log(`No messages found for user ${userId}`)
         }
 
         // Count devices
         if (userData.devices) {
           devicesDeleted = Object.keys(userData.devices).length
-          console.log(`Found ${devicesDeleted} devices for user ${userId}`)
         }
 
         // Clean up ALL R2 files (files, mms, photos) using Cloud Function
         try {
           const clearR2FilesFn = httpsCallable(functions, 'clearR2Files')
-          console.log(`Clearing ALL R2 files for user ${userId}...`)
           const r2Result = await clearR2FilesFn({ syncGroupUserId: userId })
           const r2Data = r2Result.data as { success: boolean, deletedFiles: number, freedBytes: number }
 
           if (r2Data.success) {
             r2FilesDeleted = r2Data.deletedFiles
-            console.log(`Deleted ${r2FilesDeleted} R2 files (~${Math.round(r2Data.freedBytes / 1024 / 1024)}MB) for user ${userId}`)
           }
         } catch (r2Error) {
           console.warn(`Failed to clear R2 files for user ${userId}:`, r2Error)
           errors.push(`R2 cleanup failed: ${r2Error}`)
           // Continue with user deletion even if R2 cleanup fails
         }
-      } else {
-        console.log(`User ${userId} not found in database`)
       }
     } catch (countError) {
       console.warn('Error counting user data:', countError)
@@ -4476,7 +4395,6 @@ export const deleteUserAccount = async (userId: string): Promise<{
         })
         if (Object.keys(updates).length > 0) {
           await update(recoveryRef, updates)
-          console.log(`Deleted ${Object.keys(updates).length} device recovery fingerprints for user ${userId}`)
         }
       }
     } catch (recoveryError) {
@@ -4582,16 +4500,11 @@ export const getCostOptimizationRecommendations = async (): Promise<Array<{
   action: string
 }>> => {
   try {
-    console.log('Starting cost optimization analysis (bandwidth-optimized)...')
-
     // Use lightweight overview queries instead of downloading all user data
     const [overview, cleanupOverview] = await Promise.all([
       getSystemOverview(),
       getSystemCleanupOverviewOptimized()
     ])
-
-    console.log('System overview:', overview)
-    console.log('Cleanup overview:', cleanupOverview)
 
     const recommendations: Array<{
       type: 'storage' | 'database' | 'cleanup' | 'scaling'
@@ -4660,8 +4573,6 @@ export const getCostOptimizationRecommendations = async (): Promise<Array<{
 
     // Always add at least some basic recommendations
     if (recommendations.length === 0) {
-      console.log('No recommendations generated based on thresholds, adding general recommendations')
-
       // Add general recommendations that are always useful
       recommendations.push({
         type: 'cleanup',
@@ -4693,7 +4604,6 @@ export const getCostOptimizationRecommendations = async (): Promise<Array<{
       })
     }
 
-    console.log('Generated recommendations:', recommendations.length)
     return recommendations.sort((a, b) => {
       const priorityOrder = { high: 3, medium: 2, low: 1 }
       return priorityOrder[b.priority] - priorityOrder[a.priority]
@@ -4753,7 +4663,6 @@ export const findOrphanedMessages = async (): Promise<{
   details: string[]
 }> => {
   try {
-    console.log('Searching for orphaned messages...')
     const result = {
       orphanedMessages: 0,
       orphanedStorageMB: 0,
@@ -4770,7 +4679,6 @@ export const findOrphanedMessages = async (): Promise<{
     result.details.push(`For detailed message counts, use the Users tab`)
     result.details.push(`To detect orphaned data, run cleanup operations from Data tab`)
 
-    console.log('Orphaned message analysis:', result)
     return result
   } catch (error) {
     console.error('Error finding orphaned messages:', error)
@@ -4850,14 +4758,7 @@ export const sendCleanupReport = async (
   try {
     const report = generateCleanupReport(cleanupStats, userId)
 
-    // Always log to console for debugging
-    console.log('=== SYNCFLOW CLEANUP REPORT ===')
-    console.log(report)
-    console.log('================================')
-
     // Send email via server-side API route
-    console.log(`📧 Sending cleanup report via server API [${type}]...`)
-
     const response = await fetch('/api/send-cleanup-report', {
       method: 'POST',
       headers: {
@@ -4873,10 +4774,8 @@ export const sendCleanupReport = async (
     const result = await response.json()
 
     if (result.success) {
-      console.log('✅ Email sent successfully via server:', result.messageId)
       return { success: true }
     } else {
-      console.log('❌ Server email sending failed:', result.error)
       return {
         success: false,
         error: result.error || 'Server email sending failed'
@@ -4898,11 +4797,8 @@ export const runAutoCleanupWithReport = async (userId: string): Promise<{
   reportError?: string
 }> => {
   try {
-    console.log('Starting auto cleanup with reporting...')
-
     // Run the cleanup
     const cleanupStats = await runAutoCleanup(userId)
-    console.log('Cleanup completed:', cleanupStats)
 
     // Send the report
     const reportResult = await sendCleanupReport(cleanupStats, userId, 'AUTO')
@@ -5031,13 +4927,9 @@ export const joinSyncGroup = async (
     const targetGroupId = scannedGroupId || syncGroupId
     const deviceId = deviceType === 'web' ? getWebDeviceId() : undefined
 
-    console.log('[WebJoin] joinSyncGroup called with syncGroupId:', syncGroupId, 'scannedGroupId:', scannedGroupId, 'targetGroupId:', targetGroupId)
-
     // First, check if sync group exists and get current device count
     const syncGroupRef = ref(database, `syncGroups/${targetGroupId}`)
     const groupSnapshot = await get(syncGroupRef)
-
-    console.log('[WebJoin] Group snapshot exists:', groupSnapshot.exists())
 
     if (!groupSnapshot.exists()) {
       console.error('[WebJoin] Sync group not found:', targetGroupId)
@@ -5051,8 +4943,6 @@ export const joinSyncGroup = async (
     const plan = groupData.plan || 'free'
     const deviceLimit = plan === 'free' ? 3 : 999
     const currentDevices = Object.keys(groupData.devices || {}).length
-
-    console.log('[WebJoin] Group data: plan=', plan, 'deviceLimit=', deviceLimit, 'currentDevices=', currentDevices)
 
     // Check device limit
     if (currentDevices >= deviceLimit) {
@@ -5069,13 +4959,9 @@ export const joinSyncGroup = async (
     if (typeof window !== 'undefined') {
       localStorage.setItem('sync_group_id', targetGroupId)
     }
-    console.log('[WebJoin] Saved sync group ID locally:', targetGroupId)
-
     // Register device in Firebase
     const now = Date.now()
     const actualDeviceId = deviceId || `${deviceType}_${crypto.randomUUID()}`
-
-    console.log('[WebJoin] Registering device:', actualDeviceId, 'with deviceType:', deviceType)
 
     await update(syncGroupRef, {
       [`devices/${actualDeviceId}`]: {
@@ -5085,8 +4971,6 @@ export const joinSyncGroup = async (
       }
     })
 
-    console.log('[WebJoin] Device registered successfully')
-
     // Log to history
     await update(syncGroupRef, {
       [`history/${now}`]: {
@@ -5095,8 +4979,6 @@ export const joinSyncGroup = async (
         deviceType
       }
     })
-
-    console.log('[WebJoin] History logged, joinSyncGroup completed successfully')
 
     return {
       success: true,
@@ -5790,7 +5672,6 @@ export const listenToMessagesOptimized = async (
   // Load cached messages first (instant display)
   const cached = await incrementalSyncManager.loadCachedData(userId, 'messages')
   if (cached.length > 0) {
-    console.log(`[BandwidthOptimized] Loaded ${cached.length} messages from cache (instant)`)
     await processMessages(cached)
   }
 
@@ -5812,7 +5693,9 @@ export const listenToMessagesOptimized = async (
       await processMessages(updated)
     },
     onInitialSyncComplete: (count) => {
-      console.log(`[BandwidthOptimized] Initial sync complete: ${count} new messages`)
+      if (process.env.NODE_ENV === 'development') {
+        console.log(`[BandwidthOptimized] Initial sync complete: ${count} new messages`)
+      }
     },
     onError: (error) => {
       console.error('[BandwidthOptimized] Sync error:', error)
@@ -6055,7 +5938,6 @@ export const getBandwidthStats = async (userId: string) => {
  */
 export const clearMessageCache = async (userId: string) => {
   await incrementalSyncManager.clearCache(userId)
-  console.log(`[BandwidthOptimized] Cleared cache for user ${userId}`)
 }
 
 // Additional exports (auth, database, storage, functions already exported above)

@@ -65,6 +65,7 @@ router.post('/', async (req: Request, res: Response) => {
        (id, user_id, phone_number, duration, storage_url, transcription, date, is_read)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (id) DO UPDATE SET
+         user_id = EXCLUDED.user_id,
          transcription = COALESCE(EXCLUDED.transcription, user_voicemails.transcription),
          is_read = EXCLUDED.is_read`,
       [voicemailId, userId, normalizePhoneNumber(body.phoneNumber), body.duration,

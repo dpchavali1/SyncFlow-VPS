@@ -400,7 +400,7 @@ class SyncFlowCallManager(context: Context) {
         Log.d(TAG, "Rejecting call $callId")
 
         return try {
-            vpsClient.updateSyncFlowCallStatus(callId, "rejected")
+            updateCallStatusWithRetry(callId, "rejected")
             _callState.value = CallState.Ended
             _currentCall.value = null
             currentCallId = null
@@ -432,7 +432,7 @@ class SyncFlowCallManager(context: Context) {
         return try {
             if (endingCallId != null) {
                 Log.d(TAG, "Sending ended status for call $endingCallId")
-                vpsClient.updateSyncFlowCallStatus(endingCallId, "ended")
+                updateCallStatusWithRetry(endingCallId, "ended")
                 try { vpsClient.deleteSignals(endingCallId) } catch (_: Exception) {}
             }
 
@@ -447,6 +447,28 @@ class SyncFlowCallManager(context: Context) {
             _currentCall.value = null
             Result.failure(e)
         }
+    }
+
+    /**
+     * Update call status on server with retry to prevent stale "ringing" calls
+     * that would cause ghost notifications on app restart.
+     */
+    private suspend fun updateCallStatusWithRetry(callId: String, status: String, maxRetries: Int = 3) {
+        var lastError: Exception? = null
+        for (attempt in 1..maxRetries) {
+            try {
+                vpsClient.updateSyncFlowCallStatus(callId, status)
+                Log.d(TAG, "Call status updated to '$status' for $callId (attempt $attempt)")
+                return
+            } catch (e: Exception) {
+                lastError = e
+                Log.w(TAG, "Failed to update call status (attempt $attempt/$maxRetries): ${e.message}")
+                if (attempt < maxRetries) {
+                    delay(500L * attempt) // Back off: 500ms, 1000ms
+                }
+            }
+        }
+        Log.e(TAG, "All $maxRetries attempts to update call status failed for $callId", lastError)
     }
 
     // ==================== ICE Restart ====================

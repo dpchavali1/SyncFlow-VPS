@@ -84,10 +84,7 @@ export default function PairingScreen() {
         setDeviceInfo(info.data.deviceCount, info.data.deviceLimit)
       }
 
-      console.log('[PairingScreen] Initiating pairing with groupId:', groupId)
       const session = await initiatePairing(undefined, groupId)
-      console.log('[PairingScreen] Pairing session created:', session)
-      console.log('[PairingScreen] QR Payload:', session.qrPayload ? 'Present' : 'MISSING!')
       setPairingSession(session)
       setStep('waiting')
 
@@ -109,32 +106,15 @@ export default function PairingScreen() {
 
           if (newUserId) {
             if (lastPairedUserId) {
-              if (lastPairedUserId === newUserId) {
-                // ✅ Same user re-pairing - cache is valid
-                console.log('[Pairing] ✅ Same user re-pairing - using cached data (instant, 0 bandwidth)')
-                console.log('[Pairing] 📦 Cache preserved for user', newUserId)
-              } else {
-                // ⚠️ Different user - clear previous user's cache for privacy
-                console.log('[Pairing] ⚠️ Different user detected!')
-                console.log('[Pairing]    Previous user:', lastPairedUserId)
-                console.log('[Pairing]    New user:', newUserId)
-                console.log('[Pairing] 🗑️ Clearing previous user\'s cache (privacy protection)')
-
-                // Import incrementalSync to clear cache
+              if (lastPairedUserId !== newUserId) {
+                // Different user - clear previous user's cache for privacy
                 import('@/lib/incrementalSync').then(({ incrementalSyncManager }) => {
                   incrementalSyncManager.clearCache(lastPairedUserId)
-                    .then(() => {
-                      console.log('[Pairing] ✅ Previous user\'s cache cleared')
-                    })
                     .catch((error) => {
-                      console.error('[Pairing] ❌ Failed to clear cache:', error)
+                      console.error('[Pairing] Failed to clear cache:', error)
                     })
                 })
-
-                console.log('[Pairing] 📥 Will fetch fresh data for new user')
               }
-            } else {
-              console.log('[Pairing] 📥 No previous cache found - first time pairing')
             }
 
             // Save this user as the last paired user for future verification
@@ -177,11 +157,13 @@ export default function PairingScreen() {
       })
     } catch (error: any) {
       console.error('[PairingScreen] Pairing initialization failed:', error)
-      console.error('[PairingScreen] Error details:', {
-        message: error?.message,
-        code: error?.code,
-        stack: error?.stack,
-      })
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[PairingScreen] Error details:', {
+          message: error?.message,
+          code: error?.code,
+          stack: error?.stack,
+        })
+      }
       setStep('error')
       setErrorMessage(error?.message || 'Failed to initialize pairing')
     } finally {
@@ -200,14 +182,12 @@ export default function PairingScreen() {
     const isHomePage = pathname === '/'
 
     if (!isHomePage) {
-      console.log('[PairingScreen] Skipping auto-init: not on home page (current path:', pathname, ')')
       return
     }
 
     if (hasInitialized.current) return
     hasInitialized.current = true
 
-    console.log('[PairingScreen] Auto-initializing pairing on home page')
     initializePairing()
   }, [initializePairing, pathname])
 

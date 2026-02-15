@@ -30,33 +30,43 @@ export default function Home() {
   }, [])
 
   useEffect(() => {
-    // Check if user is already paired
-    // For VPS mode, check VPS tokens; for Firebase mode, check Firebase user ID
-    if (isVPSMode) {
-      // VPS auth tokens exist from initiatePairing() even before QR scan completes.
-      // Only redirect to /messages if pairing was fully completed (syncflow_user_id set).
-      const pairingComplete = !!localStorage.getItem('syncflow_user_id')
-      if (vpsService.isAuthenticated && vpsService.currentUserId && pairingComplete) {
-        useAppStore.getState().setUserId(vpsService.currentUserId)
-        router.push('/messages')
+    const checkAuth = async () => {
+      // Check if user is already paired
+      // For VPS mode, check VPS tokens; for Firebase mode, check Firebase user ID
+      if (isVPSMode) {
+        // VPS auth tokens exist from initiatePairing() even before QR scan completes.
+        // Only redirect to /messages if pairing was fully completed (syncflow_user_id set).
+        const pairingComplete = !!localStorage.getItem('syncflow_user_id')
+
+        if (pairingComplete) {
+          // Wait for tokens to be restored from IndexedDB before checking auth
+          await vpsService.ensureTokensRestored()
+
+          if (vpsService.isAuthenticated && vpsService.currentUserId) {
+            useAppStore.getState().setUserId(vpsService.currentUserId)
+            router.push('/messages')
+            return
+          }
+        }
+
+        // Not fully paired — clear any stale temp tokens and show pairing screen
+        if (!pairingComplete && vpsService.isAuthenticated) {
+          vpsService.clearTokens()
+        }
+        setIsLoading(false)
         return
       }
-      // Not fully paired — clear any stale temp tokens and show pairing screen
-      if (!pairingComplete && vpsService.isAuthenticated) {
-        vpsService.clearTokens()
-      }
-      setIsLoading(false)
-      return
-    }
 
-    // Legacy: check localStorage for Firebase mode
-    const storedUserId = localStorage.getItem('syncflow_user_id')
-    if (storedUserId) {
-      useAppStore.getState().setUserId(storedUserId)
-      router.push('/messages')
-    } else {
-      setIsLoading(false)
+      // Legacy: check localStorage for Firebase mode
+      const storedUserId = localStorage.getItem('syncflow_user_id')
+      if (storedUserId) {
+        useAppStore.getState().setUserId(storedUserId)
+        router.push('/messages')
+      } else {
+        setIsLoading(false)
+      }
     }
+    checkAuth()
   }, [router, isVPSMode])
 
   // Handle VPS pairing completion

@@ -145,7 +145,9 @@ struct SyncFlowMacApp: App {
     ///
     /// VPS-only mode.
     init() {
+        #if DEBUG
         print("[App] VPS mode enabled - using VPS backend exclusively")
+        #endif
 
         // Configure app appearance
         configureAppearance()
@@ -202,25 +204,6 @@ struct SyncFlowMacApp: App {
                 // Suspend non-essential features
                 appState.suspendNonEssentialFeatures()
             }
-        }
-    }
-
-    private func handleBatteryStateChange(_ state: BatteryAwareServiceManager.ServiceState) {
-        // Battery state change handled silently
-
-        switch state {
-        case .full:
-            // Resume full performance
-            break
-        case .reduced:
-            // Reduce background activity
-            appState.reduceBackgroundActivity()
-        case .minimal:
-            // Minimize activity
-            appState.minimizeBackgroundActivity()
-        case .suspended:
-            // Suspend non-essential features
-            appState.suspendNonEssentialFeatures()
         }
     }
 
@@ -456,11 +439,16 @@ struct SyncFlowMacApp: App {
             }
 
             CommandGroup(replacing: .help) {
+                Button("Keyboard Shortcuts") {
+                    appState.showKeyboardShortcuts = true
+                }
+                .keyboardShortcut("/", modifiers: [.command, .shift])
+
+                Divider()
+
                 Button("SyncFlow Support") {
                     appState.showSupportChat = true
                 }
-
-                Divider()
 
                 Button("Contact Us") {
                     if let url = URL(string: "mailto:syncflow.contact@gmail.com") {
@@ -608,6 +596,7 @@ class AppState: ObservableObject {
     @Published var showDialer: Bool = false
     @Published var showTemplates: Bool = false
     @Published var showSupportChat: Bool = false
+    @Published var showKeyboardShortcuts: Bool = false
     @Published var focusSearch: Bool = false
 
     /// Currently selected conversation for message detail view
@@ -862,8 +851,55 @@ class AppState: ObservableObject {
         VPSService.shared.deviceRemoved
             .receive(on: DispatchQueue.main)
             .sink { [weak self] deviceId in
-                print("[AppState] 🔌 Remote unpair detected via WebSocket (deviceId: \(deviceId))")
+                #if DEBUG
+                print("[AppState] Remote unpair detected via WebSocket (deviceId: \(deviceId))")
+                #endif
                 self?.unpair()
+            }
+            .store(in: &cancellables)
+
+        // Listen for active phone call state from Android (ringing/active/ended)
+        VPSService.shared.activeCallUpdated
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] data in
+                guard let self = self else {
+                    print("[CALL DEBUG] self is nil in activeCallUpdated sink")
+                    return
+                }
+                let state = data["state"] as? String ?? ""
+                let callId = data["id"] as? String ?? "active_\(Int(Date().timeIntervalSince1970))"
+                print("[CALL DEBUG] Received activeCallUpdated: state=\(state), callId=\(callId)")
+
+                switch state {
+                case "ringing":
+                    // Only set if we don't already have this call showing
+                    print("[CALL DEBUG] Ringing! currentIncoming=\(self.incomingCall?.id ?? "none")")
+                    if self.incomingCall?.id != callId {
+                        if let call = ActiveCall.from(data, id: callId) {
+                            print("[CALL DEBUG] Setting incomingCall to \(call.displayName)")
+                            self.incomingCall = call
+                        } else {
+                            print("[CALL DEBUG] ActiveCall.from() returned nil!")
+                        }
+                    } else {
+                        print("[CALL DEBUG] Already showing this call")
+                    }
+                case "active":
+                    // Call was answered on the phone — dismiss incoming notification
+                    if self.incomingCall?.id == callId {
+                        self.incomingCall = nil
+                    }
+                case "ended":
+                    // Call ended — clean up all state
+                    if self.incomingCall?.id == callId {
+                        self.incomingCall = nil
+                    }
+                    if self.lastAnsweredCallId == callId {
+                        self.lastAnsweredCallId = nil
+                    }
+                default:
+                    break
+                }
             }
             .store(in: &cancellables)
     }
@@ -879,14 +915,18 @@ class AppState: ObservableObject {
             options: [.userInitiatedAllowingIdleSystemSleep, .idleSystemSleepDisabled],
             reason: "SyncFlow needs to receive incoming calls"
         )
+        #if DEBUG
         print("AppState: Started background activity for incoming calls")
+        #endif
     }
 
     private func stopBackgroundActivity() {
         if let activity = backgroundActivity {
             ProcessInfo.processInfo.endActivity(activity)
             backgroundActivity = nil
+            #if DEBUG
             print("AppState: Stopped background activity")
+            #endif
         }
     }
 
@@ -909,7 +949,9 @@ class AppState: ObservableObject {
             let withVideo = userInfo["withVideo"] as? Bool ?? false
             let isVideoCall = userInfo["isVideoCall"] as? Bool ?? false
 
+            #if DEBUG
             print("AppState: Answering call from notification - callId: \(callId), withVideo: \(withVideo)")
+            #endif
 
             // Find the incoming call or create one from the notification data
             if let existingCall = self.incomingSyncFlowCall, existingCall.id == callId {
@@ -948,7 +990,9 @@ class AppState: ObservableObject {
                 return
             }
 
+            #if DEBUG
             print("AppState: Declining call from notification - callId: \(callId)")
+            #endif
 
             // Find the incoming call or create one from the notification data
             if let existingCall = self.incomingSyncFlowCall, existingCall.id == callId {
@@ -990,7 +1034,9 @@ class AppState: ObservableObject {
 
             let isVideo = userInfo["isVideo"] as? Bool ?? false
 
+            #if DEBUG
             print("AppState: Showing incoming call UI from notification - callId: \(callId)")
+            #endif
 
             // If we don't already have this incoming call showing, create one
             if self.incomingSyncFlowCall?.id != callId {
@@ -1026,7 +1072,9 @@ class AppState: ObservableObject {
                 return
             }
 
+            #if DEBUG
             print("AppState: Answering phone call from notification - callId: \(callId)")
+            #endif
 
             // Find the incoming phone call and answer it
             if let call = self.activeCalls.first(where: { $0.id == callId && $0.callState == .ringing }) {
@@ -1048,7 +1096,9 @@ class AppState: ObservableObject {
                 return
             }
 
+            #if DEBUG
             print("AppState: Declining phone call from notification - callId: \(callId)")
+            #endif
 
             // Find the incoming phone call and reject it
             if let call = self.activeCalls.first(where: { $0.id == callId && $0.callState == .ringing }) {
@@ -1064,20 +1114,38 @@ class AppState: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
+            #if DEBUG
             print("AppState: VPS pairing completed")
+            #endif
             guard let self = self else { return }
 
             // Get the VPS user info
             if VPSService.shared.isAuthenticated,
                let userId = VPSService.shared.userId {
                 self.setPaired(userId: userId)
+                #if DEBUG
                 print("AppState: Set paired with VPS userId: \(userId)")
+                #endif
             }
+        }
+
+        // Auto-repair: MessageStore detected high decryption failures, needs key re-sync
+        NotificationCenter.default.addObserver(
+            forName: Notification.Name("triggerE2EERepairSync"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            #if DEBUG
+            print("[E2EE] Auto-repair triggered — re-syncing keys")
+            #endif
+            self?.attemptAutoE2eeKeySyncVPS(reason: "repair")
         }
     }
 
     func setPaired(userId: String) {
-        print("[Pairing] 🔗 Setting paired with userId: \(userId)")
+        #if DEBUG
+        print("[Pairing] Setting paired with userId: \(userId)")
+        #endif
 
         self.userId = userId
         self.isPaired = true
@@ -1088,24 +1156,24 @@ class AppState: ObservableObject {
 
         if let lastUserId = lastPairedUserId {
             if lastUserId == userId {
-                // ✅ Same user re-pairing - cache is valid
-                print("[Pairing] ✅ Same user re-pairing - using cached data (instant, 0 bandwidth)")
+                // Same user re-pairing - cache is valid
+                #if DEBUG
                 let cachedMessageCount = IncrementalSyncManager.shared.getCachedMessages(userId: userId).count
-                print("[Pairing] 📦 Found \(cachedMessageCount) cached messages")
+                print("[Pairing] Same user re-pairing - using cached data (\(cachedMessageCount) cached messages)")
+                #endif
             } else {
-                // ⚠️ Different user - clear previous user's cache for privacy
-                print("[Pairing] ⚠️ Different user detected!")
-                print("[Pairing]    Previous user: \(lastUserId)")
-                print("[Pairing]    New user: \(userId)")
-                print("[Pairing] 🗑️ Clearing previous user's cache (privacy protection)")
+                // Different user - clear previous user's cache for privacy
+                #if DEBUG
+                print("[Pairing] Different user detected (previous: \(lastUserId), new: \(userId)), clearing cache")
+                #endif
 
                 IncrementalSyncManager.shared.clearCache(userId: lastUserId)
                 UserDefaults.standard.removeObject(forKey: "last_paired_user_id")
-
-                print("[Pairing] 📥 Will fetch fresh data for new user")
             }
         } else {
-            print("[Pairing] 📥 No previous cache found - first time pairing or cache was cleared")
+            #if DEBUG
+            print("[Pairing] No previous cache found - first time pairing or cache was cleared")
+            #endif
         }
 
         // Save this user as the last paired user for future verification
@@ -1114,54 +1182,83 @@ class AppState: ObservableObject {
         // AUTO E2EE KEY SYNC: Request keys from Android during pairing (not after)
         // This ensures messages are decrypted as they arrive, avoiding encrypted UI display
         Task {
+            do {
+                #if DEBUG
+                print("[Pairing] Syncing E2EE keys (VPS) userId=\(VPSService.shared.userId ?? "nil"), deviceId=\(VPSService.shared.deviceId ?? "nil")")
+                #endif
+
+                // Initialize local E2EE keys
                 do {
-                    let vpsUserId = VPSService.shared.userId
-                    let vpsDeviceId = VPSService.shared.deviceId
-                    print("[Pairing] Syncing E2EE keys (VPS)")
-                    print("[Pairing]   userId=\(vpsUserId ?? "nil")")
-                    print("[Pairing]   deviceId=\(vpsDeviceId ?? "nil")")
-                    print("[Pairing]   isAuthenticated=\(VPSService.shared.isAuthenticated)")
-
-                    // Initialize local E2EE keys
-                    do {
-                        try await E2EEManager.shared.initializeKeys()
-                        print("[Pairing] E2EE keys initialized, hasPublicKey=\(E2EEManager.shared.getMyPublicKeyX963Base64() != nil)")
-                    } catch {
-                        print("[Pairing] E2EE initializeKeys warning: \(error.localizedDescription)")
-                    }
-
-                    let encryptedKey = try await VPSService.shared.waitForDeviceE2eeKey(timeout: 60)
-
-                    guard let encryptedKey = encryptedKey else {
-                        print("[Pairing] E2EE key sync timed out - will retry on next launch")
-                        return
-                    }
-
-                    let payloadData = try E2EEManager.shared.decryptDataKey(from: encryptedKey)
-                    let payload = try JSONSerialization.jsonObject(with: payloadData) as? [String: Any]
-
-                    guard let privateKeyPKCS8 = payload?["privateKeyPKCS8"] as? String,
-                          let publicKeyX963 = payload?["publicKeyX963"] as? String else {
-                        throw NSError(domain: "E2EE", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid key payload: \(payload?.keys.sorted() ?? [])"])
-                    }
-
-                    try E2EEManager.shared.importSyncGroupKeypair(
-                        privateKeyPKCS8Base64: privateKeyPKCS8,
-                        publicKeyX963Base64: publicKeyX963
-                    )
-
-                    print("[Pairing] E2EE keys synced, triggering message reload")
-
-                    // Trigger message re-fetch so they decrypt with the new keys
-                    NotificationCenter.default.post(name: .e2eeKeysUpdated, object: nil)
-
+                    try await E2EEManager.shared.initializeKeys()
+                    #if DEBUG
+                    print("[Pairing] E2EE keys initialized, hasPublicKey=\(E2EEManager.shared.getMyPublicKeyX963Base64() != nil)")
+                    #endif
                 } catch {
-                    print("[Pairing] E2EE key sync failed: \(error)")
-                    if let decodingError = error as? DecodingError {
-                        print("[Pairing] Decoding error detail: \(decodingError)")
+                    #if DEBUG
+                    print("[Pairing] E2EE initializeKeys error: \(error.localizedDescription)")
+                    #endif
+                }
+
+                // Publish our public key so Android can encrypt sync group keys for us
+                do {
+                    try await E2EEManager.shared.publishDevicePublicKey()
+                    #if DEBUG
+                    print("[Pairing] Published E2EE public key to server")
+                    #endif
+                } catch {
+                    #if DEBUG
+                    print("[Pairing] Failed to publish E2EE public key: \(error.localizedDescription)")
+                    #endif
+                }
+
+                // Request E2EE key sync from Android - finds the Android device and asks it to push keys
+                if let response = try? await VPSService.shared.getDevices() {
+                    if let androidDevice = response.devices.first(where: { $0.deviceType == "android" }) {
+                        try? await VPSService.shared.requestE2EEKeySync(targetDevice: androidDevice.id)
+                        #if DEBUG
+                        print("[Pairing] Sent E2EE key request to Android device: \(androidDevice.id)")
+                        #endif
                     }
                 }
+
+                let encryptedKey = try await VPSService.shared.waitForDeviceE2eeKey(timeout: 60)
+
+                guard let encryptedKey = encryptedKey else {
+                    #if DEBUG
+                    print("[Pairing] E2EE key sync timed out - will retry on next launch")
+                    #endif
+                    return
+                }
+
+                let payloadData = try E2EEManager.shared.decryptDataKey(from: encryptedKey)
+                let payload = try JSONSerialization.jsonObject(with: payloadData) as? [String: Any]
+
+                guard let privateKeyPKCS8 = payload?["privateKeyPKCS8"] as? String,
+                      let publicKeyX963 = payload?["publicKeyX963"] as? String else {
+                    throw NSError(domain: "E2EE", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid key payload: \(payload?.keys.sorted() ?? [])"])
+                }
+
+                try E2EEManager.shared.importSyncGroupKeypair(
+                    privateKeyPKCS8Base64: privateKeyPKCS8,
+                    publicKeyX963Base64: publicKeyX963
+                )
+
+                #if DEBUG
+                print("[Pairing] E2EE keys synced, triggering message reload")
+                #endif
+
+                // Trigger message re-fetch so they decrypt with the new keys
+                NotificationCenter.default.post(name: .e2eeKeysUpdated, object: nil)
+
+            } catch {
+                #if DEBUG
+                print("[Pairing] E2EE key sync failed: \(error)")
+                if let decodingError = error as? DecodingError {
+                    print("[Pairing] Decoding error detail: \(decodingError)")
+                }
+                #endif
             }
+        }
 
         // Update subscription status
         Task {
@@ -1239,18 +1336,23 @@ class AppState: ObservableObject {
 
         // BANDWIDTH OPTIMIZATION: Preserve cache unless explicitly requested to clear
         if clearCache, let userId = currentUserId {
-            print("[Unpair] 🗑️ Clearing cache as requested")
+            #if DEBUG
+            print("[Unpair] Clearing cache as requested")
+            #endif
             IncrementalSyncManager.shared.clearCache(userId: userId)
             UserDefaults.standard.removeObject(forKey: "last_paired_user_id")
         } else if let userId = currentUserId {
             // Save user ID for verification on re-pair (security check)
             UserDefaults.standard.set(userId, forKey: "last_paired_user_id")
-            print("[Unpair] 💾 Cache preserved for user \(userId) - re-pairing same user will be instant")
-            print("[Unpair] 🔒 User ID saved for security verification")
+            #if DEBUG
+            print("[Unpair] Cache preserved for user \(userId)")
+            #endif
         }
 
         // Unregister device from VPS
+        #if DEBUG
         print("[Unpair] userId=\(currentUserId ?? "nil"), deviceId=\(deviceId ?? "nil")")
+        #endif
         if let _ = currentUserId, let deviceId = deviceId {
             // Remove from VPS first - this broadcasts device_removed to Android
             // IMPORTANT: clearTokens() must happen AFTER removeDevice() completes,
@@ -1258,16 +1360,22 @@ class AppState: ObservableObject {
             Task {
                 do {
                     try await VPSService.shared.removeDevice(deviceId: deviceId)
-                    print("[Unpair] ✅ Device removed from VPS")
+                    #if DEBUG
+                    print("[Unpair] Device removed from VPS")
+                    #endif
                 } catch {
-                    print("[Unpair] ❌ Failed to remove device from VPS: \(error)")
+                    #if DEBUG
+                    print("[Unpair] Failed to remove device from VPS: \(error)")
+                    #endif
                 }
                 await MainActor.run {
                     VPSService.shared.clearTokens()
                 }
             }
         } else {
-            print("[Unpair] ⚠️ Cannot unregister device: missing userId or deviceId")
+            #if DEBUG
+            print("[Unpair] Cannot unregister device: missing userId or deviceId")
+            #endif
             VPSService.shared.clearTokens()
         }
 
@@ -1279,9 +1387,16 @@ class AppState: ObservableObject {
 
     // MARK: - Auto E2EE Key Sync (VPS)
 
-    private func attemptAutoE2eeKeySyncVPS(reason: String) {
+    func attemptAutoE2eeKeySyncVPS(reason: String) {
         guard UserDefaults.standard.bool(forKey: "e2ee_enabled") else { return }
         guard isPaired else { return }
+
+        // For repair, cancel any in-flight sync so we can start fresh
+        if reason == "repair", let existing = e2eeAutoSyncTask {
+            existing.cancel()
+            e2eeAutoSyncTask = nil
+        }
+
         guard e2eeAutoSyncTask == nil else { return }
 
         e2eeAutoSyncTask = Task {
@@ -1289,9 +1404,27 @@ class AppState: ObservableObject {
             do {
                 try await E2EEManager.shared.initializeKeys()
 
+                // Publish our public key and request Android to push sync group keys.
+                // Without this, we only poll — if the key was never pushed (e.g. first
+                // push failed during pairing), the poll alone can never recover.
+                do { try await E2EEManager.shared.publishDevicePublicKey() } catch {
+                    #if DEBUG
+                    print("[E2EE] Auto sync (\(reason)) publish key failed: \(error.localizedDescription)")
+                    #endif
+                }
+                if let response = try? await VPSService.shared.getDevices(),
+                   let androidDevice = response.devices.first(where: { $0.deviceType == "android" }) {
+                    try? await VPSService.shared.requestE2EEKeySync(targetDevice: androidDevice.id)
+                    #if DEBUG
+                    print("[E2EE] Auto sync (\(reason)) sent key request to Android: \(androidDevice.id)")
+                    #endif
+                }
+
                 let encryptedKey = try await VPSService.shared.waitForDeviceE2eeKey(timeout: 45)
                 guard let encryptedKey = encryptedKey else {
+                    #if DEBUG
                     print("[E2EE] Auto key sync (\(reason)) timed out waiting for key")
+                    #endif
                     return
                 }
 
@@ -1309,9 +1442,13 @@ class AppState: ObservableObject {
                 )
 
                 NotificationCenter.default.post(name: .e2eeKeysUpdated, object: nil)
+                #if DEBUG
                 print("[E2EE] Auto key sync (\(reason)) succeeded")
+                #endif
             } catch {
+                #if DEBUG
                 print("[E2EE] Auto key sync (\(reason)) failed: \(error.localizedDescription)")
+                #endif
             }
         }
     }
@@ -1475,7 +1612,9 @@ class AppState: ObservableObject {
             do {
                 try await VPSService.shared.sendFindPhoneRequest(action: "ring")
             } catch {
+                #if DEBUG
                 print("[FindPhone] Error sending ring request: \(error)")
+                #endif
                 await MainActor.run { self.isPhoneRinging = false }
             }
         }
@@ -1487,7 +1626,9 @@ class AppState: ObservableObject {
             do {
                 try await VPSService.shared.sendFindPhoneRequest(action: "stop")
             } catch {
+                #if DEBUG
                 print("[FindPhone] Error sending stop request: \(error)")
+                #endif
             }
         }
     }
@@ -1498,9 +1639,13 @@ class AppState: ObservableObject {
         Task {
             do {
                 try await VPSService.shared.shareLink(url: url, title: title)
+                #if DEBUG
                 print("[LinkShare] Sent link to phone: \(url)")
+                #endif
             } catch {
+                #if DEBUG
                 print("[LinkShare] Error sharing link: \(error)")
+                #endif
             }
         }
     }
@@ -1512,9 +1657,22 @@ class AppState: ObservableObject {
         // Track that this call was answered from macOS so we can show in-progress notice
         DispatchQueue.main.async {
             self.lastAnsweredCallId = call.id
+            self.incomingCall = nil
         }
-        // Call commands handled via VPS WebSocket/REST
-        print("Answer command sent for call \(call.id)")
+
+        // Send answer command to Android via server
+        Task {
+            do {
+                try await VPSService.shared.sendCallCommand(callId: call.id, command: "answer", phoneNumber: call.phoneNumber)
+                #if DEBUG
+                print("Answer command sent for call \(call.id)")
+                #endif
+            } catch {
+                #if DEBUG
+                print("Error sending answer command: \(error)")
+                #endif
+            }
+        }
     }
 
     func rejectCall(_ call: ActiveCall) {
@@ -1526,7 +1684,20 @@ class AppState: ObservableObject {
                 self.incomingCall = nil
             }
         }
-        print("Reject command sent for call \(call.id)")
+
+        // Send reject command to Android via server
+        Task {
+            do {
+                try await VPSService.shared.sendCallCommand(callId: call.id, command: "reject", phoneNumber: call.phoneNumber)
+                #if DEBUG
+                print("Reject command sent for call \(call.id)")
+                #endif
+            } catch {
+                #if DEBUG
+                print("Error sending reject command: \(error)")
+                #endif
+            }
+        }
     }
 
     func endCall(_ call: ActiveCall) {
@@ -1535,16 +1706,33 @@ class AppState: ObservableObject {
                 self.lastAnsweredCallId = nil
             }
         }
-        print("End call command sent for call \(call.id)")
+
+        // Send end command to Android via server
+        Task {
+            do {
+                try await VPSService.shared.sendCallCommand(callId: call.id, command: "end", phoneNumber: call.phoneNumber)
+                #if DEBUG
+                print("End call command sent for call \(call.id)")
+                #endif
+            } catch {
+                #if DEBUG
+                print("Error sending end command: \(error)")
+                #endif
+            }
+        }
     }
 
     func makeCall(to phoneNumber: String) {
         Task {
             do {
                 try await VPSService.shared.requestCall(phoneNumber: phoneNumber)
+                #if DEBUG
                 print("Call request sent to: \(phoneNumber)")
+                #endif
             } catch {
+                #if DEBUG
                 print("Error making call: \(error)")
+                #endif
             }
         }
     }
@@ -1557,7 +1745,9 @@ class AppState: ObservableObject {
 
     /// Listen for incoming user-to-user calls (from incoming_syncflow_calls path)
     private func startListeningForIncomingUserCalls(userId: String) {
+        #if DEBUG
         print("AppState: Starting to listen for incoming user calls for userId: \(userId)")
+        #endif
 
         // Use the SyncFlowCallManager to listen for incoming user calls
         syncFlowCallManager.startListeningForIncomingUserCalls(userId: userId)
@@ -1567,7 +1757,9 @@ class AppState: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] incomingCall in
                 if let call = incomingCall {
-                    print("🔔 AppState: Incoming user call detected from \(call.callerName), callId: \(call.callId)")
+                    #if DEBUG
+                    print("AppState: Incoming user call detected from \(call.callerName), callId: \(call.callId)")
+                    #endif
                     // Create a SyncFlowCall from the incoming user call data
                     let syncFlowCall = SyncFlowCall(
                         id: call.callId,
@@ -1597,7 +1789,9 @@ class AppState: ObservableObject {
                 } else {
                     // Call was cancelled or answered elsewhere
                     if self?.incomingSyncFlowCall != nil {
+                        #if DEBUG
                         print("AppState: Incoming user call cancelled")
+                        #endif
                         self?.incomingSyncFlowCall = nil
                         self?.ringtoneManager.stopRinging()
                         if let callId = self?.pendingCallNotificationId {
@@ -1615,7 +1809,9 @@ class AppState: ObservableObject {
             do {
                 try await syncFlowCallManager.updateDeviceStatus(userId: userId, online: online)
             } catch {
+                #if DEBUG
                 print("Error updating device status: \(error)")
+                #endif
             }
         }
     }
@@ -1642,7 +1838,9 @@ class AppState: ObservableObject {
                     showSyncFlowCallView = true
                 }
             } catch {
+                #if DEBUG
                 print("Error answering SyncFlow call: \(error)")
+                #endif
             }
         }
     }
@@ -1662,7 +1860,9 @@ class AppState: ObservableObject {
                     try await syncFlowCallManager.rejectCall(userId: userId, callId: call.id)
                 }
             } catch {
+                #if DEBUG
                 print("Error rejecting SyncFlow call: \(error)")
+                #endif
             }
         }
     }
@@ -1682,7 +1882,9 @@ class AppState: ObservableObject {
                     showSyncFlowCallView = true
                 }
             } catch {
+                #if DEBUG
                 print("Error starting SyncFlow call: \(error)")
+                #endif
             }
         }
     }
@@ -1700,7 +1902,9 @@ class AppState: ObservableObject {
                     incomingSyncFlowCall = nil
                 }
             } catch {
+                #if DEBUG
                 print("Error ending SyncFlow call: \(error)")
+                #endif
             }
         }
     }
@@ -1762,6 +1966,8 @@ class AppState: ObservableObject {
     private func showLowBatteryWarning() {
         // This would show a system notification or alert
         // For now, just log it
+        #if DEBUG
         print("[AppState] Low battery warning - most features suspended")
+        #endif
     }
 }

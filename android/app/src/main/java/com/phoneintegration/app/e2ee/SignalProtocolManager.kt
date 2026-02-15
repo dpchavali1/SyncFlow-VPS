@@ -22,6 +22,7 @@ import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.KeyStore
+import java.security.Signature
 import java.security.interfaces.ECPrivateKey
 import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
@@ -57,6 +58,17 @@ class SignalProtocolManager(private val context: Context) {
         private const val KEY_ECDH_PUBLIC = "ecdh_public_x963"
         private const val KEY_ECDH_INITIALIZED = "ecdh_initialized"
         private const val E2EE_V2_CONTEXT = "SyncFlow-E2EE-v2"
+
+        // ECDSA signing keypair constants
+        private const val KEY_SIGNING_PRIVATE = "signing_private"
+        private const val KEY_SIGNING_PRIVATE_IV = "signing_private_iv"
+        private const val KEY_SIGNING_PUBLIC = "signing_public_x963"
+        private const val KEY_SIGNING_INITIALIZED = "signing_initialized"
+
+        // Key versioning constants
+        private const val KEY_CURRENT_VERSION = "key_current_version"
+        private const val KEY_LAST_ROTATION = "key_last_rotation"
+        private const val ROTATION_INTERVAL_MS = 30L * 24 * 60 * 60 * 1000 // 30 days
 
         // Android Keystore constants
         private const val ANDROID_KEYSTORE = "AndroidKeyStore"
@@ -147,11 +159,13 @@ class SignalProtocolManager(private val context: Context) {
         return String(plaintext, StandardCharsets.UTF_8)
     }
 
+    @Synchronized
     fun initializeKeys() {
         if (isInitialized()) {
             loadExistingKeys()
             if (privateKeysetHandle != null) {
                 ensureEcdhKeys()
+                ensureSigningKeys()
                 return
             }
             // Tink keys corrupted (e.g. Keystore destroyed after reinstall
@@ -198,6 +212,7 @@ class SignalProtocolManager(private val context: Context) {
 
             registerUser()
             ensureEcdhKeys()
+            ensureSigningKeys()
 
             Log.d(TAG, "E2EE keys initialized successfully (protected by Android Keystore)")
         } catch (e: Exception) {
@@ -620,6 +635,8 @@ class SignalProtocolManager(private val context: Context) {
     }
 
     private fun hkdfSha256(ikm: ByteArray, info: ByteArray, length: Int): ByteArray {
+        require(length in 1..(255 * 32)) { "HKDF output length must be 1..${255 * 32}, got $length" }
+
         val mac = Mac.getInstance("HmacSHA256")
         val salt = ByteArray(32) { 0 }
         mac.init(SecretKeySpec(salt, "HmacSHA256"))
@@ -643,6 +660,238 @@ class SignalProtocolManager(private val context: Context) {
             counter++
         }
         return okm
+    }
+
+    // MARK: - ECDSA Signing Keypair
+
+    /**
+     * Ensure ECDSA P-256 signing keys exist (generate if not).
+     * Signing keys prove "this device sent this payload" and are separate
+     * from the sync group ECDH keys used for encryption.
+     */
+    private fun ensureSigningKeys() {
+        if (prefs.getBoolean(KEY_SIGNING_INITIALIZED, false)) {
+            // Verify keys can still be loaded (Keystore may have been wiped)
+            try {
+                val encryptedPrivate = prefs.getString(KEY_SIGNING_PRIVATE, null)
+                val iv = prefs.getString(KEY_SIGNING_PRIVATE_IV, null)
+                if (encryptedPrivate != null && iv != null) {
+                    decryptWithKeystore(encryptedPrivate, iv) // test decrypt
+                    return
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Signing keys corrupted, regenerating", e)
+                prefs.edit()
+                    .remove(KEY_SIGNING_PRIVATE)
+                    .remove(KEY_SIGNING_PRIVATE_IV)
+                    .remove(KEY_SIGNING_PUBLIC)
+                    .putBoolean(KEY_SIGNING_INITIALIZED, false)
+                    .apply()
+            }
+        }
+
+        try {
+            val keyPair = generateEcdhKeyPair() // Same curve (P-256) works for both ECDH and ECDSA
+            val privateKeyBytes = keyPair.private.encoded
+            val (encryptedPrivateKey, iv) = encryptWithKeystore(
+                Base64.encodeToString(privateKeyBytes, Base64.NO_WRAP)
+            )
+            val publicKeyX963 = encodeX963PublicKey(keyPair.public as ECPublicKey)
+
+            prefs.edit()
+                .putString(KEY_SIGNING_PRIVATE, encryptedPrivateKey)
+                .putString(KEY_SIGNING_PRIVATE_IV, iv)
+                .putString(KEY_SIGNING_PUBLIC, Base64.encodeToString(publicKeyX963, Base64.NO_WRAP))
+                .putBoolean(KEY_SIGNING_INITIALIZED, true)
+                .apply()
+
+            Log.d(TAG, "ECDSA signing keys initialized")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error initializing signing keys", e)
+        }
+    }
+
+    /**
+     * Get the ECDSA signing public key in X9.63 format (Base64 encoded).
+     * Used during device registration to publish the signing key to the server.
+     */
+    fun getSigningPublicKeyX963(): String? {
+        return prefs.getString(KEY_SIGNING_PUBLIC, null)
+    }
+
+    /**
+     * Sign arbitrary data with the device's ECDSA signing key.
+     * Returns the signature as Base64 or null if signing fails.
+     */
+    fun signData(data: ByteArray): String? {
+        return try {
+            val encryptedPrivate = prefs.getString(KEY_SIGNING_PRIVATE, null) ?: return null
+            val iv = prefs.getString(KEY_SIGNING_PRIVATE_IV, null) ?: return null
+            val privateKeyBase64 = decryptWithKeystore(encryptedPrivate, iv)
+            val privateKeyBytes = Base64.decode(privateKeyBase64, Base64.NO_WRAP)
+
+            val keyFactory = KeyFactory.getInstance("EC")
+            val privateKey = keyFactory.generatePrivate(PKCS8EncodedKeySpec(privateKeyBytes))
+
+            val signature = Signature.getInstance("SHA256withECDSA")
+            signature.initSign(privateKey)
+            signature.update(data)
+            val signatureBytes = signature.sign()
+
+            Base64.encodeToString(signatureBytes, Base64.NO_WRAP)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error signing data", e)
+            null
+        }
+    }
+
+    /**
+     * Get the current key version number (defaults to 1).
+     */
+    fun getCurrentKeyVersion(): Int {
+        return prefs.getInt(KEY_CURRENT_VERSION, 1)
+    }
+
+    /**
+     * Check if key rotation is due (> 30 days since last rotation) and rotate if needed.
+     * Called from VPSSyncService on startup after keys are initialized.
+     */
+    fun checkAndRotateKeys(): Boolean {
+        val lastRotation = prefs.getLong(KEY_LAST_ROTATION, 0L)
+        if (lastRotation == 0L) {
+            // First time: record current time, no rotation needed
+            prefs.edit().putLong(KEY_LAST_ROTATION, System.currentTimeMillis()).apply()
+            return false
+        }
+
+        if (System.currentTimeMillis() - lastRotation < ROTATION_INTERVAL_MS) {
+            return false // Not time yet
+        }
+
+        try {
+            val oldVersion = getCurrentKeyVersion()
+            val newVersion = oldVersion + 1
+
+            // Save old private key under versioned key
+            val oldEncryptedPrivate = prefs.getString(KEY_ECDH_PRIVATE, null)
+            val oldIv = prefs.getString(KEY_ECDH_PRIVATE_IV, null)
+            if (oldEncryptedPrivate != null && oldIv != null) {
+                prefs.edit()
+                    .putString("ecdh_private_v${oldVersion}", oldEncryptedPrivate)
+                    .putString("ecdh_private_iv_v${oldVersion}", oldIv)
+                    .apply()
+            }
+
+            // Generate new ECDH keypair
+            val keyPair = generateEcdhKeyPair()
+            val privateKeyBytes = keyPair.private.encoded
+            val (encryptedPrivateKey, iv) = encryptWithKeystore(
+                Base64.encodeToString(privateKeyBytes, Base64.NO_WRAP)
+            )
+            val publicKeyX963 = encodeX963PublicKey(keyPair.public as ECPublicKey)
+
+            prefs.edit()
+                .putString(KEY_ECDH_PRIVATE, encryptedPrivateKey)
+                .putString(KEY_ECDH_PRIVATE_IV, iv)
+                .putString(KEY_ECDH_PUBLIC, Base64.encodeToString(publicKeyX963, Base64.NO_WRAP))
+                .putInt(KEY_CURRENT_VERSION, newVersion)
+                .putLong(KEY_LAST_ROTATION, System.currentTimeMillis())
+                .apply()
+
+            ecdhKeyPair = keyPair
+            publishDevicePublicKey()
+
+            Log.i(TAG, "Key rotation complete: v$oldVersion -> v$newVersion")
+            return true
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during key rotation", e)
+            return false
+        }
+    }
+
+    /**
+     * Decrypt a data key using a specific key version.
+     * Falls back to current version, then iterates all stored versions.
+     */
+    fun decryptDataKeyFromEnvelopeWithVersion(envelope: String, keyVersion: Int? = null): ByteArray? {
+        // Try with current in-memory key first
+        val result = decryptDataKeyFromEnvelope(envelope)
+        if (result != null) return result
+
+        // Try specific version if provided
+        if (keyVersion != null) {
+            val versionResult = tryDecryptWithVersion(envelope, keyVersion)
+            if (versionResult != null) return versionResult
+        }
+
+        // Iterate all stored versions
+        val currentVersion = getCurrentKeyVersion()
+        for (v in currentVersion downTo 1) {
+            val vResult = tryDecryptWithVersion(envelope, v)
+            if (vResult != null) return vResult
+        }
+
+        return null
+    }
+
+    private fun tryDecryptWithVersion(envelope: String, version: Int): ByteArray? {
+        return try {
+            val encryptedPrivate = prefs.getString("ecdh_private_v${version}", null) ?: return null
+            val iv = prefs.getString("ecdh_private_iv_v${version}", null) ?: return null
+            val privateKeyBase64 = decryptWithKeystore(encryptedPrivate, iv)
+            val privateKeyBytes = Base64.decode(privateKeyBase64, Base64.NO_WRAP)
+
+            val keyFactory = KeyFactory.getInstance("EC")
+            val privateKey = keyFactory.generatePrivate(PKCS8EncodedKeySpec(privateKeyBytes)) as ECPrivateKey
+
+            val payload = envelope.removePrefix("v2:")
+            val bytes = Base64.decode(payload, Base64.NO_WRAP)
+            if (bytes.size < 65 + 12 + 16) return null
+
+            val ephemeralPublic = bytes.copyOfRange(0, 65)
+            val nonce = bytes.copyOfRange(65, 77)
+            val ciphertext = bytes.copyOfRange(77, bytes.size)
+
+            val ephemeralKey = decodeX963PublicKey(ephemeralPublic)
+            val sharedSecret = deriveSharedSecret(privateKey, ephemeralKey)
+            val aesKey = hkdfSha256(sharedSecret, E2EE_V2_CONTEXT.toByteArray(StandardCharsets.UTF_8), 32)
+
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                SecretKeySpec(aesKey, "AES"),
+                GCMParameterSpec(GCM_TAG_LENGTH, nonce)
+            )
+            cipher.doFinal(ciphertext)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Derive a safety number from the sync group public key.
+     * SHA-256(publicKeyX963) → first 30 bytes → 12 groups of 5 digits.
+     */
+    fun deriveSafetyNumber(): String? {
+        val publicKeyX963Base64 = prefs.getString(KEY_ECDH_PUBLIC, null) ?: return null
+        return try {
+            val publicKeyBytes = Base64.decode(publicKeyX963Base64, Base64.NO_WRAP)
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            val hash = digest.digest(publicKeyBytes)
+
+            val groups = mutableListOf<String>()
+            for (i in 0 until 30 step 5) {
+                var value = 0L
+                for (j in i until minOf(i + 5, hash.size)) {
+                    value = (value shl 8) or (hash[j].toLong() and 0xFF)
+                }
+                groups.add(String.format("%05d", value % 100000))
+            }
+            groups.joinToString(" ")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error deriving safety number", e)
+            null
+        }
     }
 
     fun getDeviceId(): String? {
@@ -701,6 +950,80 @@ class SignalProtocolManager(private val context: Context) {
      */
     fun getMyPublicKey(): String? {
         return prefs.getString(KEY_PUBLIC_KEYSET, null)
+    }
+
+    /**
+     * Create an encrypted backup of all sync group private keys.
+     * Uses PBKDF2 to derive an AES-256 key from the passphrase, then encrypts
+     * each key version as a separate backup uploaded to the server.
+     */
+    suspend fun createKeyBackup(passphrase: String) {
+        val currentVersion = getCurrentKeyVersion()
+
+        for (version in 1..currentVersion) {
+            try {
+                // Get the private key for this version
+                val privateKeyBase64 = if (version == currentVersion) {
+                    getSyncGroupPrivateKeyPKCS8()
+                } else {
+                    val encryptedPrivate = prefs.getString("ecdh_private_v${version}", null) ?: continue
+                    val iv = prefs.getString("ecdh_private_iv_v${version}", null) ?: continue
+                    decryptWithKeystore(encryptedPrivate, iv)
+                } ?: continue
+
+                val publicKeyX963 = if (version == currentVersion) {
+                    getSyncGroupPublicKeyX963()
+                } else {
+                    null
+                }
+
+                // Generate random salt
+                val salt = ByteArray(16)
+                java.security.SecureRandom().nextBytes(salt)
+
+                // Derive AES-256 key from passphrase using PBKDF2
+                val iterations = 400000
+                val keyFactory = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+                val keySpec = javax.crypto.spec.PBEKeySpec(
+                    passphrase.toCharArray(), salt, iterations, 256
+                )
+                val derivedKey = keyFactory.generateSecret(keySpec).encoded
+
+                // Encrypt the key data
+                val keyData = org.json.JSONObject().apply {
+                    put("privateKeyPKCS8", privateKeyBase64)
+                    if (publicKeyX963 != null) put("publicKeyX963", publicKeyX963)
+                    put("keyVersion", version)
+                }.toString()
+
+                val nonce = ByteArray(12)
+                java.security.SecureRandom().nextBytes(nonce)
+                val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+                cipher.init(
+                    Cipher.ENCRYPT_MODE,
+                    SecretKeySpec(derivedKey, "AES"),
+                    GCMParameterSpec(GCM_TAG_LENGTH, nonce)
+                )
+                val ciphertext = cipher.doFinal(keyData.toByteArray(Charsets.UTF_8))
+
+                // Combine nonce + ciphertext for storage
+                val combined = ByteArray(nonce.size + ciphertext.size)
+                System.arraycopy(nonce, 0, combined, 0, nonce.size)
+                System.arraycopy(ciphertext, 0, combined, nonce.size, ciphertext.size)
+
+                val backupData = mapOf(
+                    "encryptedBackup" to Base64.encodeToString(combined, Base64.NO_WRAP),
+                    "salt" to Base64.encodeToString(salt, Base64.NO_WRAP),
+                    "iterations" to iterations,
+                    "keyVersion" to version
+                )
+
+                vpsClient.uploadKeyBackup(backupData)
+                Log.i(TAG, "Key backup created for version $version")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error creating key backup for version $version", e)
+            }
+        }
     }
 
     /**

@@ -22,6 +22,9 @@ export default function ContactsPage() {
                         true // Default to VPS mode
 
       if (isVPSMode) {
+        // Wait for tokens to be restored from IndexedDB before checking auth
+        await vpsService.ensureTokensRestored()
+
         // VPS mode: check VPS authentication
         const storedUserId = localStorage.getItem('syncflow_user_id')
         if (storedUserId && vpsService.isAuthenticated) {

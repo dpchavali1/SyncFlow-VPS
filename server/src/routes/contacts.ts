@@ -4,6 +4,7 @@ import { query } from '../services/database';
 import { authenticate } from '../middleware/auth';
 import { apiRateLimit } from '../middleware/rateLimit';
 import { normalizePhoneNumber } from '../utils/phoneNumber';
+import { broadcastToUser } from '../services/websocket';
 
 const router = Router();
 
@@ -79,6 +80,7 @@ router.post('/sync', async (req: Request, res: Response) => {
            (id, user_id, display_name, phone_numbers, emails, photo_thumbnail)
            VALUES ($1, $2, $3, $4, $5, $6)
            ON CONFLICT (id) DO UPDATE SET
+             user_id = EXCLUDED.user_id,
              display_name = EXCLUDED.display_name,
              phone_numbers = EXCLUDED.phone_numbers,
              emails = EXCLUDED.emails,
@@ -99,6 +101,14 @@ router.post('/sync', async (req: Request, res: Response) => {
       }
     }
 
+    // Notify other devices that contacts are available
+    if (synced > 0) {
+      broadcastToUser(userId, 'contacts', {
+        type: 'contacts_synced',
+        data: { synced, total: body.contacts.length },
+      });
+    }
+
     res.json({ synced, skipped, total: body.contacts.length });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -107,6 +117,21 @@ router.post('/sync', async (req: Request, res: Response) => {
     }
     console.error('Sync contacts error:', error);
     res.status(500).json({ error: 'Failed to sync contacts' });
+  }
+});
+
+// POST /contacts/request-sync - Ask Android to push contacts (called by Mac/Web)
+router.post('/request-sync', async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId!;
+    broadcastToUser(userId, 'contacts', {
+      type: 'request_sync',
+      data: { categories: ['contacts'] },
+    });
+    res.json({ success: true, message: 'Sync request sent to Android device' });
+  } catch (error) {
+    console.error('Request sync error:', error);
+    res.status(500).json({ error: 'Failed to request sync' });
   }
 });
 

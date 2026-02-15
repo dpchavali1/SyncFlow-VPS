@@ -164,7 +164,7 @@ class ClipboardSyncService(context: Context) {
      * Timestamp of last synced content.
      * Used to determine if remote content is newer than local.
      */
-    private var lastSyncedTimestamp: Long = 0
+    private var lastSyncedTimestamp: Long = System.currentTimeMillis()
 
     /**
      * Flag indicating we're currently updating from a remote change.

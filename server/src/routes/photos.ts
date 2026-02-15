@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { query } from '../services/database';
+import { query, queryOne } from '../services/database';
+import { getEffectivePlan, getPlanLimits } from './usage';
 import { authenticate } from '../middleware/auth';
 import { apiRateLimit } from '../middleware/rateLimit';
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
@@ -15,14 +16,14 @@ router.use(apiRateLimit);
 // R2/S3 Client configuration
 const s3Client = new S3Client({
   region: 'auto',
-  endpoint: config.r2?.endpoint || process.env.R2_ENDPOINT,
+  endpoint: config.r2.endpoint,
   credentials: {
-    accessKeyId: config.r2?.accessKeyId || process.env.R2_ACCESS_KEY_ID || '',
-    secretAccessKey: config.r2?.secretAccessKey || process.env.R2_SECRET_ACCESS_KEY || '',
+    accessKeyId: config.r2.accessKeyId,
+    secretAccessKey: config.r2.secretAccessKey,
   },
 });
 
-const BUCKET_NAME = config.r2?.bucketName || process.env.R2_BUCKET_NAME || 'syncflow-files';
+const BUCKET_NAME = config.r2.bucketName;
 
 // Validation schemas
 const confirmUploadSchema = z.object({
@@ -87,22 +88,24 @@ router.get('/', async (req: Request, res: Response) => {
   }
 });
 
-// GET /photos/synced-ids - Get list of synced photo IDs
+// GET /photos/synced-ids - Get list of synced photo IDs (MediaStore originalId)
 router.get('/synced-ids', async (req: Request, res: Response) => {
   try {
     const userId = req.userId!;
 
+    // Return originalId from photo_metadata (the Android MediaStore _ID)
+    // so the Android client can check which photos are already synced
     const photos = await query(
-      `SELECT id FROM user_photos WHERE user_id = $1`,
+      `SELECT photo_metadata->>'originalId' AS original_id
+       FROM user_photos WHERE user_id = $1 AND photo_metadata->>'originalId' IS NOT NULL`,
       [userId]
     );
 
-    // Return as numeric IDs if possible
     res.json({
       ids: photos.map(p => {
-        const numId = parseInt(p.id);
-        return isNaN(numId) ? p.id : numId;
-      }),
+        const numId = parseInt(p.original_id);
+        return isNaN(numId) ? 0 : numId;
+      }).filter(id => id > 0),
     });
   } catch (error) {
     console.error('Get synced photo IDs error:', error);
@@ -121,8 +124,29 @@ router.post('/upload-url', async (req: Request, res: Response) => {
       return;
     }
 
-    // Check subscription for photo sync (premium feature)
-    // TODO: Add subscription check
+    // Enforce upload limits
+    const usage = await queryOne(
+      'SELECT storage_bytes, bandwidth_bytes_month FROM user_usage WHERE user_id = $1',
+      [userId]
+    );
+    const { plan: effectivePlan } = await getEffectivePlan(userId);
+    const limits = getPlanLimits(effectivePlan);
+    const currentMonthly = parseInt(usage?.bandwidth_bytes_month || '0');
+    const currentStorage = parseInt(usage?.storage_bytes || '0');
+    const uploadSize = fileSize || 0;
+
+    if (uploadSize > limits.maxFileSize) {
+      res.status(413).json({ error: `File too large. Max ${Math.round(limits.maxFileSize / (1024 * 1024))} MB for your plan.`, upgrade: true });
+      return;
+    }
+    if (uploadSize > 0 && currentMonthly + uploadSize > limits.monthlyUploadLimit) {
+      res.status(429).json({ error: 'Monthly upload limit reached. Upgrade to Pro for more.', upgrade: true });
+      return;
+    }
+    if (uploadSize > 0 && currentStorage + uploadSize > limits.storageLimit) {
+      res.status(429).json({ error: 'Storage limit reached. Delete existing data or upgrade to Pro.', upgrade: true });
+      return;
+    }
 
     // Generate unique file key
     const fileKey = `${userId}/photos/${Date.now()}_${fileName}`;
@@ -152,30 +176,48 @@ router.post('/confirm-upload', async (req: Request, res: Response) => {
     const body = confirmUploadSchema.parse(req.body);
     const userId = req.userId!;
 
-    await query(
+    // Use RETURNING xmax to detect insert (xmax=0) vs update (xmax>0)
+    const upsertResult = await query<{ xmax: string; old_file_size: number | null }>(
       `INSERT INTO user_photos
        (id, user_id, file_name, r2_key, file_size, content_type, photo_metadata, taken_at, synced_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
        ON CONFLICT (id) DO UPDATE SET
+         user_id = EXCLUDED.user_id,
          r2_key = EXCLUDED.r2_key,
          file_size = EXCLUDED.file_size,
-         synced_at = NOW()`,
+         synced_at = NOW()
+       RETURNING xmax::text, (CASE WHEN xmax::text != '0' THEN $5 ELSE NULL END)::bigint AS old_file_size`,
       [body.fileId, userId, body.fileName, body.r2Key, body.fileSize,
        body.contentType, body.photoMetadata ? JSON.stringify(body.photoMetadata) : null,
        body.photoMetadata?.takenAt]
     );
 
-    // Record usage for photo upload (storage + bandwidth)
+    const wasInsert = upsertResult.length > 0 && upsertResult[0].xmax === '0';
+
+    // Record usage for photo upload
     if (body.fileSize > 0) {
-      await query(
-        `INSERT INTO user_usage (user_id, storage_bytes, bandwidth_bytes_month, updated_at)
-         VALUES ($1, $2, $2, NOW())
-         ON CONFLICT (user_id) DO UPDATE SET
-           storage_bytes = user_usage.storage_bytes + $2,
-           bandwidth_bytes_month = user_usage.bandwidth_bytes_month + $2,
-           updated_at = NOW()`,
-        [userId, body.fileSize]
-      );
+      if (wasInsert) {
+        // New photo: increment both storage and bandwidth
+        await query(
+          `INSERT INTO user_usage (user_id, storage_bytes, bandwidth_bytes_month, updated_at)
+           VALUES ($1, $2, $2, NOW())
+           ON CONFLICT (user_id) DO UPDATE SET
+             storage_bytes = user_usage.storage_bytes + $2,
+             bandwidth_bytes_month = user_usage.bandwidth_bytes_month + $2,
+             updated_at = NOW()`,
+          [userId, body.fileSize]
+        );
+      } else {
+        // Re-sync: only increment bandwidth (storage already counted)
+        await query(
+          `INSERT INTO user_usage (user_id, storage_bytes, bandwidth_bytes_month, updated_at)
+           VALUES ($1, 0, $2, NOW())
+           ON CONFLICT (user_id) DO UPDATE SET
+             bandwidth_bytes_month = user_usage.bandwidth_bytes_month + $2,
+             updated_at = NOW()`,
+          [userId, body.fileSize]
+        );
+      }
     }
 
     res.json({ success: true });
@@ -213,8 +255,12 @@ router.post('/download-url', async (req: Request, res: Response) => {
       return;
     }
 
-    // Verify the file belongs to this user
-    if (!fileKey.startsWith(`${userId}/`)) {
+    // Verify the file belongs to this user via DB (not path prefix, which breaks after user migration)
+    const ownerCheck = await query(
+      `SELECT 1 FROM user_photos WHERE user_id = $1 AND r2_key = $2`,
+      [userId, fileKey]
+    );
+    if (ownerCheck.length === 0) {
       res.status(403).json({ error: 'Access denied' });
       return;
     }
@@ -244,20 +290,16 @@ router.post('/delete', async (req: Request, res: Response) => {
       return;
     }
 
-    // Get r2Key if not provided
-    let fileKey = r2Key;
-    if (!fileKey) {
-      const photo = await query(
-        `SELECT r2_key FROM user_photos WHERE id = $1 AND user_id = $2`,
-        [photoId, userId]
-      );
-      if (photo.length > 0) {
-        fileKey = photo[0].r2_key;
-      }
-    }
+    // Get photo info (r2Key + file_size) before deleting
+    const photo = await query<{ r2_key: string; file_size: number }>(
+      `SELECT r2_key, file_size FROM user_photos WHERE id = $1 AND user_id = $2`,
+      [photoId, userId]
+    );
+    let fileKey = r2Key || (photo.length > 0 ? photo[0].r2_key : null);
+    const fileSize = photo.length > 0 ? parseInt(String(photo[0].file_size)) || 0 : 0;
 
-    // Delete from R2 if key exists
-    if (fileKey && fileKey.startsWith(`${userId}/`)) {
+    // Delete from R2 if key exists (ownership verified via DB query above)
+    if (fileKey) {
       try {
         const command = new DeleteObjectCommand({
           Bucket: BUCKET_NAME,
@@ -275,6 +317,17 @@ router.post('/delete', async (req: Request, res: Response) => {
       `DELETE FROM user_photos WHERE id = $1 AND user_id = $2`,
       [photoId, userId]
     );
+
+    // Decrement storage_bytes to reflect freed space
+    if (fileSize > 0) {
+      await query(
+        `UPDATE user_usage
+         SET storage_bytes = GREATEST(storage_bytes - $2, 0),
+             updated_at = NOW()
+         WHERE user_id = $1`,
+        [userId, fileSize]
+      );
+    }
 
     res.json({ success: true });
   } catch (error) {

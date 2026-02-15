@@ -170,9 +170,9 @@ export default function GroupDetailsPage() {
                 onChange={(e) => setSelectedPlan(e.target.value)}
                 className="mt-1 px-2 py-1 border rounded"
               >
-                <option value="monthly">Monthly ($3.99/mo)</option>
-                <option value="yearly">Yearly ($29.99/yr)</option>
-                <option value="lifetime">Lifetime ($99.99)</option>
+                <option value="monthly">Monthly ($4.99/mo)</option>
+                <option value="yearly">Yearly ($39.99/yr)</option>
+                <option value="lifetime">Lifetime ($79.99)</option>
               </select>
             </div>
             <button

@@ -3,6 +3,8 @@ package com.phoneintegration.app.services
 import android.content.Context
 import android.util.Log
 import com.phoneintegration.app.auth.AuthManager
+import com.phoneintegration.app.desktop.ContactsSyncService
+import com.phoneintegration.app.desktop.CallHistorySyncService
 import com.phoneintegration.app.desktop.DesktopSyncService
 import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.*
@@ -397,9 +399,10 @@ class IntelligentSyncManager private constructor(private val context: Context) {
     }
 
     private suspend fun syncHighPriorityData(userId: String) {
-        // Sync contacts, recent messages, notifications
+        // Push contacts, call history, and sync recent messages
         try {
             syncContacts()
+            syncCallHistory()
             syncRecentMessages()
             updateSyncStatus("high_priority_sync", true)
         } catch (e: Exception) {
@@ -591,10 +594,22 @@ class IntelligentSyncManager private constructor(private val context: Context) {
     private suspend fun syncPresence() { /* Implementation via VPS */ }
     private suspend fun syncContacts() {
         try {
-            val response = vpsClient.getContacts()
-            Log.d(TAG, "Synced ${response.contacts.size} contacts")
+            // Push device contacts to the server (so Mac/Web can fetch them)
+            val contactsSyncService = ContactsSyncService(context)
+            contactsSyncService.syncContactsForUser()
+            Log.d(TAG, "Pushed contacts to VPS server")
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing contacts", e)
+        }
+    }
+
+    private suspend fun syncCallHistory() {
+        try {
+            val callHistorySyncService = CallHistorySyncService(context)
+            callHistorySyncService.syncCallHistoryForUser()
+            Log.d(TAG, "Pushed call history to VPS server")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error syncing call history", e)
         }
     }
     private suspend fun syncRecentMessages() {

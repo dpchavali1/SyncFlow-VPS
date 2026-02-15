@@ -11,6 +11,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.os.Build
+import com.phoneintegration.app.BuildConfig
 import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
@@ -39,14 +40,18 @@ data class VPSTokenPair(
 data class VPSUser(
     val userId: String,
     val deviceId: String,
-    val admin: Boolean = false
+    val admin: Boolean = false,
+    val migrationPerformed: Boolean = false,
+    val existingUser: Boolean = false
 )
 
 data class VPSAuthResponse(
     val userId: String,
     val deviceId: String,
     val accessToken: String,
-    val refreshToken: String
+    val refreshToken: String,
+    val migrationPerformed: Boolean = false,
+    val existingUser: Boolean = false
 )
 
 data class VPSPairingRequest(
@@ -197,7 +202,12 @@ data class VPSUsageData(
     val monthlyMmsBytes: Long,
     val monthlyFileBytes: Long,
     val monthlyPhotoBytes: Long = 0,
-    val lastUpdatedAt: Long?
+    val lastUpdatedAt: Long?,
+    val monthlyUploadLimit: Long = 0,
+    val storageLimit: Long = 0,
+    val maxFileSize: Long = 0,
+    val maxDevices: Int = 2,
+    val monthlyResetDate: Long? = null
 )
 
 data class VPSUsageResponse(
@@ -415,6 +425,7 @@ interface VPSWebSocketListener {
     fun onDeviceRemoved(deviceId: String)
     fun onDeviceAdded(deviceId: String, deviceName: String?, deviceType: String?)
     fun onE2eeKeyRequest(requestingDeviceId: String, requestingPublicKey: String?)
+    fun onSyncMessagesRequested()
 }
 
 // ==================== VPS Client ====================
@@ -480,6 +491,9 @@ class VPSClient private constructor(
     private var wsListener: VPSWebSocketListener? = null
     var webrtcSignalListener: WebRTCSignalListener? = null
     private val subscriptions = mutableSetOf<String>()
+    private var reconnectAttempts = 0
+    private val maxReconnectAttempts = 20
+    private var heartbeatJob: kotlinx.coroutines.Job? = null
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -539,7 +553,17 @@ class VPSClient private constructor(
 
     private fun buildWsUrl(token: String): String? {
         val httpUrl = baseUrl.toHttpUrlOrNull() ?: return null
-        val wsScheme = if (httpUrl.scheme == "https") "wss" else "ws"
+        val wsScheme = if (httpUrl.scheme == "https") {
+            "wss"
+        } else {
+            // In release builds, warn and default to wss:// for security
+            if (!BuildConfig.DEBUG) {
+                Log.w(TAG, "WebSocket URL using ws:// in release build — upgrading to wss://")
+                "wss"
+            } else {
+                "ws"
+            }
+        }
         val wsHost = httpUrl.host
         val wsPort = httpUrl.port
         val wsPath = if (httpUrl.encodedPath.isNullOrBlank() || httpUrl.encodedPath == "/") "" else httpUrl.encodedPath
@@ -561,19 +585,35 @@ class VPSClient private constructor(
      * This ensures the VPS user ID matches the Firebase user ID, allowing
      * other devices to pair and see the same messages.
      */
+    /**
+     * Get the device's ECDSA signing public key in X9.63 format.
+     * Returns null if signing keys haven't been initialized yet.
+     */
+    fun getSigningPublicKey(): String? {
+        return try {
+            val e2eeManager = com.phoneintegration.app.e2ee.SignalProtocolManager(context)
+            e2eeManager.getSigningPublicKeyX963()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to get signing public key: ${e.message}")
+            null
+        }
+    }
+
     suspend fun authenticateWithFirebaseUid(
         firebaseUid: String,
         deviceName: String,
         deviceType: String = "android"
     ): VPSUser = withContext(Dispatchers.IO) {
-        val body = mapOf(
+        val body = mutableMapOf<String, Any>(
             "firebaseUid" to firebaseUid,
             "deviceName" to deviceName,
             "deviceType" to deviceType
         )
+        // Include signing key if available
+        getSigningPublicKey()?.let { body["signingKey"] = it }
         val response = post<VPSAuthResponse>("/api/auth/firebase", body, skipAuth = true)
         saveTokens(response.accessToken, response.refreshToken, response.userId, response.deviceId)
-        Log.i(TAG, "Authenticated with Firebase UID: ${response.userId}")
+        Log.i(TAG, "Authenticated with Firebase UID: ${response.userId}${if (response.migrationPerformed) " [MIGRATION]" else ""}${if (response.existingUser) " [EXISTING]" else " [NEW]"}")
 
         // Auto-register phone numbers from SIM for call lookup (fire-and-forget)
         scope.launch { autoRegisterPhoneNumbers() }
@@ -593,7 +633,7 @@ class VPSClient private constructor(
                 Log.w(TAG, "FCM token fetch failed: ${e.message}")
             }
 
-        VPSUser(response.userId, response.deviceId)
+        VPSUser(response.userId, response.deviceId, migrationPerformed = response.migrationPerformed, existingUser = response.existingUser)
     }
 
     suspend fun initiatePairing(deviceName: String, deviceType: String = "android"): VPSPairingRequest =
@@ -685,6 +725,11 @@ class VPSClient private constructor(
         after?.let { params.add("after=$it") }
         threadId?.let { params.add("threadId=$it") }
         get("/api/messages?${params.joinToString("&")}")
+    }
+
+    suspend fun getMessageCount(): Int = withContext(Dispatchers.IO) {
+        val response: Map<String, Any> = get("/api/messages/count")
+        (response["count"] as? Number)?.toInt() ?: 0
     }
 
     suspend fun syncMessages(messages: List<Map<String, Any?>>): VPSSyncResponse = withContext(Dispatchers.IO) {
@@ -839,7 +884,7 @@ class VPSClient private constructor(
     suspend fun markCallCommandProcessed(commandId: String): Unit =
         withContext(Dispatchers.IO) {
             try {
-                put("/api/calls/commands/$commandId/processed", mapOf("processed" to true))
+                put<Map<String, Any>>("/api/calls/commands/$commandId/processed", mapOf("processed" to true))
             } catch (e: Exception) {
                 Log.e(TAG, "Error marking call command processed: ${e.message}")
             }
@@ -1002,21 +1047,7 @@ class VPSClient private constructor(
             get("/api/usage")
         } catch (e: Exception) {
             Log.e(TAG, "Error getting usage: ${e.message}")
-            // Return default values if API not implemented
-            VPSUsageResponse(
-                success = true,
-                usage = VPSUsageData(
-                    plan = null,
-                    planExpiresAt = null,
-                    trialStartedAt = null,
-                    storageBytes = 0,
-                    monthlyUploadBytes = 0,
-                    monthlyMmsBytes = 0,
-                    monthlyFileBytes = 0,
-                    monthlyPhotoBytes = 0,
-                    lastUpdatedAt = null
-                )
-            )
+            throw e
         }
     }
 
@@ -1912,6 +1943,16 @@ class VPSClient private constructor(
         }
     }
 
+    suspend fun uploadKeyBackup(backupData: Map<String, Any>): Unit = withContext(Dispatchers.IO) {
+        post<Map<String, Any>>("/api/e2ee/key-backup", backupData)
+    }
+
+    suspend fun getKeyBackups(): List<Map<String, Any>> = withContext(Dispatchers.IO) {
+        val response = get<Map<String, Any>>("/api/e2ee/key-backup")
+        @Suppress("UNCHECKED_CAST")
+        (response["backups"] as? List<Map<String, Any>>) ?: emptyList()
+    }
+
     // ==================== WebSocket ====================
 
     fun connectWebSocket(listener: VPSWebSocketListener? = null) {
@@ -1936,10 +1977,23 @@ class VPSClient private constructor(
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.d(TAG, "WebSocket connected")
                 _connectionState.value = true
+                reconnectAttempts = 0
                 wsListener?.onConnected()
                 // Subscribe to all channels
                 subscriptions.forEach { channel ->
                     webSocket.send(gson.toJson(mapOf("type" to "subscribe", "channel" to channel)))
+                }
+                // Start heartbeat ping every 30s
+                heartbeatJob?.cancel()
+                heartbeatJob = scope.launch {
+                    while (true) {
+                        delay(30_000)
+                        try {
+                            webSocket.send(gson.toJson(mapOf("type" to "ping")))
+                        } catch (e: Exception) {
+                            break
+                        }
+                    }
                 }
             }
 
@@ -1960,16 +2014,24 @@ class VPSClient private constructor(
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 Log.d(TAG, "WebSocket closed: $code $reason")
                 _connectionState.value = false
+                heartbeatJob?.cancel()
                 wsListener?.onDisconnected()
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.e(TAG, "WebSocket error: ${t.message}")
                 _connectionState.value = false
+                heartbeatJob?.cancel()
                 wsListener?.onError(t.message ?: "WebSocket error")
-                // Auto-reconnect
+                // Auto-reconnect with exponential backoff (3s→6s→12s→24s→30s cap)
+                reconnectAttempts++
+                if (reconnectAttempts > maxReconnectAttempts) {
+                    Log.w(TAG, "WebSocket max reconnect attempts ($maxReconnectAttempts) reached, giving up")
+                    return
+                }
+                val delayMs = minOf(3000L * (1L shl minOf(reconnectAttempts - 1, 4)), 30_000L)
                 scope.launch {
-                    delay(3000)
+                    delay(delayMs)
                     if (isAuthenticated) {
                         connectWebSocket(wsListener)
                     }
@@ -1986,10 +2048,12 @@ class VPSClient private constructor(
     }
 
     fun disconnectWebSocket() {
+        heartbeatJob?.cancel()
         webSocket?.close(1000, "Client disconnect")
         webSocket = null
         wsListener = null
         _connectionState.value = false
+        reconnectAttempts = 0
     }
 
     fun subscribe(channel: String) {
@@ -2068,6 +2132,35 @@ class VPSClient private constructor(
                 }
                 return
             }
+        }
+
+        // Handle sync requests from other devices (e.g., Mac requesting contacts after pairing)
+        if (type == "request_sync") {
+            val payload = extractDataPayload(data) as? Map<*, *>
+            val categories = (payload?.get("categories") as? List<*>)?.mapNotNull { it as? String }
+                ?: listOf("contacts", "calls")
+            Log.d(TAG, "Sync request received for categories: $categories")
+            scope.launch(Dispatchers.IO) {
+                try {
+                    if (categories.contains("contacts")) {
+                        val contactsSyncService = com.phoneintegration.app.desktop.ContactsSyncService(context)
+                        contactsSyncService.syncContactsForUser()
+                        Log.d(TAG, "Contacts sync completed (requested by remote device)")
+                    }
+                    if (categories.contains("calls")) {
+                        val callHistorySyncService = com.phoneintegration.app.desktop.CallHistorySyncService(context)
+                        callHistorySyncService.syncCallHistoryForUser()
+                        Log.d(TAG, "Call history sync completed (requested by remote device)")
+                    }
+                    if (categories.contains("messages")) {
+                        wsListener?.onSyncMessagesRequested()
+                        Log.d(TAG, "Message re-sync dispatched to listener (requested by remote device)")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error handling sync request", e)
+                }
+            }
+            return
         }
 
         // All other message types require wsListener

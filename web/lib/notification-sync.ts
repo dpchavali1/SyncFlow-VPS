@@ -66,7 +66,9 @@ const auditLog = (action: string, details: any) => {
     details
   }
 
-  console.log('[WebNotificationAudit]', logEntry)
+  if (process.env.NODE_ENV === 'development') {
+    console.log('[WebNotificationAudit]', logEntry)
+  }
 
   // In production, send to secure logging endpoint
   // await fetch('/api/audit-log', { method: 'POST', body: JSON.stringify(logEntry) })
@@ -176,7 +178,6 @@ export const listenToMirroredNotifications = (
 ): (() => void) => {
   // Skip in VPS mode - notification sync uses Firebase
   if (isVPSMode()) {
-    console.log('[NotificationSync] VPS mode - notification sync not available')
     return () => {}
   }
 
@@ -195,7 +196,6 @@ export const listenToMirroredNotifications = (
   // Get lazy-loaded database
   const db = getFirebaseDatabase()
   if (!db) {
-    console.log('[NotificationSync] Firebase database not available')
     return () => {}
   }
 
@@ -313,13 +313,11 @@ export const dismissMirroredNotification = async (
 ) => {
   // Skip in VPS mode
   if (isVPSMode()) {
-    console.log('[NotificationSync] VPS mode - dismiss not available')
     return
   }
 
   const db = getFirebaseDatabase()
   if (!db) {
-    console.log('[NotificationSync] Firebase database not available')
     return
   }
 

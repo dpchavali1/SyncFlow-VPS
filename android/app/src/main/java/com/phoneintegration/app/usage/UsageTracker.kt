@@ -2,6 +2,7 @@ package com.phoneintegration.app.usage
 
 import android.content.Context
 import android.util.Log
+import com.phoneintegration.app.data.PreferencesManager
 import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -74,16 +75,15 @@ class UsageTracker(private val context: Context) {
         private const val TRIAL_DAYS = 7 // 7 day trial
         private const val MILLIS_PER_DAY = 24L * 60L * 60L * 1000L
 
-        // Trial/Free tier: 500MB upload/month, 100MB storage
-        private const val TRIAL_MONTHLY_UPLOAD_BYTES = 500L * 1024L * 1024L
-        private const val TRIAL_STORAGE_BYTES = 100L * 1024L * 1024L
-
-        // Paid tier: 10GB upload/month, 2GB storage
-        private const val PAID_MONTHLY_UPLOAD_BYTES = 10L * 1024L * 1024L * 1024L
-        private const val PAID_STORAGE_BYTES = 2L * 1024L * 1024L * 1024L
+        // Fallback limits when server doesn't provide them
+        private const val FREE_MONTHLY_UPLOAD_BYTES = 200L * 1024L * 1024L
+        private const val FREE_STORAGE_BYTES = 100L * 1024L * 1024L
+        private const val PAID_MONTHLY_UPLOAD_BYTES = 2L * 1024L * 1024L * 1024L
+        private const val PAID_STORAGE_BYTES = 1L * 1024L * 1024L * 1024L
     }
 
     private val vpsClient = VPSClient.getInstance(context)
+    private val preferencesManager = PreferencesManager(context)
 
     suspend fun isUploadAllowed(
         userId: String,
@@ -99,6 +99,9 @@ class UsageTracker(private val context: Context) {
             val now = System.currentTimeMillis()
             val isPaid = isPaidPlan(usage.plan, usage.planExpiresAt, now)
 
+            // Persist server plan locally so UI (isPaidUser) stays in sync
+            usage.plan?.let { preferencesManager.setUserPlan(it, usage.planExpiresAt ?: 0L) }
+
             if (!isPaid) {
                 val trialStart = usage.trialStartedAt ?: now
                 if (now - trialStart > TRIAL_DAYS * MILLIS_PER_DAY) {
@@ -106,8 +109,11 @@ class UsageTracker(private val context: Context) {
                 }
             }
 
-            val monthlyLimit = if (isPaid) PAID_MONTHLY_UPLOAD_BYTES else TRIAL_MONTHLY_UPLOAD_BYTES
-            val storageLimit = if (isPaid) PAID_STORAGE_BYTES else TRIAL_STORAGE_BYTES
+            // Use server-provided limits (fall back to defaults if not present)
+            val monthlyLimit = if (usage.monthlyUploadLimit > 0) usage.monthlyUploadLimit
+                else if (isPaid) PAID_MONTHLY_UPLOAD_BYTES else FREE_MONTHLY_UPLOAD_BYTES
+            val storageLimit = if (usage.storageLimit > 0) usage.storageLimit
+                else if (isPaid) PAID_STORAGE_BYTES else FREE_STORAGE_BYTES
 
             if (usage.monthlyUploadBytes + bytes > monthlyLimit) {
                 return@withContext UsageCheck(false, REASON_MONTHLY_LIMIT)
@@ -173,14 +179,21 @@ class UsageTracker(private val context: Context) {
 
             val now = System.currentTimeMillis()
             val isPaid = isPaidPlan(usage.plan, usage.planExpiresAt, now)
+
+            // Persist server plan locally so UI (isPaidUser) stays in sync
+            usage.plan?.let { preferencesManager.setUserPlan(it, usage.planExpiresAt ?: 0L) }
+
             val trialStart = usage.trialStartedAt ?: now
 
             val trialElapsedDays = ((now - trialStart) / MILLIS_PER_DAY).toInt()
             val trialDaysRemaining = maxOf(0, TRIAL_DAYS - trialElapsedDays)
             val isTrialExpired = !isPaid && trialElapsedDays > TRIAL_DAYS
 
-            val monthlyLimit = if (isPaid) PAID_MONTHLY_UPLOAD_BYTES else TRIAL_MONTHLY_UPLOAD_BYTES
-            val storageLimit = if (isPaid) PAID_STORAGE_BYTES else TRIAL_STORAGE_BYTES
+            // Use server-provided limits
+            val monthlyLimit = if (usage.monthlyUploadLimit > 0) usage.monthlyUploadLimit
+                else if (isPaid) PAID_MONTHLY_UPLOAD_BYTES else FREE_MONTHLY_UPLOAD_BYTES
+            val storageLimit = if (usage.storageLimit > 0) usage.storageLimit
+                else if (isPaid) PAID_STORAGE_BYTES else FREE_STORAGE_BYTES
 
             UsageStats(
                 monthlyUploadBytes = usage.monthlyUploadBytes,

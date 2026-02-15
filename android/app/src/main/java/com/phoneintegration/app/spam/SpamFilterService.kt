@@ -477,7 +477,9 @@ class SpamFilterService(private val context: Context) {
             // Try to reload ML model if updated
             try {
                 mlClassifier = SpamMLClassifier(context)
-            } catch (_: Exception) { }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to reload ML classifier after filter update", e)
+            }
 
             updateFilterStats()
             true

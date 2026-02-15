@@ -19,9 +19,8 @@ class TenorApiService {
         // Tenor API base URL
         private const val BASE_URL = "https://tenor.googleapis.com/v2"
 
-        // Default API key for development (replace with your own for production)
-        // Get your API key at: https://developers.google.com/tenor/guides/quickstart
-        private const val API_KEY = "***REMOVED***"
+        // API key loaded from local.properties via BuildConfig (not committed to git)
+        private const val API_KEY = com.phoneintegration.app.BuildConfig.TENOR_API_KEY
 
         // Client key for tracking
         private const val CLIENT_KEY = "syncflow_android"

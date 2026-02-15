@@ -5,36 +5,11 @@ import { Send, MoreVertical, MessageSquare, Brain, Loader2, Info, X, Image as Im
 import { useAppStore } from '@/lib/store'
 import { markMessagesRead, sendSmsFromWeb, sendMmsFromWeb, uploadMmsImage, waitForAuth } from '@/lib/firebase'
 import vpsService from '@/lib/vps'
+import { normalizePhoneForConversation } from '@/lib/phoneNumberNormalizer'
 import { format } from 'date-fns'
 
 interface MessageViewProps {
   onOpenAI?: () => void
-}
-
-// LRU Cache for phone number normalization (shared concept with ConversationList)
-const normalizationCache = new Map<string, string>()
-const MAX_CACHE_SIZE = 1000
-
-// Normalize phone number for comparison with caching
-function normalizePhoneNumber(address: string): string {
-  const cached = normalizationCache.get(address)
-  if (cached !== undefined) return cached
-
-  let result: string
-  if (address.includes('@') || address.length < 6) {
-    result = address.toLowerCase()
-  } else {
-    const digitsOnly = address.replace(/[^0-9]/g, '')
-    result = digitsOnly.length >= 10 ? digitsOnly.slice(-10) : digitsOnly
-  }
-
-  // Maintain cache size
-  if (normalizationCache.size >= MAX_CACHE_SIZE) {
-    const firstKey = normalizationCache.keys().next().value
-    if (firstKey) normalizationCache.delete(firstKey)
-  }
-  normalizationCache.set(address, result)
-  return result
 }
 
 interface SelectedImage {
@@ -48,7 +23,16 @@ interface MessageBubbleProps {
   readReceipt: any
 }
 
-// Memoized message bubble component to prevent unnecessary re-renders
+/**
+ * Memoized message bubble component to prevent unnecessary re-renders.
+ *
+ * Renders a single SMS/MMS message with:
+ *   - iMessage-style alignment (sent = right/blue, received = left/white)
+ *   - MMS image attachments with click-to-open and graceful error placeholders
+ *   - Delivery status indicators: clock=sending, check=sent, double-check=delivered, !=failed
+ *   - E2EE failure warnings when decryption of an encrypted message fails
+ *   - Read receipts from other devices (e.g. "Read on Mac at 3:45 PM")
+ */
 const MessageBubble = memo(function MessageBubble({ msg, isSent, readReceipt }: MessageBubbleProps) {
   const timestamp = format(new Date(msg.date), 'MMM d, h:mm a')
   const readTime =
@@ -70,7 +54,9 @@ const MessageBubble = memo(function MessageBubble({ msg, isSent, readReceipt }: 
               : 'bg-white dark:bg-gray-800 text-gray-900 dark:text-white'
           }`}
         >
-          {/* MMS Images */}
+          {/* MMS image attachments: rendered from presigned R2 download URLs.
+              On load failure, the <img> is replaced with a placeholder via
+              DOM manipulation (innerHTML is avoided to prevent XSS). */}
           {imageAttachments.map((att: any, idx: number) => {
             const imageSrc = att.url
 
@@ -252,17 +238,19 @@ export default function MessageView({ onOpenAI }: MessageViewProps) {
     checkAuth()
   }, [])
 
-  // Filter messages for selected conversation (using normalized address)
+  // Filter messages for the selected conversation by normalizing phone numbers
+  // to their last 10 digits, handling format differences (+1, parentheses, dashes, etc.)
   const conversationMessages = useMemo(() => {
     if (!selectedConversation) return []
 
     // selectedConversation is now a normalized address
     return messages
-      .filter((msg) => normalizePhoneNumber(msg.address) === selectedConversation)
+      .filter((msg) => normalizePhoneForConversation(msg.address) === selectedConversation)
       .sort((a, b) => a.date - b.date)
   }, [messages, selectedConversation])
 
-  // Get the original address for sending (prefer the most recent one)
+  // Prefer the most recent raw address for sending, since the conversation key
+  // is normalized (last 10 digits) but we need the full E.164 number for the API
   const sendAddress = useMemo(() => {
     if (conversationMessages.length === 0) return selectedConversation || ''
     // Use the address from the most recent message
@@ -451,6 +439,44 @@ export default function MessageView({ onOpenAI }: MessageViewProps) {
     }
   }, [handleSend])
 
+  const setSpamMessages = useAppStore((state) => state.setSpamMessages)
+  const setSelectedSpamAddress = useAppStore((state) => state.setSelectedSpamAddress)
+
+  const handleNotSpam = useCallback(async () => {
+    if (!selectedSpamAddress) return
+    try {
+      await vpsService.addToWhitelist(selectedSpamAddress)
+      // Remove all messages from this sender locally
+      const remaining = useAppStore.getState().spamMessages.filter(
+        (msg) => msg.address !== selectedSpamAddress
+      )
+      setSpamMessages(remaining)
+      // Select next sender if available
+      const nextAddress = remaining.length > 0 ? remaining[0].address : null
+      setSelectedSpamAddress(nextAddress)
+    } catch (err) {
+      console.error('Failed to whitelist sender:', err)
+    }
+  }, [selectedSpamAddress, setSpamMessages, setSelectedSpamAddress])
+
+  const handleDeleteSpamSender = useCallback(async () => {
+    if (!selectedSpamAddress) return
+    try {
+      const toDelete = useAppStore.getState().spamMessages.filter(
+        (msg) => msg.address === selectedSpamAddress
+      )
+      await Promise.all(toDelete.map((msg) => vpsService.deleteSpamMessage(msg.id)))
+      const remaining = useAppStore.getState().spamMessages.filter(
+        (msg) => msg.address !== selectedSpamAddress
+      )
+      setSpamMessages(remaining)
+      const nextAddress = remaining.length > 0 ? remaining[0].address : null
+      setSelectedSpamAddress(nextAddress)
+    } catch (err) {
+      console.error('Failed to delete spam messages:', err)
+    }
+  }, [selectedSpamAddress, setSpamMessages, setSelectedSpamAddress])
+
   if (activeFolder === 'spam') {
     const selected = selectedSpamAddress
     const spamList = selected
@@ -472,6 +498,22 @@ export default function MessageView({ onOpenAI }: MessageViewProps) {
                 </p>
               </div>
             </div>
+            {selected && (
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleNotSpam}
+                  className="px-3 py-1.5 text-sm font-medium rounded-lg bg-green-100 text-green-700 hover:bg-green-200 dark:bg-green-900/30 dark:text-green-400 dark:hover:bg-green-900/50 transition-colors"
+                >
+                  Not Spam
+                </button>
+                <button
+                  onClick={handleDeleteSpamSender}
+                  className="px-3 py-1.5 text-sm font-medium rounded-lg bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/50 transition-colors"
+                >
+                  Delete
+                </button>
+              </div>
+            )}
           </div>
         </div>
 

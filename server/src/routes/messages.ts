@@ -1,9 +1,23 @@
+/**
+ * Message sync and outgoing message endpoints.
+ *
+ * - GET  /messages          Paginated message retrieval (supports incremental sync via `after` param)
+ * - POST /messages/sync     Batch upsert from Android device; broadcasts changes over WebSocket
+ * - POST /messages/send     Queue an outgoing message for Android to pick up and deliver
+ * - GET  /messages/outgoing Pending outgoing messages (Android polls or gets push-woken)
+ * - PUT  /messages/outgoing/:id/status  Android reports send/delivery result
+ * - PUT  /messages/:id/delivery-status  Update delivery status on a synced message
+ * - PUT  /messages/:id/read             Mark a message as read
+ * - DELETE /messages                    Batch delete by IDs
+ * - GET  /messages/count                Total message count for a user
+ */
+
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { query, queryOne } from '../services/database';
 import { authenticate } from '../middleware/auth';
 import { apiRateLimit } from '../middleware/rateLimit';
-import { broadcastToUser } from '../services/websocket';
+import { broadcastToUser, broadcastToAllDevicesExcept } from '../services/websocket';
 import { normalizePhoneNumber } from '../utils/phoneNumber';
 import { sendOutgoingMessageNotification } from '../services/push';
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
@@ -13,13 +27,13 @@ import { config } from '../config';
 // R2/S3 Client for generating presigned download URLs for MMS attachments
 const s3Client = new S3Client({
   region: 'auto',
-  endpoint: config.r2?.endpoint || process.env.R2_ENDPOINT,
+  endpoint: config.r2.endpoint,
   credentials: {
-    accessKeyId: config.r2?.accessKeyId || process.env.R2_ACCESS_KEY_ID || '',
-    secretAccessKey: config.r2?.secretAccessKey || process.env.R2_SECRET_ACCESS_KEY || '',
+    accessKeyId: config.r2.accessKeyId,
+    secretAccessKey: config.r2.secretAccessKey,
   },
 });
-const R2_BUCKET = config.r2?.bucketName || process.env.R2_BUCKET_NAME || 'syncflow-files';
+const R2_BUCKET = config.r2.bucketName;
 
 const router = Router();
 
@@ -156,16 +170,48 @@ router.post('/sync', async (req: Request, res: Response) => {
     let skipped = 0;
     const syncedMessages: any[] = [];
 
-    for (const msg of body.messages) {
+    // Batch upsert messages for much better performance on large syncs.
+    // Process in groups of 50 to keep query size reasonable.
+    const batchInsertSize = 50;
+    for (let batchStart = 0; batchStart < body.messages.length; batchStart += batchInsertSize) {
+      const batch = body.messages.slice(batchStart, batchStart + batchInsertSize);
+
+      // Build multi-row VALUES clause
+      const values: any[] = [];
+      const placeholders: string[] = [];
+      batch.forEach((msg, i) => {
+        const offset = i * 16;
+        placeholders.push(`($${offset+1}, $${offset+2}, $${offset+3}, $${offset+4}, $${offset+5}, $${offset+6}, $${offset+7}, $${offset+8}, $${offset+9}, $${offset+10}, $${offset+11}, $${offset+12}, $${offset+13}, $${offset+14}, $${offset+15}, $${offset+16})`);
+        values.push(
+          msg.id,
+          userId,
+          msg.threadId,
+          normalizePhoneNumber(msg.address),
+          msg.contactName,
+          msg.body,
+          msg.date,
+          msg.type,
+          msg.read,
+          msg.isMms,
+          msg.mmsParts ? JSON.stringify(msg.mmsParts) : null,
+          msg.encrypted,
+          msg.encryptedBody ?? null,
+          msg.encryptedNonce ?? null,
+          msg.keyMap ? JSON.stringify(msg.keyMap) : null,
+          msg.deliveryStatus ?? null,
+        );
+      });
+
       try {
         await query(
           `INSERT INTO user_messages
            (id, user_id, thread_id, address, contact_name, body, date, type, read, is_mms, mms_parts, encrypted, encrypted_body, encrypted_nonce, key_map, delivery_status)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+           VALUES ${placeholders.join(', ')}
            ON CONFLICT (id) DO UPDATE SET
+             user_id = EXCLUDED.user_id,
              thread_id = EXCLUDED.thread_id,
              address = EXCLUDED.address,
-             contact_name = EXCLUDED.contact_name,
+             contact_name = COALESCE(EXCLUDED.contact_name, user_messages.contact_name),
              body = EXCLUDED.body,
              date = EXCLUDED.date,
              type = EXCLUDED.type,
@@ -178,39 +224,60 @@ router.post('/sync', async (req: Request, res: Response) => {
              key_map = EXCLUDED.key_map,
              delivery_status = COALESCE(EXCLUDED.delivery_status, user_messages.delivery_status),
              updated_at = NOW()`,
-          [
-            msg.id,
-            userId,
-            msg.threadId,
-            normalizePhoneNumber(msg.address),
-            msg.contactName,
-            msg.body,
-            msg.date,
-            msg.type,
-            msg.read,
-            msg.isMms,
-            msg.mmsParts ? JSON.stringify(msg.mmsParts) : null,
-            msg.encrypted,
-            msg.encryptedBody ?? null,
-            msg.encryptedNonce ?? null,
-            msg.keyMap ? JSON.stringify(msg.keyMap) : null,
-            msg.deliveryStatus ?? null,
-          ]
+          values
         );
-        synced++;
-        syncedMessages.push(msg);
+        synced += batch.length;
+        syncedMessages.push(...batch);
       } catch (e) {
-        skipped++;
+        // Fallback: try individual inserts for this batch so partial success is possible
+        for (const msg of batch) {
+          try {
+            await query(
+              `INSERT INTO user_messages
+               (id, user_id, thread_id, address, contact_name, body, date, type, read, is_mms, mms_parts, encrypted, encrypted_body, encrypted_nonce, key_map, delivery_status)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+               ON CONFLICT (id) DO UPDATE SET
+                 user_id = EXCLUDED.user_id,
+                 thread_id = EXCLUDED.thread_id,
+                 address = EXCLUDED.address,
+                 contact_name = COALESCE(EXCLUDED.contact_name, user_messages.contact_name),
+                 body = EXCLUDED.body,
+                 date = EXCLUDED.date,
+                 type = EXCLUDED.type,
+                 read = EXCLUDED.read,
+                 is_mms = EXCLUDED.is_mms,
+                 mms_parts = COALESCE(EXCLUDED.mms_parts, user_messages.mms_parts),
+                 encrypted = EXCLUDED.encrypted,
+                 encrypted_body = EXCLUDED.encrypted_body,
+                 encrypted_nonce = EXCLUDED.encrypted_nonce,
+                 key_map = EXCLUDED.key_map,
+                 delivery_status = COALESCE(EXCLUDED.delivery_status, user_messages.delivery_status),
+                 updated_at = NOW()`,
+              [
+                msg.id, userId, msg.threadId, normalizePhoneNumber(msg.address),
+                msg.contactName, msg.body, msg.date, msg.type, msg.read, msg.isMms,
+                msg.mmsParts ? JSON.stringify(msg.mmsParts) : null, msg.encrypted,
+                msg.encryptedBody ?? null, msg.encryptedNonce ?? null,
+                msg.keyMap ? JSON.stringify(msg.keyMap) : null, msg.deliveryStatus ?? null,
+              ]
+            );
+            synced++;
+            syncedMessages.push(msg);
+          } catch (e2) {
+            skipped++;
+          }
+        }
       }
     }
 
     // Broadcast synced messages to other connected devices via WebSocket
+    // Exclude the device that sent the sync to prevent echo-back duplicates
     if (syncedMessages.length > 0) {
-      // Send in batches to avoid overwhelming the WebSocket
+      const senderDeviceId = req.deviceId || '';
       const batchSize = 50;
       for (let i = 0; i < syncedMessages.length; i += batchSize) {
         const batch = syncedMessages.slice(i, i + batchSize);
-        broadcastToUser(userId, 'messages', {
+        const payload = {
           type: 'messages_synced',
           data: {
             messages: batch.map((m) => ({
@@ -232,7 +299,12 @@ router.post('/sync', async (req: Request, res: Response) => {
             })),
             total: batch.length,
           },
-        });
+        };
+        if (senderDeviceId) {
+          broadcastToAllDevicesExcept(userId, senderDeviceId, 'messages', payload);
+        } else {
+          broadcastToUser(userId, 'messages', payload);
+        }
       }
     }
 

@@ -245,9 +245,8 @@ struct MainView: View {
     @State private var searchText = ""
 
     /// Modal presentation flags
-    @State private var showKeyboardShortcuts = false
     @State private var showAIAssistant = false
-    // showSupportChat is on appState so Help menu can trigger it too
+    // showKeyboardShortcuts and showSupportChat are on appState so Help menu can trigger them too
 
     // =========================================================================
     // MARK: - View Body
@@ -337,7 +336,6 @@ struct MainView: View {
         .onChange(of: appState.userId) { _, newUserId in
             if let userId = newUserId {
                 // Start listening when user is paired (userId becomes available)
-                print("[ContentView] User paired, starting message listener for userId: \(userId)")
                 messageStore.startListening(userId: userId)
                 // Fetch usage stats
                 Task {
@@ -345,34 +343,25 @@ struct MainView: View {
                 }
             } else {
                 // Stop listening when user is unpaired (userId becomes nil)
-                print("[ContentView] User unpaired, stopping message listener")
                 messageStore.stopListening()
             }
         }
         // Keyboard shortcuts help overlay
         .overlay(
             Group {
-                if showKeyboardShortcuts {
+                if appState.showKeyboardShortcuts {
                     Color.black.opacity(0.3)
                         .ignoresSafeArea()
                         .onTapGesture {
-                            showKeyboardShortcuts = false
+                            appState.showKeyboardShortcuts = false
                         }
 
-                    KeyboardShortcutsView(isPresented: $showKeyboardShortcuts)
+                    KeyboardShortcutsView(isPresented: $appState.showKeyboardShortcuts)
                         .transition(.scale.combined(with: .opacity))
                 }
             }
         )
-        .animation(.spring(), value: showKeyboardShortcuts)
-        // Keyboard shortcut: Cmd+? to show help
-        .background(
-            Button("") {
-                showKeyboardShortcuts = true
-            }
-            .keyboardShortcut("/", modifiers: [.command, .shift])
-            .hidden()
-        )
+        .animation(.spring(), value: appState.showKeyboardShortcuts)
         // Keyboard shortcut: Cmd+Shift+A for AI Assistant
         .background(
             Button("") {
@@ -626,6 +615,12 @@ struct SpamDetailView: View {
                 Spacer()
 
                 if let address = selectedAddress {
+                    Button("Not Spam") {
+                        Task { await messageStore.markSpamAsNotSpam(address: address) }
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.green)
+
                     Button("Remove Sender") {
                         Task { await messageStore.deleteSpamMessages(for: address) }
                     }
@@ -846,7 +841,7 @@ struct UpgradeBanner: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Upgrade to SyncFlow Pro")
                     .font(.headline)
-                Text("Unlock photo sync, 500MB storage, and remove this banner")
+                Text("Unlock photo sync, 1GB storage, and remove this banner")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

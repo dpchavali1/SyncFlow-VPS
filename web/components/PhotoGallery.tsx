@@ -80,8 +80,14 @@ export function PhotoGallery({ photos, isLoading = false, onDelete }: PhotoGalle
                 alt={photo.fileName}
                 className="w-full h-full object-cover group-hover:scale-105 transition-transform"
               />
+            ) : photo.uploadUrl ? (
+              <img
+                src={photo.uploadUrl}
+                alt={photo.fileName}
+                className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+              />
             ) : (
-              <div className="w-full h-full flex items-center justify-center bg-gray-200">
+              <div className="w-full h-full flex items-center justify-center bg-gray-200 dark:bg-gray-700">
                 <span className="text-4xl">📷</span>
               </div>
             )}
@@ -112,6 +118,12 @@ export function PhotoGallery({ photos, isLoading = false, onDelete }: PhotoGalle
             {selectedPhoto.base64Data ? (
               <img
                 src={`data:${selectedPhoto.mimeType};base64,${selectedPhoto.base64Data}`}
+                alt={selectedPhoto.fileName}
+                className="max-w-full max-h-full object-contain"
+              />
+            ) : selectedPhoto.uploadUrl ? (
+              <img
+                src={selectedPhoto.uploadUrl}
                 alt={selectedPhoto.fileName}
                 className="max-w-full max-h-full object-contain"
               />

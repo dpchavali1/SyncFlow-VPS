@@ -30,6 +30,15 @@ android {
         buildConfigField("String", "SUPPORT_EMAIL_SUBJECT", "\"[SyncFlow Android] Support Request\"")
         buildConfigField("String", "PRIVACY_POLICY_URL", "\"https://syncflow.app/privacy\"")
         buildConfigField("String", "TERMS_OF_SERVICE_URL", "\"https://syncflow.app/terms\"")
+
+        // API keys from local.properties (not committed to git)
+        val localProps = Properties()
+        val localPropsFile = rootProject.file("local.properties")
+        if (localPropsFile.exists()) {
+            localPropsFile.inputStream().use { localProps.load(it) }
+        }
+        buildConfigField("String", "TENOR_API_KEY", "\"${localProps.getProperty("TENOR_API_KEY", "")}\"")
+
     }
 
     signingConfigs {

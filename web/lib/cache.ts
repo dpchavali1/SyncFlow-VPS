@@ -45,14 +45,12 @@ class WebCacheManager {
   get<T>(key: string): T | null {
     const entry = this.cache.get(key);
     if (!entry) {
-      console.log(`[Cache MISS] ${key}`);
       return null;
     }
 
     // Check TTL
     const age = Date.now() - entry.timestamp;
     if (age > entry.ttl) {
-      console.log(`[Cache EXPIRED] ${key} (age: ${Math.round(age / 1000)}s)`);
       this.cache.delete(key);
       this.removeFromAccessOrder(key);
       return null;
@@ -60,7 +58,6 @@ class WebCacheManager {
 
     // Update LRU order (move to end = most recently used)
     this.updateAccessOrder(key);
-    console.log(`[Cache HIT] ${key} (age: ${Math.round(age / 1000)}s)`);
     return entry.data;
   }
 
@@ -84,7 +81,6 @@ class WebCacheManager {
     });
 
     this.updateAccessOrder(key);
-    console.log(`[Cache SET] ${key} (TTL: ${Math.round(ttl / 1000)}s)`);
   }
 
   /**
@@ -95,7 +91,6 @@ class WebCacheManager {
   invalidate(key: string): void {
     if (this.cache.delete(key)) {
       this.removeFromAccessOrder(key);
-      console.log(`[Cache DELETE] ${key}`);
     }
   }
 
@@ -118,10 +113,6 @@ class WebCacheManager {
       }
     }
 
-    if (count > 0) {
-      console.log(`[Cache DELETE PREFIX] ${prefix} (${count} keys deleted)`);
-    }
-
     return count;
   }
 
@@ -131,7 +122,6 @@ class WebCacheManager {
   clear(): void {
     this.cache.clear();
     this.accessOrder = [];
-    console.log('[Cache] All entries cleared');
   }
 
   /**
@@ -156,7 +146,6 @@ class WebCacheManager {
     const oldestKey = this.accessOrder[0];
     this.cache.delete(oldestKey);
     this.accessOrder.shift();
-    console.log(`[Cache EVICT] ${oldestKey} (LRU eviction)`);
   }
 
   /**
@@ -214,12 +203,10 @@ const pendingRequests = new Map<string, Promise<any>>();
 export async function callWithDedup<T>(key: string, fn: () => Promise<T>): Promise<T> {
   // Check if request already in flight
   if (pendingRequests.has(key)) {
-    console.log(`[Dedup] Request already in flight: ${key}`);
     return pendingRequests.get(key)!;
   }
 
   // Start new request
-  console.log(`[Dedup] Starting new request: ${key}`);
   const promise = fn().finally(() => {
     // Remove from pending when complete
     pendingRequests.delete(key);

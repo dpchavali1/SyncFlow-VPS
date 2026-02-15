@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.phoneintegration.app.SmsRepository
 import com.phoneintegration.app.desktop.DesktopSyncService
+import com.phoneintegration.app.utils.NetworkUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -96,6 +97,26 @@ object SyncManager {
     fun startSync(context: Context, days: Int) {
         if (_syncState.value.isSyncing) {
             Log.d(TAG, "Sync already in progress, ignoring request")
+            return
+        }
+
+        // Require at least one paired Mac/Web device
+        if (!DesktopSyncService.hasPairedDevices(context)) {
+            _syncState.value = SyncState(
+                isSyncing = false,
+                status = "Pair a device first",
+                error = "No paired devices. Pair a Mac or Web client before syncing message history."
+            )
+            return
+        }
+
+        // Bulk sync requires WiFi (uploads MMS attachments to R2)
+        if (!NetworkUtils.isWifiConnected(context)) {
+            _syncState.value = SyncState(
+                isSyncing = false,
+                status = "WiFi required",
+                error = "Bulk message sync requires a WiFi connection to upload MMS attachments. Please connect to WiFi and try again."
+            )
             return
         }
 

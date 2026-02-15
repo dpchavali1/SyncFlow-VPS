@@ -56,10 +56,11 @@ enum TimeFilter: String, CaseIterable {
     case thisYear = "this year"
     case last7Days = "last 7 days"
     case last30Days = "last 30 days"
+    case lastMonth = "last month"
 
     /// Computes the start and end dates for this time filter.
     ///
-    /// - Returns: A tuple containing the start date (inclusive) and end date (current time)
+    /// - Returns: A tuple containing the start date (inclusive) and end date
     ///
     /// ## Date Calculation Notes
     /// - `today`: From midnight today to now
@@ -67,6 +68,7 @@ enum TimeFilter: String, CaseIterable {
     /// - `thisMonth`: From the 1st of the current month to now
     /// - `thisYear`: From January 1st of the current year to now
     /// - `last7Days`/`last30Days`: Rolling window from N days ago to now
+    /// - `lastMonth`: From the 1st of the previous month to the 1st of the current month
     var dateRange: (start: Date, end: Date) {
         let now = Date()
         let calendar = Calendar.current
@@ -90,6 +92,10 @@ enum TimeFilter: String, CaseIterable {
         case .last30Days:
             let start = calendar.date(byAdding: .day, value: -30, to: now)!
             return (start, now)
+        case .lastMonth:
+            let thisMonthStart = calendar.date(from: calendar.dateComponents([.year, .month], from: now))!
+            let start = calendar.date(byAdding: .month, value: -1, to: thisMonthStart)!
+            return (start, thisMonthStart)
         }
     }
 
@@ -102,6 +108,7 @@ enum TimeFilter: String, CaseIterable {
         case .thisYear: return "This Year"
         case .last7Days: return "Last 7 Days"
         case .last30Days: return "Last 30 Days"
+        case .lastMonth: return "Last Month"
         }
     }
 }

@@ -438,6 +438,16 @@ struct GeneralSettingsView: View {
     @State private var showingUnpairAlert = false
     /// Whether delete account sheet is shown
     @State private var showingDeleteAccountSheet = false
+    /// Whether repair encryption confirmation alert is shown
+    @State private var showingRepairEncryptionAlert = false
+    /// Whether repair encryption is in progress
+    @State private var isRepairingEncryption = false
+    /// Status message for repair encryption
+    @State private var repairEncryptionStatus: String?
+    /// Restore from backup
+    @State private var restorePassphrase = ""
+    @State private var isRestoringBackup = false
+    @State private var restoreBackupStatus: String?
 
     /// End-to-end encryption toggle (default on)
     @AppStorage("e2ee_enabled") private var e2eeEnabled = true
@@ -511,6 +521,110 @@ struct GeneralSettingsView: View {
                         .foregroundColor(.secondary)
                 }
 
+                if appState.isPaired {
+                    Divider()
+
+                    Button(action: { showingRepairEncryptionAlert = true }) {
+                        HStack {
+                            if isRepairingEncryption {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .padding(.trailing, 4)
+                            } else {
+                                Image(systemName: "lock.trianglebadge.exclamationmark")
+                            }
+                            Text(isRepairingEncryption ? "Repairing..." : "Repair Encryption")
+                        }
+                    }
+                    .disabled(isRepairingEncryption)
+
+                    Text("If messages show \"encrypted\" after reinstalling, this re-syncs encryption keys and messages from your phone.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    if let status = repairEncryptionStatus {
+                        Text(status)
+                            .font(.caption)
+                            .foregroundColor(status.contains("failed") ? .red : .green)
+                    }
+
+                    if let safetyNumber = E2EEManager.shared.deriveSafetyNumber() {
+                        Divider()
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Safety Number")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text(safetyNumber)
+                                .font(.system(.caption, design: .monospaced))
+                                .textSelection(.enabled)
+                            Text("Compare this number with your other devices to verify encryption keys match.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Restore from Backup")
+                            .font(.headline)
+                        Text("If you backed up your encryption keys on Android, enter your backup passphrase to restore them.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        SecureField("Backup passphrase", text: $restorePassphrase)
+                            .textFieldStyle(.roundedBorder)
+
+                        Button(action: {
+                            guard restorePassphrase.count >= 8 else {
+                                restoreBackupStatus = "Passphrase must be at least 8 characters."
+                                return
+                            }
+                            isRestoringBackup = true
+                            restoreBackupStatus = nil
+                            Task {
+                                do {
+                                    let backups = try await VPSService.shared.getKeyBackups()
+                                    guard !backups.isEmpty else {
+                                        await MainActor.run {
+                                            restoreBackupStatus = "No backups found. Create a backup from your Android device first."
+                                            isRestoringBackup = false
+                                        }
+                                        return
+                                    }
+                                    try E2EEManager.shared.restoreFromBackup(passphrase: restorePassphrase, backups: backups)
+                                    await MainActor.run {
+                                        restoreBackupStatus = "Keys restored successfully. Messages will decrypt on next sync."
+                                        restorePassphrase = ""
+                                        isRestoringBackup = false
+                                    }
+                                } catch {
+                                    await MainActor.run {
+                                        restoreBackupStatus = "Restore failed: \(error.localizedDescription)"
+                                        isRestoringBackup = false
+                                    }
+                                }
+                            }
+                        }) {
+                            HStack {
+                                if isRestoringBackup {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                        .padding(.trailing, 4)
+                                }
+                                Text(isRestoringBackup ? "Restoring..." : "Restore Keys")
+                            }
+                        }
+                        .disabled(isRestoringBackup || restorePassphrase.isEmpty)
+
+                        if let status = restoreBackupStatus {
+                            Text(status)
+                                .font(.caption)
+                                .foregroundColor(status.contains("failed") || status.contains("No backups") || status.contains("must") ? .red : .green)
+                        }
+                    }
+                }
+
             } header: {
                 Text("Security")
             }
@@ -567,6 +681,49 @@ struct GeneralSettingsView: View {
         .sheet(isPresented: $showingDeleteAccountSheet) {
             DeleteAccountView()
         }
+        .alert("Repair Encryption?", isPresented: $showingRepairEncryptionAlert) {
+            Button("Cancel", role: .cancel) {}
+            Button("Repair") {
+                performRepairEncryption()
+            }
+        } message: {
+            Text("""
+            This will:
+            1. Clear stale encryption keys on the server
+            2. Ask your Android phone to re-sync all messages
+            3. Re-negotiate encryption keys
+
+            Your Android phone must be online. This may take a minute.
+            """)
+        }
+    }
+
+    private func performRepairEncryption() {
+        isRepairingEncryption = true
+        repairEncryptionStatus = nil
+
+        Task {
+            do {
+                // Step 1: Tell server to clear keys and trigger Android re-sync
+                try await VPSService.shared.repairEncryption()
+
+                // Step 2: Clear local sync group keys
+                E2EEManager.shared.clearSyncGroupKeys()
+
+                // Step 3: Re-negotiate keys with Android
+                appState.attemptAutoE2eeKeySyncVPS(reason: "repair")
+
+                await MainActor.run {
+                    isRepairingEncryption = false
+                    repairEncryptionStatus = "Repair started. Messages will reload when keys sync."
+                }
+            } catch {
+                await MainActor.run {
+                    isRepairingEncryption = false
+                    repairEncryptionStatus = "Repair failed: \(error.localizedDescription)"
+                }
+            }
+        }
     }
 
     // MARK: - Private Methods
@@ -580,13 +737,19 @@ struct GeneralSettingsView: View {
             do {
                 if enabled {
                     try SMAppService.mainApp.register()
+                    #if DEBUG
                     print("[Settings] Launch at login enabled")
+                    #endif
                 } else {
                     try SMAppService.mainApp.unregister()
+                    #if DEBUG
                     print("[Settings] Launch at login disabled")
+                    #endif
                 }
             } catch {
+                #if DEBUG
                 print("[Settings] Failed to toggle launch at login: \(error)")
+                #endif
                 // Revert the toggle on failure
                 DispatchQueue.main.async {
                     self.autoStart = !enabled
@@ -594,7 +757,9 @@ struct GeneralSettingsView: View {
             }
         } else {
             // Fallback for older macOS versions - not supported
+            #if DEBUG
             print("[Settings] Launch at login requires macOS 13 or later")
+            #endif
             DispatchQueue.main.async {
                 self.autoStart = false
             }
@@ -873,6 +1038,14 @@ struct SubscriptionSettingsView: View {
     @StateObject private var subscriptionService = SubscriptionService.shared
     /// Whether paywall sheet is shown
     @State private var showPaywall = false
+    /// Whether Stripe cancel confirmation alert is shown
+    @State private var showCancelAlert = false
+    /// Status message for Stripe actions
+    @State private var stripeActionMessage: String?
+    /// Whether a Stripe action is in progress
+    @State private var isStripeActionLoading = false
+    /// Whether plan refresh is in progress
+    @State private var isRefreshing = false
 
     // MARK: - Body
 
@@ -990,29 +1163,91 @@ struct SubscriptionSettingsView: View {
             }
 
             Section {
-                Button("Restore Purchases") {
+                // Refresh Plan button (always visible)
+                Button(action: {
                     Task {
-                        await subscriptionService.restorePurchases()
+                        isRefreshing = true
+                        await VPSService.shared.refreshPlanNow()
+                        await subscriptionService.updateSubscriptionStatus()
+                        isRefreshing = false
+                    }
+                }) {
+                    HStack {
+                        Image(systemName: "arrow.clockwise")
+                        Text(isRefreshing ? "Refreshing..." : "Refresh Plan")
                     }
                 }
-                .disabled(subscriptionService.isLoading)
+                .disabled(isRefreshing)
 
-                Button("Manage Subscription") {
-                    if let url = URL(string: "macappstores://apps.apple.com/account/subscriptions") {
-                        NSWorkspace.shared.open(url)
+                if subscriptionService.hasStripeSubscription {
+                    // Stripe management buttons
+                    Button(action: {
+                        Task {
+                            isStripeActionLoading = true
+                            stripeActionMessage = nil
+                            do {
+                                let portalUrl = try await VPSService.shared.getBillingPortalUrl()
+                                if let url = URL(string: portalUrl) {
+                                    NSWorkspace.shared.open(url)
+                                }
+                            } catch {
+                                stripeActionMessage = "Failed to open billing portal: \(error.localizedDescription)"
+                            }
+                            isStripeActionLoading = false
+                        }
+                    }) {
+                        HStack {
+                            Image(systemName: "creditcard")
+                            Text("Manage Billing (Stripe)")
+                        }
                     }
+                    .disabled(isStripeActionLoading)
+
+                    Button(role: .destructive, action: {
+                        showCancelAlert = true
+                    }) {
+                        HStack {
+                            Image(systemName: "xmark.circle")
+                            Text("Cancel Subscription")
+                        }
+                    }
+                    .disabled(isStripeActionLoading)
+                } else {
+                    // StoreKit management buttons
+                    Button("Restore Purchases") {
+                        Task {
+                            await subscriptionService.restorePurchases()
+                        }
+                    }
+                    .disabled(subscriptionService.isLoading)
+
+                    Button("Manage in App Store") {
+                        if let url = URL(string: "macappstores://apps.apple.com/account/subscriptions") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    }
+                }
+
+                if let message = stripeActionMessage {
+                    Text(message)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
             } header: {
                 Text("Account")
             } footer: {
-                Text("Manage your subscription in the App Store")
+                if subscriptionService.hasStripeSubscription {
+                    Text("Manage your Stripe subscription or open the billing portal")
+                } else {
+                    Text("Manage your subscription in the App Store")
+                }
             }
 
             Section {
                 VStack(alignment: .leading, spacing: 8) {
                     pricingRow("Monthly", price: "$4.99/month")
                     pricingRow("Yearly", price: "$39.99/year", badge: "Save 33%")
-                    pricingRow("3-Year", price: "$79.99", badge: "Best Value")
+                    pricingRow("3-Year / Lifetime", price: "$79.99", badge: "Best Value")
                 }
             } header: {
                 Text("Pricing")
@@ -1023,8 +1258,8 @@ struct SubscriptionSettingsView: View {
                     featureRow("Unlimited SMS & MMS")
                     featureRow("Phone calls from Mac")
                     featureRow("Photo sync (Premium)")
-                    featureRow("3GB uploads/month")
-                    featureRow("500MB cloud storage")
+                    featureRow("2GB uploads/month")
+                    featureRow("1GB cloud storage")
                     featureRow("End-to-end encryption")
                     featureRow("Priority support")
                 }
@@ -1035,6 +1270,25 @@ struct SubscriptionSettingsView: View {
         .formStyle(.grouped)
         .sheet(isPresented: $showPaywall) {
             PaywallView()
+        }
+        .alert("Cancel Subscription?", isPresented: $showCancelAlert) {
+            Button("Keep Subscription", role: .cancel) {}
+            Button("Cancel Subscription", role: .destructive) {
+                Task {
+                    isStripeActionLoading = true
+                    stripeActionMessage = nil
+                    do {
+                        try await VPSService.shared.cancelStripeSubscription()
+                        stripeActionMessage = "Subscription will cancel at the end of your billing period."
+                        await subscriptionService.updateSubscriptionStatus()
+                    } catch {
+                        stripeActionMessage = "Failed to cancel: \(error.localizedDescription)"
+                    }
+                    isStripeActionLoading = false
+                }
+            }
+        } message: {
+            Text("Your subscription will remain active until the end of the current billing period. You won't be charged again.")
         }
     }
 
@@ -1310,24 +1564,60 @@ struct AboutView: View {
             Divider()
                 .padding(.horizontal, 40)
 
-            VStack(spacing: 10) {
-                Text("Access your Android SMS messages on your Mac")
-                    .multilineTextAlignment(.center)
+            Text("Your Android phone, everywhere.")
+                .font(.headline)
+                .foregroundColor(.primary)
 
-                Text("Built with SwiftUI")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                AboutFeatureRow(icon: "lock.shield.fill", color: .green,
+                    text: "Private server — your data never touches a third-party cloud")
+                AboutFeatureRow(icon: "lock.fill", color: .blue,
+                    text: "End-to-end encrypted pairing and message sync")
+                AboutFeatureRow(icon: "message.fill", color: .blue,
+                    text: "Full SMS/MMS — send and receive from your Mac")
+                AboutFeatureRow(icon: "phone.fill", color: .green,
+                    text: "Make and receive phone calls from your desktop")
+                AboutFeatureRow(icon: "video.fill", color: .orange,
+                    text: "Video and audio calls between SyncFlow users")
+                AboutFeatureRow(icon: "photo.on.rectangle.angled", color: .purple,
+                    text: "Photo sync and file transfer with private storage")
+                AboutFeatureRow(icon: "shield.fill", color: .red,
+                    text: "AI spam filtering — block junk before it reaches you")
+                AboutFeatureRow(icon: "person.2.fill", color: .cyan,
+                    text: "Contacts and call history synced across all devices")
+                AboutFeatureRow(icon: "desktopcomputer", color: .secondary,
+                    text: "Native apps — built for each platform, not a web wrapper")
             }
+            .padding(.horizontal, 20)
 
             Spacer()
 
             VStack(spacing: 8) {
-                Link("GitHub", destination: URL(string: "https://github.com/dpchavali1/SyncFlow")!)
-                Link("Report an Issue", destination: URL(string: "https://github.com/dpchavali1/SyncFlow/issues")!)
+                Link("sfweb.app", destination: URL(string: "https://sfweb.app")!)
+                    .font(.caption)
+                Text("© 2026 SyncFlow. All rights reserved.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
             }
-            .font(.caption)
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+struct AboutFeatureRow: View {
+    let icon: String
+    let color: Color
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .foregroundColor(color)
+                .frame(width: 20)
+            Text(text)
+                .font(.callout)
+                .foregroundColor(.primary)
+        }
     }
 }

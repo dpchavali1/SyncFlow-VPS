@@ -1,6 +1,24 @@
+/**
+ * Admin dashboard API routes. All endpoints require JWT authentication + admin role.
+ *
+ * Sections:
+ *   Overview & Stats    - System-wide counters, DB size, orphan detection
+ *   User Management     - List/search/delete users, set plans, recalculate storage
+ *   Devices & Pairing   - Device listing, pairing request inspection
+ *   Cleanup Operations  - Auto-cleanup (expired pairings, old messages, inactive devices),
+ *                         orphan removal, duplicate merging, overdue account deletions
+ *   R2 Storage          - Analytics, file listing, per-user storage, old-file cleanup
+ *   Crash Reports       - List/resolve/delete crash reports
+ *   Analytics           - DAU, retention, bandwidth, feature usage, cost estimation
+ *   Database Browser    - Dynamic table CRUD: browse any table, update/delete rows, run SQL
+ *   E2EE Key Health     - Key inventory, stale/orphaned key cleanup
+ *   System              - Logs, alerts, maintenance mode, active WebSocket sessions
+ */
+
 import { Router, Request, Response } from 'express';
 import { query, queryOne, transaction } from '../services/database';
 import { authenticate, requireAdmin } from '../middleware/auth';
+import { adminRateLimit } from '../middleware/rateLimit';
 import { S3Client, DeleteObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { config } from '../config';
 import { getOnlineUsers } from '../services/websocket';
@@ -9,9 +27,10 @@ import { getLogs, clearLogs } from '../services/logger';
 
 const router = Router();
 
-// Apply authentication and admin check to all routes
+// Apply authentication, admin check, and rate limiting to all routes
 router.use(authenticate);
 router.use(requireAdmin);
+router.use(adminRateLimit);
 
 // R2 client (only if configured)
 const s3Client = config.r2.endpoint ? new S3Client({
@@ -23,36 +42,41 @@ const s3Client = config.r2.endpoint ? new S3Client({
   },
 }) : null;
 
-// Helper: delete R2 objects by key
+// Helper: delete R2 objects by key (parallel with concurrency limit)
 async function deleteR2Objects(r2Keys: string[]) {
   if (!s3Client || r2Keys.length === 0) return 0;
   let deleted = 0;
-  for (const key of r2Keys) {
-    if (!key) continue;
-    try {
-      await s3Client.send(new DeleteObjectCommand({ Bucket: config.r2.bucketName, Key: key }));
-      deleted++;
-    } catch (e) {}
+  const BATCH_SIZE = 20;
+  for (let i = 0; i < r2Keys.length; i += BATCH_SIZE) {
+    const batch = r2Keys.slice(i, i + BATCH_SIZE).filter(Boolean);
+    const results = await Promise.allSettled(
+      batch.map(key =>
+        s3Client!.send(new DeleteObjectCommand({ Bucket: config.r2.bucketName, Key: key }))
+      )
+    );
+    deleted += results.filter(r => r.status === 'fulfilled').length;
   }
   return deleted;
 }
 
 // Helper: delete all data for a user (comprehensive - covers ALL tables + R2)
 async function deleteUserData(userId: string) {
-  // Step 1: Collect R2 keys BEFORE deleting DB rows
+  // Step 1: Collect R2 keys BEFORE deleting DB rows (parallel queries)
   const r2Keys: string[] = [];
-  try {
-    const photos = await query<{ r2_key: string }>('SELECT r2_key FROM user_photos WHERE user_id = $1 AND r2_key IS NOT NULL', [userId]);
-    r2Keys.push(...photos.map(p => p.r2_key));
-  } catch (e) {}
-  try {
-    const transfers = await query<{ r2_key: string }>('SELECT r2_key FROM user_file_transfers WHERE user_id = $1 AND r2_key IS NOT NULL', [userId]);
-    r2Keys.push(...transfers.map(t => t.r2_key));
-  } catch (e) {}
-  try {
-    // Extract R2 keys from MMS parts (JSONB array with r2Key in each element)
-    const mmsMessages = await query<{ mms_parts: any }>('SELECT mms_parts FROM user_messages WHERE user_id = $1 AND mms_parts IS NOT NULL', [userId]);
-    for (const msg of mmsMessages) {
+  const [photoResult, transferResult, mmsResult] = await Promise.allSettled([
+    query<{ r2_key: string }>('SELECT r2_key FROM user_photos WHERE user_id = $1 AND r2_key IS NOT NULL', [userId]),
+    query<{ r2_key: string }>('SELECT r2_key FROM user_file_transfers WHERE user_id = $1 AND r2_key IS NOT NULL', [userId]),
+    query<{ mms_parts: any }>('SELECT mms_parts FROM user_messages WHERE user_id = $1 AND mms_parts IS NOT NULL', [userId]),
+  ]);
+
+  if (photoResult.status === 'fulfilled') {
+    r2Keys.push(...photoResult.value.map(p => p.r2_key));
+  }
+  if (transferResult.status === 'fulfilled') {
+    r2Keys.push(...transferResult.value.map(t => t.r2_key));
+  }
+  if (mmsResult.status === 'fulfilled') {
+    for (const msg of mmsResult.value) {
       let parts = msg.mms_parts;
       if (typeof parts === 'string') { try { parts = JSON.parse(parts); } catch { continue; } }
       if (Array.isArray(parts)) {
@@ -61,15 +85,17 @@ async function deleteUserData(userId: string) {
         }
       }
     }
-  } catch (e) {}
-
-  // Step 2: Delete R2 objects
-  const r2Deleted = await deleteR2Objects(r2Keys);
-  if (r2Keys.length > 0) {
-    console.log(`[Admin] Deleted ${r2Deleted}/${r2Keys.length} R2 objects for user: ${userId}`);
   }
 
-  // Step 3: Delete all DB tables
+  // Step 2: Delete R2 objects (parallel batches) + DB rows concurrently
+  // Start R2 deletion in background — don't block DB cleanup
+  const r2Promise = deleteR2Objects(r2Keys).then(count => {
+    if (r2Keys.length > 0) {
+      console.log(`[Admin] Deleted ${count}/${r2Keys.length} R2 objects for user: ${userId}`);
+    }
+  });
+
+  // Step 3: Delete all DB tables in a single transaction
   const userIdTables = [
     'user_messages', 'user_contacts', 'user_call_history', 'user_photos',
     'user_file_transfers', 'user_outgoing_messages', 'user_spam_messages',
@@ -87,22 +113,27 @@ async function deleteUserData(userId: string) {
     'pairing_requests', 'user_profiles', 'recovery_codes',
     'user_devices',
   ];
-  for (const table of userIdTables) {
-    try {
-      await query(`DELETE FROM ${table} WHERE user_id = $1`, [userId]);
-    } catch (e) {
-      // Table may not exist, ignore
-    }
-  }
-  // Tables with uid column instead of user_id
   const uidTables = ['e2ee_public_keys', 'crash_reports', 'fcm_tokens'];
-  for (const table of uidTables) {
-    try {
-      await query(`DELETE FROM ${table} WHERE uid = $1`, [userId]);
-    } catch (e) {}
-  }
-  // Finally delete the user record itself
-  await query('DELETE FROM users WHERE uid = $1', [userId]);
+
+  await transaction(async (client) => {
+    for (const table of userIdTables) {
+      try {
+        await client.query(`DELETE FROM ${table} WHERE user_id = $1`, [userId]);
+      } catch (e) {
+        // Table may not exist, ignore
+      }
+    }
+    for (const table of uidTables) {
+      try {
+        await client.query(`DELETE FROM ${table} WHERE uid = $1`, [userId]);
+      } catch (e) {}
+    }
+    // Finally delete the user record itself
+    await client.query('DELETE FROM users WHERE uid = $1', [userId]);
+  });
+
+  // Wait for R2 cleanup to finish
+  await r2Promise;
   console.log(`[Admin] Deleted all data for user: ${userId}`);
 }
 
@@ -266,7 +297,8 @@ router.get('/users', async (req: Request, res: Response) => {
         (SELECT COUNT(*) FROM user_messages m WHERE m.user_id = u.uid) as message_count,
         (SELECT MAX(d.last_seen) FROM user_devices d WHERE d.user_id = u.uid) as last_seen,
         ${hasPhotos ? `COALESCE((SELECT COUNT(*) * 500000 FROM user_photos p WHERE p.user_id = u.uid), 0)` : '0'} +
-        ${hasTransfers ? `COALESCE((SELECT SUM(file_size) FROM user_file_transfers ft WHERE ft.user_id = u.uid), 0)` : '0'} as storage_bytes,
+        ${hasTransfers ? `COALESCE((SELECT SUM(file_size) FROM user_file_transfers ft WHERE ft.user_id = u.uid), 0)` : '0'} +
+        COALESCE((SELECT SUM((part->>'fileSize')::bigint) FROM user_messages m, jsonb_array_elements(m.mms_parts) AS part WHERE m.user_id = u.uid AND m.mms_parts IS NOT NULL), 0) as storage_bytes,
         ${hasSubs ? `(SELECT s.plan FROM user_subscriptions s WHERE s.user_id = u.uid ORDER BY s.started_at DESC LIMIT 1)` : 'NULL'} as plan,
         ${hasSubs ? `(SELECT s.expires_at FROM user_subscriptions s WHERE s.user_id = u.uid ORDER BY s.started_at DESC LIMIT 1)` : 'NULL'} as plan_expires_at,
         NULL as plan_assigned_by
@@ -411,9 +443,9 @@ router.post('/users/:userId/plan', async (req: Request, res: Response) => {
     if (!user) { res.status(404).json({ error: 'User not found' }); return; }
 
     await query(`
-      INSERT INTO user_subscriptions (user_id, plan, status, expires_at, created_at, updated_at)
-      VALUES ($1, $2, 'active', $3, NOW(), NOW())
-      ON CONFLICT (user_id) DO UPDATE SET plan = $2, expires_at = $3, updated_at = NOW()
+      INSERT INTO user_subscriptions (user_id, plan, status, expires_at, started_at)
+      VALUES ($1, $2, 'active', $3, NOW())
+      ON CONFLICT (user_id) DO UPDATE SET plan = $2, expires_at = $3, started_at = NOW()
     `, [userId, plan, expiresAt || null]);
 
     res.json({ success: true, userId, plan, expiresAt: expiresAt || null });
@@ -429,11 +461,12 @@ router.post('/users/:userId/recalculate-storage', async (req: Request, res: Resp
     const { userId } = req.params;
     const photoStorage = await queryOne<{ count: string; total_size: string }>(`SELECT COUNT(*) as count, COALESCE(SUM(file_size), 0) as total_size FROM user_photos WHERE user_id = $1`, [userId]);
     const transferStorage = await queryOne<{ count: string; total_size: string }>(`SELECT COUNT(*) as count, COALESCE(SUM(file_size), 0) as total_size FROM user_file_transfers WHERE user_id = $1`, [userId]);
+    const mmsStorage = await queryOne<{ count: string; total_size: string }>(`SELECT COUNT(*) as count, COALESCE(SUM((part->>'fileSize')::bigint), 0) as total_size FROM user_messages m, jsonb_array_elements(m.mms_parts) AS part WHERE m.user_id = $1 AND m.mms_parts IS NOT NULL`, [userId]);
 
-    const totalBytes = parseInt(photoStorage?.total_size || '0') + parseInt(transferStorage?.total_size || '0');
+    const totalBytes = parseInt(photoStorage?.total_size || '0') + parseInt(transferStorage?.total_size || '0') + parseInt(mmsStorage?.total_size || '0');
     await query(`INSERT INTO user_usage (user_id, storage_bytes, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (user_id) DO UPDATE SET storage_bytes = $2, updated_at = NOW()`, [userId, totalBytes]);
 
-    res.json({ success: true, userId, storage: { photos: { count: parseInt(photoStorage?.count || '0'), sizeBytes: parseInt(photoStorage?.total_size || '0') }, fileTransfers: { count: parseInt(transferStorage?.count || '0'), sizeBytes: parseInt(transferStorage?.total_size || '0') }, totalStorageBytes: totalBytes } });
+    res.json({ success: true, userId, storage: { photos: { count: parseInt(photoStorage?.count || '0'), sizeBytes: parseInt(photoStorage?.total_size || '0') }, fileTransfers: { count: parseInt(transferStorage?.count || '0'), sizeBytes: parseInt(transferStorage?.total_size || '0') }, mmsAttachments: { count: parseInt(mmsStorage?.count || '0'), sizeBytes: parseInt(mmsStorage?.total_size || '0') }, totalStorageBytes: totalBytes } });
   } catch (error) {
     console.error('Admin recalculate storage error:', error);
     res.status(500).json({ error: 'Failed to recalculate storage' });
@@ -482,21 +515,22 @@ router.post('/cleanup/auto', async (req: Request, res: Response) => {
   try {
     const results: Record<string, number> = {};
 
+    // Each DELETE uses a ctid subquery with LIMIT 10000 to prevent OOM on large tables
     const cleanups: Array<{ name: string; sql: string }> = [
-      { name: 'expiredPairings', sql: `DELETE FROM pairing_requests WHERE expires_at < NOW() OR (status != 'pending' AND created_at < NOW() - INTERVAL '1 day') RETURNING *` },
-      { name: 'oldOutgoingMessages', sql: `DELETE FROM user_outgoing_messages WHERE status != 'pending' AND created_at < NOW() - INTERVAL '7 days' RETURNING *` },
-      { name: 'oldSpamMessages', sql: `DELETE FROM user_spam_messages WHERE created_at < NOW() - INTERVAL '30 days' RETURNING *` },
-      { name: 'oldReadReceipts', sql: `DELETE FROM user_read_receipts WHERE read_at < NOW() - INTERVAL '30 days' RETURNING *` },
-      { name: 'oldTypingIndicators', sql: `DELETE FROM user_typing_indicators WHERE created_at < NOW() - INTERVAL '1 hour' RETURNING *` },
-      { name: 'oldNotifications', sql: `DELETE FROM user_notifications WHERE created_at < NOW() - INTERVAL '30 days' RETURNING *` },
-      { name: 'oldClipboard', sql: `DELETE FROM user_clipboard WHERE created_at < NOW() - INTERVAL '7 days' RETURNING *` },
-      { name: 'oldSharedLinks', sql: `DELETE FROM user_shared_links WHERE created_at < NOW() - INTERVAL '30 days' RETURNING *` },
-      { name: 'inactiveDevices', sql: `DELETE FROM user_devices WHERE last_seen < NOW() - INTERVAL '90 days' RETURNING *` },
-      { name: 'oldCallRequests', sql: `DELETE FROM user_call_requests WHERE status != 'pending' AND created_at < NOW() - INTERVAL '7 days' RETURNING *` },
-      { name: 'expiredE2eeRequests', sql: `DELETE FROM e2ee_key_requests WHERE created_at < NOW() - INTERVAL '7 days' RETURNING *` },
-      { name: 'oldCallCommands', sql: `DELETE FROM user_call_commands WHERE created_at < NOW() - INTERVAL '7 days' RETURNING *` },
+      { name: 'expiredPairings', sql: `DELETE FROM pairing_requests WHERE ctid IN (SELECT ctid FROM pairing_requests WHERE expires_at < NOW() OR (status != 'pending' AND created_at < NOW() - INTERVAL '1 day') LIMIT 10000) RETURNING *` },
+      { name: 'oldOutgoingMessages', sql: `DELETE FROM user_outgoing_messages WHERE ctid IN (SELECT ctid FROM user_outgoing_messages WHERE status != 'pending' AND created_at < NOW() - INTERVAL '7 days' LIMIT 10000) RETURNING *` },
+      { name: 'oldSpamMessages', sql: `DELETE FROM user_spam_messages WHERE ctid IN (SELECT ctid FROM user_spam_messages WHERE created_at < NOW() - INTERVAL '30 days' LIMIT 10000) RETURNING *` },
+      { name: 'oldReadReceipts', sql: `DELETE FROM user_read_receipts WHERE ctid IN (SELECT ctid FROM user_read_receipts WHERE read_at < NOW() - INTERVAL '30 days' LIMIT 10000) RETURNING *` },
+      { name: 'oldTypingIndicators', sql: `DELETE FROM user_typing_indicators WHERE ctid IN (SELECT ctid FROM user_typing_indicators WHERE created_at < NOW() - INTERVAL '1 hour' LIMIT 10000) RETURNING *` },
+      { name: 'oldNotifications', sql: `DELETE FROM user_notifications WHERE ctid IN (SELECT ctid FROM user_notifications WHERE created_at < NOW() - INTERVAL '30 days' LIMIT 10000) RETURNING *` },
+      { name: 'oldClipboard', sql: `DELETE FROM user_clipboard WHERE ctid IN (SELECT ctid FROM user_clipboard WHERE created_at < NOW() - INTERVAL '7 days' LIMIT 10000) RETURNING *` },
+      { name: 'oldSharedLinks', sql: `DELETE FROM user_shared_links WHERE ctid IN (SELECT ctid FROM user_shared_links WHERE created_at < NOW() - INTERVAL '30 days' LIMIT 10000) RETURNING *` },
+      { name: 'inactiveDevices', sql: `DELETE FROM user_devices WHERE ctid IN (SELECT ctid FROM user_devices WHERE last_seen < NOW() - INTERVAL '90 days' LIMIT 10000) RETURNING *` },
+      { name: 'oldCallRequests', sql: `DELETE FROM user_call_requests WHERE ctid IN (SELECT ctid FROM user_call_requests WHERE status != 'pending' AND created_at < NOW() - INTERVAL '7 days' LIMIT 10000) RETURNING *` },
+      { name: 'expiredE2eeRequests', sql: `DELETE FROM e2ee_key_requests WHERE ctid IN (SELECT ctid FROM e2ee_key_requests WHERE created_at < NOW() - INTERVAL '7 days' LIMIT 10000) RETURNING *` },
+      { name: 'oldCallCommands', sql: `DELETE FROM user_call_commands WHERE ctid IN (SELECT ctid FROM user_call_commands WHERE created_at < NOW() - INTERVAL '7 days' LIMIT 10000) RETURNING *` },
       // Clean up orphaned users from abandoned pairing initiations (no devices AND no messages AND older than 1 hour)
-      { name: 'orphanedPairingUsers', sql: `DELETE FROM users WHERE uid NOT IN (SELECT DISTINCT user_id FROM user_devices) AND uid NOT IN (SELECT DISTINCT user_id FROM user_messages) AND created_at < NOW() - INTERVAL '1 hour' RETURNING *` },
+      { name: 'orphanedPairingUsers', sql: `DELETE FROM users WHERE ctid IN (SELECT ctid FROM users WHERE uid NOT IN (SELECT DISTINCT user_id FROM user_devices) AND uid NOT IN (SELECT DISTINCT user_id FROM user_messages) AND created_at < NOW() - INTERVAL '1 hour' LIMIT 10000) RETURNING *` },
     ];
 
     for (const cleanup of cleanups) {
@@ -667,15 +701,33 @@ router.get('/orphans', async (req: Request, res: Response) => {
 });
 
 // POST /admin/cleanup/orphans
+// Orphan cleanup: removes rows from user-scoped tables whose user_id no longer
+// exists in the users table. Optionally also deletes users that have zero devices
+// (e.g., leftover from abandoned pairing flows).
+const ORPHAN_CLEANUP_ALLOWED_TABLES = [
+  'user_messages', 'user_contacts', 'user_call_history',
+  'user_devices', 'user_photos', 'user_file_transfers',
+];
 router.post('/cleanup/orphans', async (req: Request, res: Response) => {
   try {
     const { deleteUsersWithoutDevices } = req.body || {};
     const results: Record<string, number> = {};
 
-    const orphanTables = ['user_messages', 'user_contacts', 'user_call_history', 'user_devices', 'user_photos', 'user_file_transfers'];
-    for (const table of orphanTables) {
+    // Delete rows whose user_id has no matching row in the users table
+    // Table names are from the hardcoded ORPHAN_CLEANUP_ALLOWED_TABLES array (not user input)
+    // Uses ctid subquery to LIMIT deletes and prevent OOM on large tables
+    for (const table of ORPHAN_CLEANUP_ALLOWED_TABLES) {
       try {
-        const deleted = await query(`DELETE FROM ${table} WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.uid = ${table}.user_id) RETURNING *`);
+        const sql = ({
+          user_messages: `DELETE FROM user_messages WHERE ctid IN (SELECT ctid FROM user_messages WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.uid = user_messages.user_id) LIMIT 10000) RETURNING *`,
+          user_contacts: `DELETE FROM user_contacts WHERE ctid IN (SELECT ctid FROM user_contacts WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.uid = user_contacts.user_id) LIMIT 10000) RETURNING *`,
+          user_call_history: `DELETE FROM user_call_history WHERE ctid IN (SELECT ctid FROM user_call_history WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.uid = user_call_history.user_id) LIMIT 10000) RETURNING *`,
+          user_devices: `DELETE FROM user_devices WHERE ctid IN (SELECT ctid FROM user_devices WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.uid = user_devices.user_id) LIMIT 10000) RETURNING *`,
+          user_photos: `DELETE FROM user_photos WHERE ctid IN (SELECT ctid FROM user_photos WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.uid = user_photos.user_id) LIMIT 10000) RETURNING *`,
+          user_file_transfers: `DELETE FROM user_file_transfers WHERE ctid IN (SELECT ctid FROM user_file_transfers WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.uid = user_file_transfers.user_id) LIMIT 10000) RETURNING *`,
+        } as Record<string, string>)[table];
+        if (!sql) continue;
+        const deleted = await query(sql);
         results[table] = deleted.length;
       } catch (e) { results[table] = 0; }
     }
@@ -729,12 +781,20 @@ router.post('/cleanup/duplicates', async (req: Request, res: Response) => {
     if (!keepUserId || !Array.isArray(deleteUserIds)) { res.status(400).json({ error: 'keepUserId and deleteUserIds[] required' }); return; }
 
     const migrationCounts: Record<string, number> = {};
-    const tables = ['user_messages', 'user_contacts', 'user_call_history', 'user_photos', 'user_file_transfers', 'user_devices'];
+    // Hardcoded SQL per table to avoid interpolation of table names
+    const MIGRATE_QUERIES: Record<string, string> = {
+      user_messages: `UPDATE user_messages SET user_id = $1 WHERE user_id = $2 RETURNING *`,
+      user_contacts: `UPDATE user_contacts SET user_id = $1 WHERE user_id = $2 RETURNING *`,
+      user_call_history: `UPDATE user_call_history SET user_id = $1 WHERE user_id = $2 RETURNING *`,
+      user_photos: `UPDATE user_photos SET user_id = $1 WHERE user_id = $2 RETURNING *`,
+      user_file_transfers: `UPDATE user_file_transfers SET user_id = $1 WHERE user_id = $2 RETURNING *`,
+      user_devices: `UPDATE user_devices SET user_id = $1 WHERE user_id = $2 RETURNING *`,
+    };
 
     for (const deleteUserId of deleteUserIds) {
-      for (const table of tables) {
+      for (const [table, sql] of Object.entries(MIGRATE_QUERIES)) {
         try {
-          const updated = await query(`UPDATE ${table} SET user_id = $1 WHERE user_id = $2 RETURNING *`, [keepUserId, deleteUserId]);
+          const updated = await query(sql, [keepUserId, deleteUserId]);
           migrationCounts[table] = (migrationCounts[table] || 0) + updated.length;
         } catch (e) {}
       }
@@ -919,12 +979,27 @@ router.get('/crashes', async (req: Request, res: Response) => {
     sql += ` LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
     params.push(limit, offset);
 
-    const crashes = await query(sql, params);
-    const totalCount = await queryOne<{ count: string }>('SELECT COUNT(*) as count FROM crash_reports');
-    const unresolvedCount = await queryOne<{ count: string }>(
-      'SELECT COUNT(*) as count FROM crash_reports WHERE resolved = false OR resolved IS NULL'
-    );
-    const byVersion = await query<{ app_version: string; count: string }>(`SELECT app_version, COUNT(*) as count FROM crash_reports WHERE app_version IS NOT NULL GROUP BY app_version ORDER BY count DESC`);
+    let crashes: any[], totalCount: { count: string } | null, unresolvedCount: { count: string } | null, byVersion: { app_version: string; count: string }[];
+    try {
+      crashes = await query(sql, params);
+      totalCount = await queryOne<{ count: string }>('SELECT COUNT(*) as count FROM crash_reports');
+      unresolvedCount = await queryOne<{ count: string }>(
+        'SELECT COUNT(*) as count FROM crash_reports WHERE resolved = false OR resolved IS NULL'
+      );
+      byVersion = await query<{ app_version: string; count: string }>(`SELECT app_version, COUNT(*) as count FROM crash_reports WHERE app_version IS NOT NULL GROUP BY app_version ORDER BY count DESC`);
+    } catch (columnError: any) {
+      // If 'resolved' or 'app_version' column doesn't exist (42703), add them and retry
+      if (columnError.code === '42703') {
+        await query('ALTER TABLE crash_reports ADD COLUMN IF NOT EXISTS resolved BOOLEAN DEFAULT false');
+        await query('ALTER TABLE crash_reports ADD COLUMN IF NOT EXISTS app_version TEXT');
+        crashes = await query('SELECT * FROM crash_reports ORDER BY created_at DESC LIMIT $1 OFFSET $2', [limit, offset]);
+        totalCount = await queryOne<{ count: string }>('SELECT COUNT(*) as count FROM crash_reports');
+        unresolvedCount = await queryOne<{ count: string }>('SELECT COUNT(*) as count FROM crash_reports WHERE resolved = false OR resolved IS NULL');
+        byVersion = await query<{ app_version: string; count: string }>(`SELECT app_version, COUNT(*) as count FROM crash_reports WHERE app_version IS NOT NULL GROUP BY app_version ORDER BY count DESC`);
+      } else {
+        throw columnError;
+      }
+    }
 
     res.json({
       crashes,
@@ -1238,6 +1313,9 @@ router.get('/account-deletions', async (req: Request, res: Response) => {
 // ============================================
 // DATABASE BROWSER
 // ============================================
+// Generic CRUD for any PostgreSQL table. Table names are validated against
+// pg_tables/information_schema to prevent SQL injection. Primary keys are
+// detected dynamically from pg_index so updates/deletes work on any table.
 
 // GET /admin/tables - List all tables with row counts and sizes
 router.get('/tables', async (req: Request, res: Response) => {
@@ -1469,6 +1547,13 @@ router.put('/tables/:tableName/:rowId', async (req: Request, res: Response) => {
 
     const pkColumn = pkResult.length > 0 ? pkResult[0].attname : 'id';
 
+    // Fetch actual column names from information_schema for validation
+    const tableColumns = await query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = $1`,
+      [tableName]
+    );
+    const validColumns = new Set(tableColumns.map(c => c.column_name));
+
     // Build update query
     const setClauses: string[] = [];
     const values: any[] = [];
@@ -1476,6 +1561,10 @@ router.put('/tables/:tableName/:rowId', async (req: Request, res: Response) => {
 
     for (const [col, val] of Object.entries(updates)) {
       if (col === pkColumn) continue; // Don't update PK
+      if (!validColumns.has(col)) {
+        res.status(400).json({ error: `Invalid column: ${col}` });
+        return;
+      }
       setClauses.push(`"${col}" = $${paramIdx++}`);
       values.push(val);
     }

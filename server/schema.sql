@@ -11,6 +11,7 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- Users table
 CREATE TABLE users (
     uid VARCHAR(128) PRIMARY KEY,
+    firebase_uid VARCHAR(128), -- device fingerprint, used for login lookup
     phone VARCHAR(20),
     email VARCHAR(255),
     display_name VARCHAR(255),
@@ -21,6 +22,7 @@ CREATE TABLE users (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE UNIQUE INDEX idx_users_firebase_uid ON users(firebase_uid) WHERE firebase_uid IS NOT NULL;
 CREATE INDEX idx_users_phone ON users(phone);
 CREATE INDEX idx_users_email ON users(email);
 
@@ -47,6 +49,7 @@ CREATE TABLE user_devices (
     os_version VARCHAR(50),
     app_version VARCHAR(50),
     fcm_token TEXT,
+    device_signing_key TEXT, -- ECDSA P-256 signing public key (X9.63 base64)
     paired_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     last_seen TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     is_active BOOLEAN DEFAULT TRUE
@@ -305,6 +308,9 @@ CREATE TABLE user_e2ee_keys (
     user_id VARCHAR(128) NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
     device_id VARCHAR(128) NOT NULL,
     encrypted_key TEXT NOT NULL,
+    key_version INTEGER DEFAULT 1,
+    signature TEXT,
+    signing_device_id VARCHAR(128),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     UNIQUE(user_id, device_id)
@@ -329,7 +335,8 @@ CREATE TABLE e2ee_key_requests (
     requesting_device VARCHAR(128) NOT NULL,
     target_device VARCHAR(128) NOT NULL,
     status VARCHAR(20) DEFAULT 'pending',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    expires_at TIMESTAMP WITH TIME ZONE DEFAULT (NOW() + INTERVAL '24 hours')
 );
 
 CREATE INDEX idx_e2ee_requests_user ON e2ee_key_requests(user_id, status);
@@ -340,6 +347,26 @@ CREATE TABLE e2ee_key_responses (
     user_id VARCHAR(128) NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
     request_id UUID REFERENCES e2ee_key_requests(id),
     encrypted_key TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+-- E2EE key backups (encrypted with user passphrase)
+CREATE TABLE e2ee_key_backups (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(128) NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+    encrypted_backup TEXT NOT NULL,
+    salt TEXT NOT NULL,
+    iterations INTEGER NOT NULL,
+    key_version INTEGER NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    UNIQUE(user_id, key_version)
+);
+
+-- E2EE repair rate limiting log
+CREATE TABLE e2ee_repair_log (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id VARCHAR(128) NOT NULL,
+    device_id VARCHAR(128),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
@@ -552,7 +579,7 @@ CREATE TABLE crash_reports (
 
 CREATE INDEX idx_crashes_uid ON crash_reports(uid, timestamp DESC);
 
--- Deleted accounts (audit trail)
+-- Deleted accounts (audit trail + anti-abuse)
 CREATE TABLE deleted_accounts (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id VARCHAR(128) NOT NULL,
@@ -560,10 +587,13 @@ CREATE TABLE deleted_accounts (
     phone VARCHAR(50),
     deletion_reason VARCHAR(255),
     deleted_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    deleted_by VARCHAR(128) -- admin uid if admin-deleted
+    deleted_by VARCHAR(128), -- admin uid if admin-deleted
+    device_ids TEXT[],
+    bandwidth_bytes_at_deletion BIGINT DEFAULT 0
 );
 
 CREATE INDEX idx_deleted_user ON deleted_accounts(user_id);
+CREATE INDEX idx_deleted_device_ids ON deleted_accounts USING GIN (device_ids);
 
 -- User subscriptions
 CREATE TABLE user_subscriptions (
@@ -702,3 +732,32 @@ FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 -- GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO syncflow;
 -- GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO syncflow;
 -- GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO syncflow;
+
+-- =====================================================
+-- ANALYTICS TABLES
+-- =====================================================
+
+-- Anonymous website visit & event tracking
+CREATE TABLE analytics_events (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    session_id VARCHAR(64) NOT NULL,        -- SHA-256(IP + User-Agent), no cookies
+    event_type VARCHAR(30) NOT NULL,         -- page_view, download_click, button_click
+    page_path VARCHAR(500),
+    referrer VARCHAR(1000),
+    download_platform VARCHAR(20),           -- macos, android (for download_click)
+    device_type VARCHAR(20),                 -- desktop, mobile, tablet
+    os_name VARCHAR(50),
+    browser_name VARCHAR(50),
+    country_code VARCHAR(2),                 -- from CF-IPCountry header
+    country_name VARCHAR(100),
+    utm_source VARCHAR(255),
+    utm_medium VARCHAR(255),
+    utm_campaign VARCHAR(255),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX idx_analytics_created ON analytics_events(created_at);
+CREATE INDEX idx_analytics_session ON analytics_events(session_id);
+CREATE INDEX idx_analytics_event_type ON analytics_events(event_type);
+CREATE INDEX idx_analytics_page_path ON analytics_events(page_path);
+CREATE INDEX idx_analytics_daily ON analytics_events(event_type, (created_at::date));

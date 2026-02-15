@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import path from 'path';
 import http from 'http';
 import { config } from './config';
 import { pool, checkDatabaseHealth } from './services/database';
@@ -41,6 +42,7 @@ import photosRoutes from './routes/photos';
 import usageRoutes from './routes/usage';
 import accountRoutes from './routes/account';
 import supportRoutes from './routes/support';
+import analyticsRoutes from './routes/analytics';
 
 const app = express();
 
@@ -94,6 +96,9 @@ app.get('/health', async (req, res) => {
   });
 });
 
+// Analytics tracking (before maintenance so it works during maintenance)
+app.use('/api/analytics', analyticsRoutes);
+
 // Maintenance mode check (after health check, before API routes)
 app.use(maintenanceMiddleware);
 
@@ -126,6 +131,12 @@ app.use('/api/account', accountRoutes);
 app.use('/api/support', supportRoutes);
 app.use('/api/support-chat', supportRoutes);
 
+// Static file serving for app downloads (APK, DMG)
+app.use('/downloads', express.static(path.join(__dirname, '..', 'downloads'), {
+  maxAge: '7d',
+  immutable: true,
+}));
+
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
@@ -155,11 +166,44 @@ async function start() {
 
     // Start HTTP server and attach WebSocket to it
     const server = http.createServer(app);
-    createWebSocketServer(server);
+    const wss = createWebSocketServer(server);
 
     server.listen(config.port, () => {
       console.log(`HTTP + WebSocket server listening on port ${config.port}`);
     });
+
+    // Register graceful shutdown handler
+    const gracefulShutdown = (signal: string) => {
+      console.log(`${signal} received, shutting down gracefully...`);
+      stopDailyCleanup();
+
+      // Stop accepting new connections
+      server.close(async () => {
+        console.log('HTTP server closed, draining remaining connections...');
+        try {
+          // Close WebSocket server and all active connections
+          wss.clients.forEach((ws) => ws.close(1001, 'Server shutting down'));
+          wss.close();
+          // Close database pool and Redis
+          await pool.end();
+          redis.disconnect();
+          console.log('All connections closed. Exiting.');
+          process.exit(0);
+        } catch (err) {
+          console.error('Error during shutdown cleanup:', err);
+          process.exit(1);
+        }
+      });
+
+      // Force shutdown after 30 seconds if draining takes too long
+      setTimeout(() => {
+        console.error('Graceful shutdown timed out after 30s, forcing exit.');
+        process.exit(1);
+      }, 30000);
+    };
+
+    process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+    process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
     // Start daily cleanup scheduler (3 AM UTC)
     startDailyCleanup();
@@ -173,23 +217,6 @@ async function start() {
     process.exit(1);
   }
 }
-
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  console.log('SIGTERM received, shutting down...');
-  stopDailyCleanup();
-  await pool.end();
-  redis.disconnect();
-  process.exit(0);
-});
-
-process.on('SIGINT', async () => {
-  console.log('SIGINT received, shutting down...');
-  stopDailyCleanup();
-  await pool.end();
-  redis.disconnect();
-  process.exit(0);
-});
 
 // Start the server
 start();

@@ -224,17 +224,14 @@ struct ContactsView: View {
 
     private func createContact(name: String, phone: String, phoneType: String, email: String?, notes: String?) async {
         // TODO: Add VPS contact creation endpoint
-        print("[ContactsView] Contact creation not yet available via VPS")
     }
 
     private func updateContact(contactId: String, name: String, phone: String, phoneType: String, email: String?, notes: String?) async {
         // TODO: Add VPS contact update endpoint
-        print("[ContactsView] Contact update not yet available via VPS")
     }
 
     private func deleteContact(_ contact: Contact) {
         // TODO: Add VPS contact deletion endpoint
-        print("[ContactsView] Contact deletion not yet available via VPS")
     }
 
     private func matchesSearch(contact: Contact) -> Bool {
@@ -471,19 +468,18 @@ struct ContactRow: View {
 
         Task {
             do {
-                let callId = try await appState.syncFlowCallManager.startCallToUser(
+                let _ = try await appState.syncFlowCallManager.startCallToUser(
                     recipientPhoneNumber: phoneNumber ?? "",
                     recipientName: recipientName,
                     isVideo: isVideo
                 )
-                print("Started \(isVideo ? "video" : "audio") call to \(recipientName): \(callId)")
 
                 // Show the call view
                 await MainActor.run {
                     appState.showSyncFlowCallView = true
                 }
             } catch {
-                print("Failed to start call: \(error.localizedDescription)")
+                // Call initiation failed
             }
         }
     }
@@ -796,7 +792,9 @@ class ContactsStore: ObservableObject {
                     }
                 }
             } catch {
+                #if DEBUG
                 print("[ContactsStore] Error loading devices: \(error)")
+                #endif
                 hasLoadedDevices = false
             }
         }
@@ -848,6 +846,34 @@ class ContactsStore: ObservableObject {
             }
             .store(in: &vpsCancellables)
 
+        // Listen for bulk contacts_synced event (triggers refetch after Android initial sync)
+        VPSService.shared.contactsSynced
+            .sink { [weak self] count in
+                guard let self = self else { return }
+                #if DEBUG
+                print("[ContactsStore VPS] Received contacts_synced event (\(count) contacts), refetching...")
+                #endif
+                Task {
+                    do {
+                        let response = try await VPSService.shared.getContacts(limit: 500)
+                        let fetchedContacts = response.contacts.map { self.convertVPSContact($0) }
+                        await MainActor.run {
+                            self.contacts = fetchedContacts.sorted {
+                                $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+                            }
+                            #if DEBUG
+                            print("[ContactsStore VPS] Refetched \(fetchedContacts.count) contacts after sync event")
+                            #endif
+                        }
+                    } catch {
+                        #if DEBUG
+                        print("[ContactsStore VPS] Error refetching contacts after sync: \(error.localizedDescription)")
+                        #endif
+                    }
+                }
+            }
+            .store(in: &vpsCancellables)
+
         // Fetch initial contacts from VPS REST API
         Task {
             do {
@@ -859,10 +885,42 @@ class ContactsStore: ObservableObject {
                         $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
                     }
                     self.isLoading = false
+                    #if DEBUG
                     print("[ContactsStore VPS] Loaded \(fetchedContacts.count) contacts")
+                    #endif
+                }
+
+                // If empty, ask Android to push contacts then retry
+                if fetchedContacts.isEmpty {
+                    #if DEBUG
+                    print("[ContactsStore VPS] No contacts found, requesting sync from Android...")
+                    #endif
+                    try? await VPSService.shared.requestContactsSync()
+                    // Wait for Android to sync, then retry multiple times
+                    for attempt in 1...3 {
+                        try? await Task.sleep(nanoseconds: UInt64(attempt) * 10_000_000_000) // 10s, 20s, 30s
+                        let retryResponse = try await VPSService.shared.getContacts(limit: 500)
+                        let retryContacts = retryResponse.contacts.map { self.convertVPSContact($0) }
+                        if !retryContacts.isEmpty {
+                            await MainActor.run {
+                                self.contacts = retryContacts.sorted {
+                                    $0.displayName.localizedCaseInsensitiveCompare($1.displayName) == .orderedAscending
+                                }
+                                #if DEBUG
+                                print("[ContactsStore VPS] Retry #\(attempt) loaded \(retryContacts.count) contacts")
+                                #endif
+                            }
+                            break
+                        }
+                        #if DEBUG
+                        print("[ContactsStore VPS] Retry #\(attempt) still empty")
+                        #endif
+                    }
                 }
             } catch {
+                #if DEBUG
                 print("[ContactsStore VPS] Error loading contacts: \(error.localizedDescription)")
+                #endif
                 await MainActor.run {
                     self.isLoading = false
                 }

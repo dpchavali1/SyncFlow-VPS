@@ -3,9 +3,7 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { useAppStore } from '@/lib/store';
 
-// VPS mode check
-const isVPSMode = process.env.NEXT_PUBLIC_USE_VPS === 'true';
-const VPS_URL = process.env.NEXT_PUBLIC_VPS_URL || 'http://5.78.188.206';
+const VPS_URL = process.env.NEXT_PUBLIC_VPS_URL || 'https://api.sfweb.app';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -97,46 +95,23 @@ export default function SupportChat() {
     setIsLoading(true);
 
     try {
-      let responseText: string;
-
-      if (isVPSMode) {
-        // VPS mode: Use VPS API endpoint
-        const token = typeof window !== 'undefined' ? localStorage.getItem('vps_access_token') : null;
-        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (token) {
-          headers['Authorization'] = `Bearer ${token}`;
-        }
-        const response = await fetch(`${VPS_URL}/api/support/chat`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({
-            message: userMessage.content,
-            conversationHistory: messages.slice(-6),
-            syncGroupUserId: storeUserId || undefined,
-          }),
-        });
-
-        if (!response.ok) {
-          throw new Error('Support chat unavailable');
-        }
-
-        const data = await response.json();
-        responseText = data.response || "I'm sorry, I couldn't process your request.";
-      } else {
-        // Firebase mode: Use Cloud Functions
-        const { getFunctions, httpsCallable } = await import('firebase/functions');
-        const functions = getFunctions();
-        const supportChat = httpsCallable(functions, 'supportChat');
-
-        const result = await supportChat({
+      // Use VPS API endpoint for support chat (optionalAuth - works without token)
+      const response = await fetch(`${VPS_URL}/api/support/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
           message: userMessage.content,
           conversationHistory: messages.slice(-6),
           syncGroupUserId: storeUserId || undefined,
-        });
+        }),
+      });
 
-        const data = result.data as { success: boolean; response: string };
-        responseText = data.success ? data.response : "Sorry, I couldn't process your question.";
+      if (!response.ok) {
+        throw new Error('Support chat unavailable');
       }
+
+      const data = await response.json();
+      const responseText = data.response || "I'm sorry, I couldn't process your request.";
 
       setMessages((prev) => [
         ...prev,
@@ -152,9 +127,7 @@ export default function SupportChat() {
         ...prev,
         {
           role: 'assistant',
-          content: isVPSMode
-            ? "Support chat is temporarily unavailable. Please email syncflow.contact@gmail.com for assistance."
-            : "Sorry, I couldn't process your question. Please try again or contact syncflow.contact@gmail.com",
+          content: "Support chat is temporarily unavailable. Please email syncflow.contact@gmail.com for assistance.",
           timestamp: Date.now(),
         },
       ]);

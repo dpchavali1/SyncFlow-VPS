@@ -72,6 +72,7 @@ router.post('/mirror', async (req: Request, res: Response) => {
        (id, user_id, app_package, app_name, title, body, timestamp, is_read)
        VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE)
        ON CONFLICT (id) DO UPDATE SET
+         user_id = EXCLUDED.user_id,
          title = EXCLUDED.title,
          body = EXCLUDED.body,
          timestamp = EXCLUDED.timestamp`,

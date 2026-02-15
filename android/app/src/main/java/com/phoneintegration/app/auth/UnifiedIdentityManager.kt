@@ -137,6 +137,24 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
                 if (result.isSuccess) {
                     userId = result.getOrNull()
                     Log.d(TAG, "VPS fingerprint authentication successful: $userId")
+
+                    // Check if we need to auto re-sync messages to fix E2EE keys.
+                    // Two scenarios require this:
+                    // 1. Migration: old user data merged into this user (migrationPerformed=true)
+                    // 2. Reinstall: same user (existingUser=true) but fresh install (no local sync history)
+                    //    Android Keystore is wiped on reinstall, so old encrypted messages
+                    //    on the server have stale E2EE keys that can't be decrypted.
+                    val authState = vpsAuthManager.authState.value
+                    if (authState is com.phoneintegration.app.vps.VPSAuthState.Authenticated) {
+                        val user = authState.user
+                        if (user.migrationPerformed) {
+                            Log.i(TAG, "Migration detected - triggering automatic re-sync to fix E2EE keys")
+                            triggerReinstallResync()
+                        } else if (user.existingUser && !hasLocalSyncHistory()) {
+                            Log.i(TAG, "Reinstall detected (existing user, no local sync history) - triggering automatic re-sync to fix E2EE keys")
+                            triggerReinstallResync()
+                        }
+                    }
                 } else {
                     Log.e(TAG, "VPS fingerprint authentication failed: ${result.exceptionOrNull()?.message}")
                     // Do NOT fall back to anonymous auth - it creates orphan users
@@ -149,6 +167,58 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
         }
 
         return@withLock userId
+    }
+
+    /**
+     * Check if this install has any local sync history (i.e. not a fresh install).
+     * A fresh install on an existing account = reinstall scenario.
+     */
+    private fun hasLocalSyncHistory(): Boolean {
+        val prefs = context.getSharedPreferences("vps_sync_prefs", Context.MODE_PRIVATE)
+        return prefs.getLong("last_message_sync_time", 0L) > 0
+    }
+
+    /**
+     * After a reinstall or migration, re-sync messages, contacts, and calls from the phone
+     * to re-encrypt with new E2EE keys. Runs in background so it doesn't block authentication.
+     */
+    private fun triggerReinstallResync() {
+        scope.launch {
+            // Messages
+            try {
+                Log.i(TAG, "Starting reinstall re-sync (last 30 days)...")
+                val smsRepository = SmsRepository(context)
+                val messages = smsRepository.getMessagesFromLastDays(30)
+
+                if (messages.isNotEmpty()) {
+                    Log.d(TAG, "Re-syncing ${messages.size} messages with new E2EE keys")
+                    vpsSyncService.syncMessages(messages)
+                    Log.i(TAG, "Reinstall re-sync completed: ${messages.size} messages")
+                } else {
+                    Log.d(TAG, "No messages to re-sync")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Reinstall message re-sync failed", e)
+            }
+
+            // Contacts
+            try {
+                val contactsSyncService = com.phoneintegration.app.desktop.ContactsSyncService(context)
+                contactsSyncService.syncContactsForUser()
+                Log.i(TAG, "Reinstall contact re-sync completed")
+            } catch (e: Exception) {
+                Log.e(TAG, "Reinstall contact re-sync failed", e)
+            }
+
+            // Call history
+            try {
+                val callHistorySyncService = com.phoneintegration.app.desktop.CallHistorySyncService(context)
+                callHistorySyncService.syncCallHistoryForUser()
+                Log.i(TAG, "Reinstall call history re-sync completed")
+            } catch (e: Exception) {
+                Log.e(TAG, "Reinstall call history re-sync failed", e)
+            }
+        }
     }
 
     // =============================================================================

@@ -5,6 +5,7 @@ import { Search, User, GripVertical, X, Lock, Unlock } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { format } from 'date-fns'
 import { ConversationListSkeleton } from './SkeletonLoaders'
+import { normalizePhoneForConversation } from '@/lib/phoneNumberNormalizer'
 
 interface Conversation {
   address: string
@@ -17,35 +18,6 @@ interface Conversation {
   lastMessageEncrypted?: boolean
   lastMessageE2eeFailed?: boolean
   lastMessageDecryptionFailed?: boolean
-}
-
-// LRU Cache for phone number normalization
-const normalizationCache = new Map<string, string>()
-const MAX_CACHE_SIZE = 1000
-
-function normalizePhoneNumber(address: string): string {
-  // Check cache first
-  const cached = normalizationCache.get(address)
-  if (cached !== undefined) return cached
-
-  let result: string
-  // Skip non-phone addresses (email, short codes, etc.)
-  if (address.includes('@') || address.length < 6) {
-    result = address.toLowerCase()
-  } else {
-    // Remove all non-digit characters
-    const digitsOnly = address.replace(/[^0-9]/g, '')
-    // For comparison, use last 10 digits (handles country code differences)
-    result = digitsOnly.length >= 10 ? digitsOnly.slice(-10) : digitsOnly
-  }
-
-  // Add to cache with LRU eviction
-  if (normalizationCache.size >= MAX_CACHE_SIZE) {
-    const firstKey = normalizationCache.keys().next().value
-    if (firstKey) normalizationCache.delete(firstKey)
-  }
-  normalizationCache.set(address, result)
-  return result
 }
 
 // Debounce hook
@@ -253,7 +225,7 @@ export default function ConversationList() {
     const convMap = new Map<string, Conversation>()
 
     for (const msg of messages) {
-      const normalized = normalizePhoneNumber(msg.address)
+      const normalized = normalizePhoneForConversation(msg.address)
       const existing = convMap.get(normalized)
       const isUnread =
         msg.type === 1 &&
@@ -378,6 +350,12 @@ export default function ConversationList() {
     setSelectedConversation(null)
   }, [setActiveFolder, setSelectedConversation])
 
+  const handlePhotosFolderClick = useCallback(() => {
+    setActiveFolder('photos')
+    setSelectedConversation(null)
+    setSelectedSpamAddress(null)
+  }, [setActiveFolder, setSelectedConversation, setSelectedSpamAddress])
+
   if (!isSidebarOpen) {
     return null
   }
@@ -418,6 +396,16 @@ export default function ConversationList() {
             }`}
           >
             Spam {spamMessages.length > 0 ? `(${spamMessages.length})` : ''}
+          </button>
+          <button
+            onClick={handlePhotosFolderClick}
+            className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
+              activeFolder === 'photos'
+                ? 'bg-green-600 text-white'
+                : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'
+            }`}
+          >
+            Photos
           </button>
         </div>
         <div className="relative">

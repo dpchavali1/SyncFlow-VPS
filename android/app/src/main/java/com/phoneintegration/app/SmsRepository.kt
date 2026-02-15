@@ -15,6 +15,7 @@ import androidx.core.content.ContextCompat
 import android.Manifest
 import android.content.pm.PackageManager
 import com.phoneintegration.app.sms.SmsDeliveredReceiver
+import com.phoneintegration.app.utils.DefaultSmsHelper
 import com.phoneintegration.app.utils.MemoryOptimizer
 import com.phoneintegration.app.utils.MemoryPressure
 import kotlinx.coroutines.Dispatchers
@@ -923,7 +924,7 @@ class SmsRepository(private val context: Context) {
                         putExtra("outgoing_id", outgoingId)
                     }
                     val flags = PendingIntent.FLAG_UPDATE_CURRENT or
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_IMMUTABLE else 0
                     PendingIntent.getBroadcast(
                         context,
                         outgoingId.hashCode(),
@@ -936,39 +937,40 @@ class SmsRepository(private val context: Context) {
                 SmsManager.getDefault().sendTextMessage(address, null, body, null, deliveryIntent)
                 Log.d("SmsRepository", "SMS sent to $address (deliveryIntent=${deliveryIntent != null})")
 
-                // Manually write to sent folder
-                // This is needed because SmsManager.sendTextMessage() doesn't write to sent folder
-                // unless the app is the default SMS app
-                try {
-                    // Get or create thread ID for this address
-                    val threadId = try {
-                        Telephony.Threads.getOrCreateThreadId(context, setOf(address))
-                    } catch (e: Exception) {
-                        Log.w("SmsRepository", "Could not get thread ID: ${e.message}")
-                        null
-                    }
+                // Write to sent folder only when we are the default SMS app.
+                // Non-default apps can't write to the SMS content provider; the sent
+                // message will still be synced to Mac/Web via VPS.
+                if (DefaultSmsHelper.isDefaultSmsApp(context)) {
+                    try {
+                        val threadId = try {
+                            Telephony.Threads.getOrCreateThreadId(context, setOf(address))
+                        } catch (e: Exception) {
+                            Log.w("SmsRepository", "Could not get thread ID: ${e.message}")
+                            null
+                        }
 
-                    val values = android.content.ContentValues().apply {
-                        put(Telephony.Sms.ADDRESS, address)
-                        put(Telephony.Sms.BODY, body)
-                        put(Telephony.Sms.DATE, System.currentTimeMillis())
-                        put(Telephony.Sms.DATE_SENT, System.currentTimeMillis())
-                        put(Telephony.Sms.READ, 1)
-                        put(Telephony.Sms.SEEN, 1)
-                        put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_SENT) // 2 = sent
-                        put(Telephony.Sms.STATUS, Telephony.Sms.STATUS_COMPLETE)
-                        threadId?.let { put(Telephony.Sms.THREAD_ID, it) }
+                        val values = android.content.ContentValues().apply {
+                            put(Telephony.Sms.ADDRESS, address)
+                            put(Telephony.Sms.BODY, body)
+                            put(Telephony.Sms.DATE, System.currentTimeMillis())
+                            put(Telephony.Sms.DATE_SENT, System.currentTimeMillis())
+                            put(Telephony.Sms.READ, 1)
+                            put(Telephony.Sms.SEEN, 1)
+                            put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_SENT)
+                            put(Telephony.Sms.STATUS, Telephony.Sms.STATUS_COMPLETE)
+                            threadId?.let { put(Telephony.Sms.THREAD_ID, it) }
+                        }
+                        val uri = resolver.insert(Telephony.Sms.Sent.CONTENT_URI, values)
+                        if (uri != null) {
+                            Log.d("SmsRepository", "Wrote sent SMS to provider: $uri (threadId=$threadId)")
+                        } else {
+                            Log.w("SmsRepository", "Insert returned null - message may not be persisted")
+                        }
+                    } catch (e: Exception) {
+                        Log.w("SmsRepository", "Could not write to sent folder: ${e.message}")
                     }
-                    val uri = resolver.insert(Telephony.Sms.Sent.CONTENT_URI, values)
-                    if (uri != null) {
-                        Log.d("SmsRepository", "Wrote sent SMS to provider: $uri (threadId=$threadId)")
-                    } else {
-                        Log.w("SmsRepository", "Insert returned null - message may not be persisted")
-                    }
-                } catch (e: Exception) {
-                    // This might fail if we don't have write permissions
-                    // or if we're not the default SMS app on some devices
-                    Log.w("SmsRepository", "Could not write to sent folder: ${e.message}")
+                } else {
+                    Log.d("SmsRepository", "Not default SMS app, skipping sent folder write (synced via VPS)")
                 }
 
                 kotlinx.coroutines.delay(200)
@@ -2322,109 +2324,18 @@ class SmsRepository(private val context: Context) {
         results.sortedByDescending { it.date }
     }
 
-    // ---------------------------------------------------------------------
-    //  DEBUG: Find messages for a phone number (flexible matching)
-    // ---------------------------------------------------------------------
-
-    /**
-     * Debug method to find all messages for a phone number using flexible matching.
-     * This helps diagnose missing conversations.
-     */
-    suspend fun debugFindMessagesForNumber(phoneNumber: String): Map<String, Any> =
-        withContext(Dispatchers.IO) {
-            val result = mutableMapOf<String, Any>()
-            val cleanNumber = phoneNumber.replace(Regex("[^0-9+]"), "")
-            val last7Digits = cleanNumber.takeLast(7)
-
-            android.util.Log.d("SmsRepository", "DEBUG: Searching for phone number: $phoneNumber")
-            android.util.Log.d("SmsRepository", "DEBUG: Clean number: $cleanNumber, last 7: $last7Digits")
-
-            // Find all unique addresses that might match
-            val matchingAddresses = mutableSetOf<String>()
-            val addressCursor = resolver.query(
-                Telephony.Sms.CONTENT_URI,
-                arrayOf(Telephony.Sms.ADDRESS),
-                null,
-                null,
-                null
-            )
-
-            addressCursor?.use { c ->
-                while (c.moveToNext()) {
-                    val addr = c.getString(0) ?: continue
-                    val cleanAddr = addr.replace(Regex("[^0-9+]"), "")
-                    if (cleanAddr.endsWith(last7Digits) ||
-                        android.telephony.PhoneNumberUtils.compare(addr, phoneNumber)) {
-                        matchingAddresses.add(addr)
-                    }
-                }
-            }
-
-            result["matchingAddresses"] = matchingAddresses.toList()
-            android.util.Log.d("SmsRepository", "DEBUG: Found ${matchingAddresses.size} matching addresses: $matchingAddresses")
-
-            // Find thread IDs for matching addresses
-            val threadIds = mutableSetOf<Long>()
-            for (addr in matchingAddresses) {
-                val cursor = resolver.query(
-                    Telephony.Sms.CONTENT_URI,
-                    arrayOf(Telephony.Sms.THREAD_ID),
-                    "${Telephony.Sms.ADDRESS} = ?",
-                    arrayOf(addr),
-                    null
-                )
-                cursor?.use { c ->
-                    if (c.moveToFirst()) {
-                        threadIds.add(c.getLong(0))
-                    }
-                }
-            }
-
-            result["threadIds"] = threadIds.toList()
-            android.util.Log.d("SmsRepository", "DEBUG: Found thread IDs: $threadIds")
-
-            // Count messages in each thread
-            val messageCounts = mutableMapOf<Long, Int>()
-            for (threadId in threadIds) {
-                val cursor = resolver.query(
-                    Telephony.Sms.CONTENT_URI,
-                    arrayOf("COUNT(*)"),
-                    "${Telephony.Sms.THREAD_ID} = ?",
-                    arrayOf(threadId.toString()),
-                    null
-                )
-                cursor?.use { c ->
-                    if (c.moveToFirst()) {
-                        messageCounts[threadId] = c.getInt(0)
-                    }
-                }
-            }
-
-            result["messageCounts"] = messageCounts
-            android.util.Log.d("SmsRepository", "DEBUG: Message counts: $messageCounts")
-
-            // Check MMS as well
-            val mmsCount = resolver.query(
-                Uri.parse("content://mms"),
-                arrayOf("COUNT(*)"),
-                null,
-                null,
-                null
-            )?.use { c ->
-                if (c.moveToFirst()) c.getInt(0) else 0
-            } ?: 0
-
-            result["totalMmsCount"] = mmsCount
-            android.util.Log.d("SmsRepository", "DEBUG: Total MMS count: $mmsCount")
-
-            result
-        }
-
     /**
      * Mark all SMS/MMS in the given thread as read so the conversation list clears the unread badge.
+     * Returns true if the content provider was updated (i.e. we are the default SMS app),
+     * false if we skipped the write because we don't have default-app write access.
      */
-    fun markThreadRead(threadId: Long) {
-        if (threadId <= 0) return
+    fun markThreadRead(threadId: Long): Boolean {
+        if (threadId <= 0) return false
+
+        if (!DefaultSmsHelper.isDefaultSmsApp(context)) {
+            Log.d("SmsRepository", "markThreadRead($threadId): not default SMS app, skipping content provider write")
+            return false
+        }
 
         try {
             val smsValues = ContentValues().apply {
@@ -2458,8 +2369,10 @@ class SmsRepository(private val context: Context) {
                 "thread_id = ? AND read = 0",
                 arrayOf(threadId.toString())
             )
+            return true
         } catch (e: Exception) {
             Log.e("SmsRepository", "Failed to mark thread $threadId as read", e)
+            return false
         }
     }
 }

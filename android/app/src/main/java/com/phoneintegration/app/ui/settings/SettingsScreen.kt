@@ -43,6 +43,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import com.phoneintegration.app.BuildConfig
 import com.phoneintegration.app.MainActivity
 import com.phoneintegration.app.data.PreferencesManager
@@ -187,52 +188,88 @@ fun SettingsScreen(
 
     // About Dialog
     if (showAboutDialog) {
-        AlertDialog(
-            onDismissRequest = { showAboutDialog = false },
-            icon = { Icon(Icons.Filled.Info, contentDescription = null) },
-            title = { Text("About SyncFlow") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Dialog(onDismissRequest = { showAboutDialog = false }) {
+            Surface(
+                shape = MaterialTheme.shapes.extraLarge,
+                color = MaterialTheme.colorScheme.surface,
+                tonalElevation = 6.dp
+            ) {
+                Column(
+                    modifier = Modifier.padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Icon(
+                        Icons.Filled.Info,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(32.dp)
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "About SyncFlow",
+                        style = MaterialTheme.typography.headlineSmall
+                    )
+                    Spacer(Modifier.height(4.dp))
                     Text(
                         "Version ${BuildConfig.VERSION_NAME}",
-                        style = MaterialTheme.typography.titleMedium
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
 
-                    Divider(Modifier.padding(vertical = 4.dp))
+                    Spacer(Modifier.height(16.dp))
+                    Divider()
+                    Spacer(Modifier.height(16.dp))
 
-                    Text(
-                        "SyncFlow lets you send and receive SMS/MMS from your Mac, PC, or any browser.",
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-
-                    Text(
-                        "Features:",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text("• Sync messages across all devices")
-                    Text("• Video & audio calling")
-                    Text("• Photo sync & file transfer")
-                    Text("• AI-powered spam filtering")
-                    Text("• End-to-end secure pairing")
-
-                    Divider(Modifier.padding(vertical = 4.dp))
-
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Web: ")
+                    Column(
+                        modifier = Modifier
+                            .weight(1f, fill = false)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
                         Text(
-                            "https://sfweb.app",
-                            color = MaterialTheme.colorScheme.primary,
-                            style = MaterialTheme.typography.bodyMedium.copy(
-                                fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold
-                            )
+                            "Your Android phone, everywhere.",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary
                         )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "SyncFlow bridges your Android phone to Mac and web — so your messages, calls, and files are always within reach.",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+
+                        Spacer(Modifier.height(8.dp))
+
+                        AboutFeatureItem(icon = Icons.Filled.Security, text = "Your own private server — no third-party cloud storing your data")
+                        AboutFeatureItem(icon = Icons.Filled.Lock, text = "End-to-end encrypted pairing and message sync")
+                        AboutFeatureItem(icon = Icons.Filled.Message, text = "Full SMS/MMS — send and receive from Mac or web")
+                        AboutFeatureItem(icon = Icons.Filled.Phone, text = "Make and receive phone calls from your desktop")
+                        AboutFeatureItem(icon = Icons.Filled.VideoCall, text = "Video & audio calls between SyncFlow users")
+                        AboutFeatureItem(icon = Icons.Filled.PhotoLibrary, text = "Photo sync and file transfer with private cloud storage")
+                        AboutFeatureItem(icon = Icons.Filled.Shield, text = "AI spam filtering — block junk before it reaches you")
+                        AboutFeatureItem(icon = Icons.Filled.Contacts, text = "Contacts and call history sync across all devices")
+                        AboutFeatureItem(icon = Icons.Filled.Devices, text = "Native apps — built for each platform, not a web wrapper")
+                        AboutFeatureItem(icon = Icons.Filled.Language, text = "No ecosystem lock-in — works across Android, Mac, and Web")
                     }
 
+                    Spacer(Modifier.height(16.dp))
+                    Divider()
+                    Spacer(Modifier.height(12.dp))
+
+                    // Links row
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
+                        TextButton(
+                            onClick = {
+                                val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://sfweb.app"))
+                                context.startActivity(intent)
+                            }
+                        ) {
+                            Text("sfweb.app", style = MaterialTheme.typography.bodySmall)
+                        }
+                        Text("•", color = MaterialTheme.colorScheme.onSurfaceVariant)
                         TextButton(
                             onClick = {
                                 val intent = Intent(Intent.ACTION_VIEW, Uri.parse(BuildConfig.PRIVACY_POLICY_URL))
@@ -241,7 +278,7 @@ fun SettingsScreen(
                         ) {
                             Text("Privacy", style = MaterialTheme.typography.bodySmall)
                         }
-                        Text("•", modifier = Modifier.align(Alignment.CenterVertically))
+                        Text("•", color = MaterialTheme.colorScheme.onSurfaceVariant)
                         TextButton(
                             onClick = {
                                 val intent = Intent(Intent.ACTION_VIEW, Uri.parse(BuildConfig.TERMS_OF_SERVICE_URL))
@@ -257,25 +294,14 @@ fun SettingsScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                }
-            },
-            confirmButton = {
-                TextButton(
-                    onClick = {
-                        showAboutDialog = false
-                        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://sfweb.app"))
-                        context.startActivity(intent)
+
+                    Spacer(Modifier.height(12.dp))
+                    TextButton(onClick = { showAboutDialog = false }) {
+                        Text("Close")
                     }
-                ) {
-                    Text("Visit Website")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showAboutDialog = false }) {
-                    Text("Close")
                 }
             }
-        )
+        }
     }
 
     Scaffold(
@@ -315,11 +341,33 @@ fun SettingsScreen(
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
                             Icon(Icons.Filled.Message, contentDescription = null)
-                            Column(Modifier.weight(1f)) {
-                                Text("Set as Default SMS App")
-                                Text("Required to send/receive SMS & MMS fully")
-                            }
+                            Text(
+                                "Set as Default SMS App",
+                                style = MaterialTheme.typography.titleMedium
+                            )
                         }
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "SyncFlow works without being default:",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Text(
+                            "\u2022 Send & receive SMS\n\u2022 Sync messages to Mac & Web\n\u2022 View all conversations\n\u2022 Get notifications for new messages",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Setting as default adds:",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Text(
+                            "\u2022 MMS (picture messages)\n\u2022 Mark messages as read system-wide\n\u2022 Delete messages",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                        )
                         Spacer(Modifier.height(12.dp))
                         Button(
                             modifier = Modifier.fillMaxWidth(),
@@ -557,6 +605,28 @@ private fun SettingsItem(
         trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, null) },
         modifier = Modifier.clickable(onClick = onClick)
     )
+}
+
+@Composable
+private fun AboutFeatureItem(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    text: String
+) {
+    Row(
+        verticalAlignment = Alignment.Top,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(20.dp)
+        )
+        Text(
+            text,
+            style = MaterialTheme.typography.bodyMedium
+        )
+    }
 }
 
 // =============================================================================

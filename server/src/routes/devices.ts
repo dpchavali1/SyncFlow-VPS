@@ -143,6 +143,29 @@ router.delete('/:id', async (req: Request, res: Response) => {
   }
 });
 
+// GET /devices/signing-keys - Get all device signing keys for user
+router.get('/signing-keys', async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId!;
+
+    const devices = await query(
+      `SELECT id, device_signing_key FROM user_devices
+       WHERE user_id = $1 AND device_signing_key IS NOT NULL`,
+      [userId]
+    );
+
+    const keys: Record<string, string> = {};
+    for (const d of devices) {
+      keys[d.id] = d.device_signing_key;
+    }
+
+    res.json({ keys });
+  } catch (error) {
+    console.error('Get signing keys error:', error);
+    res.status(500).json({ error: 'Failed to get signing keys' });
+  }
+});
+
 // GET /devices/sims - Get SIM cards
 router.get('/sims', async (req: Request, res: Response) => {
   try {
@@ -183,6 +206,7 @@ router.post('/sims', async (req: Request, res: Response) => {
        (id, user_id, subscription_id, display_name, carrier_name, phone_number, is_default)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (id) DO UPDATE SET
+         user_id = EXCLUDED.user_id,
          display_name = EXCLUDED.display_name,
          carrier_name = EXCLUDED.carrier_name,
          phone_number = EXCLUDED.phone_number,

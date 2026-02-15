@@ -90,6 +90,7 @@ import {
   X,
   Check,
   Clock,
+  Globe,
 } from 'lucide-react'
 import { costMonitor } from '@/lib/monitoring'
 import { cacheManager } from '@/lib/cache'
@@ -157,14 +158,16 @@ interface CostRecommendation {
 }
 
 /**
- * Validates the admin session stored in localStorage
- * Checks for existence, authentication flag, and expiration
+ * Validates the admin session stored in sessionStorage
+ * Checks for existence, authentication flag, and expiration.
+ * Uses sessionStorage so the session is scoped to the tab and
+ * cleared automatically when the browser tab is closed.
  *
  * @returns true if session is valid and not expired
  */
 const isValidAdminSession = (): boolean => {
   try {
-    const sessionStr = localStorage.getItem('syncflow_admin_session')
+    const sessionStr = sessionStorage.getItem('syncflow_admin_session')
     if (!sessionStr) return false
 
     const session: AdminSession = JSON.parse(sessionStr)
@@ -172,13 +175,247 @@ const isValidAdminSession = (): boolean => {
 
     // Check if session has expired
     if (Date.now() > session.expiresAt) {
-      localStorage.removeItem('syncflow_admin_session')
+      sessionStorage.removeItem('syncflow_admin_session')
       return false
     }
     return true
   } catch {
     return false
   }
+}
+
+// ==================== Recharts lazy import ====================
+import dynamic from 'next/dynamic'
+
+const RechartsAreaChart = dynamic(() => import('recharts').then(m => {
+  const { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } = m
+  return { default: ({ data, lines }: { data: any[]; lines: { key: string; color: string; name: string }[] }) => (
+    <ResponsiveContainer width="100%" height={300}>
+      <AreaChart data={data} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+        <XAxis dataKey="label" tick={{ fill: '#9CA3AF', fontSize: 12 }} />
+        <YAxis tick={{ fill: '#9CA3AF', fontSize: 12 }} />
+        <Tooltip contentStyle={{ backgroundColor: '#1F2937', border: '1px solid #374151', borderRadius: 8, color: '#F3F4F6' }} />
+        {lines.map(l => <Area key={l.key} type="monotone" dataKey={l.key} stroke={l.color} fill={l.color} fillOpacity={0.15} name={l.name} />)}
+      </AreaChart>
+    </ResponsiveContainer>
+  )}
+}), { ssr: false, loading: () => <div className="h-[300px] bg-gray-800 rounded-lg animate-pulse" /> })
+
+const RechartsBarChart = dynamic(() => import('recharts').then(m => {
+  const { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } = m
+  return { default: ({ data, dataKey, color, layout }: { data: any[]; dataKey: string; color: string; layout?: 'horizontal' | 'vertical' }) => (
+    <ResponsiveContainer width="100%" height={Math.max(300, layout === 'vertical' ? data.length * 28 : 300)}>
+      <BarChart data={data} layout={layout || 'horizontal'} margin={{ top: 5, right: 20, bottom: 5, left: layout === 'vertical' ? 120 : 0 }}>
+        <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+        {layout === 'vertical' ? (
+          <>
+            <XAxis type="number" tick={{ fill: '#9CA3AF', fontSize: 12 }} />
+            <YAxis type="category" dataKey="name" tick={{ fill: '#9CA3AF', fontSize: 11 }} width={110} />
+          </>
+        ) : (
+          <>
+            <XAxis dataKey="name" tick={{ fill: '#9CA3AF', fontSize: 12 }} />
+            <YAxis tick={{ fill: '#9CA3AF', fontSize: 12 }} />
+          </>
+        )}
+        <Tooltip contentStyle={{ backgroundColor: '#1F2937', border: '1px solid #374151', borderRadius: 8, color: '#F3F4F6' }} />
+        <Bar dataKey={dataKey} fill={color} radius={[4, 4, 0, 0]} />
+      </BarChart>
+    </ResponsiveContainer>
+  )}
+}), { ssr: false, loading: () => <div className="h-[300px] bg-gray-800 rounded-lg animate-pulse" /> })
+
+const RechartsPieChart = dynamic(() => import('recharts').then(m => {
+  const { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } = m
+  const COLORS = ['#3B82F6', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#EC4899', '#06B6D4', '#84CC16']
+  return { default: ({ data }: { data: { name: string; value: number }[] }) => (
+    <ResponsiveContainer width="100%" height={280}>
+      <PieChart>
+        <Pie data={data} cx="50%" cy="50%" innerRadius={55} outerRadius={90} paddingAngle={3} dataKey="value" label={({ name, percent }: any) => `${name} ${((percent ?? 0) * 100).toFixed(0)}%`}>
+          {data.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+        </Pie>
+        <Tooltip contentStyle={{ backgroundColor: '#1F2937', border: '1px solid #374151', borderRadius: 8, color: '#F3F4F6' }} />
+      </PieChart>
+    </ResponsiveContainer>
+  )}
+}), { ssr: false, loading: () => <div className="h-[280px] bg-gray-800 rounded-lg animate-pulse" /> })
+
+// ==================== Site Analytics Tab Component ====================
+
+function SiteAnalyticsTab({ data, loading, days, onDaysChange, onRefresh }: {
+  data: any | null
+  loading: boolean
+  days: number
+  onDaysChange: (d: number) => void
+  onRefresh: () => void
+}) {
+  if (loading && !data) {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <Loader2 className="w-8 h-8 animate-spin text-blue-400" />
+        <span className="ml-3 text-gray-400">Loading site analytics...</span>
+      </div>
+    )
+  }
+
+  const dailyData = (data?.dailyTrend || []).map((d: any) => ({
+    ...d,
+    label: new Date(d.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+  }))
+
+  return (
+    <div className="space-y-6">
+      {/* Header with date range + refresh */}
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-bold flex items-center gap-2">
+          <Globe className="w-5 h-5 text-blue-400" />
+          Site Analytics
+        </h2>
+        <div className="flex items-center gap-3">
+          {[7, 30, 90, 365].map(d => (
+            <button
+              key={d}
+              onClick={() => onDaysChange(d)}
+              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                days === d ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
+              }`}
+            >
+              {d === 365 ? '1y' : `${d}d`}
+            </button>
+          ))}
+          <button onClick={onRefresh} disabled={loading} className="flex items-center gap-2 px-4 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 rounded-lg text-sm transition-colors">
+            {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      {/* Summary Cards */}
+      {data && (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="bg-gray-800 rounded-xl p-6">
+            <div className="flex items-center gap-2 mb-2">
+              <Eye className="w-5 h-5 text-blue-400" />
+              <span className="text-sm text-gray-400">Page Views</span>
+            </div>
+            <p className="text-3xl font-bold">{(data.totals?.pageViews || 0).toLocaleString()}</p>
+            <p className="text-xs text-gray-500 mt-1">Last {days} days</p>
+          </div>
+          <div className="bg-gray-800 rounded-xl p-6">
+            <div className="flex items-center gap-2 mb-2">
+              <Users className="w-5 h-5 text-green-400" />
+              <span className="text-sm text-gray-400">Unique Visitors</span>
+            </div>
+            <p className="text-3xl font-bold">{(data.totals?.uniqueVisitors || 0).toLocaleString()}</p>
+            <p className="text-xs text-gray-500 mt-1">Last {days} days</p>
+          </div>
+          <div className="bg-gray-800 rounded-xl p-6">
+            <div className="flex items-center gap-2 mb-2">
+              <TrendingDown className="w-5 h-5 text-purple-400" />
+              <span className="text-sm text-gray-400">Downloads</span>
+            </div>
+            <p className="text-3xl font-bold">{(data.totals?.downloads || 0).toLocaleString()}</p>
+            <p className="text-xs text-gray-500 mt-1">Last {days} days</p>
+          </div>
+        </div>
+      )}
+
+      {/* Daily Trend Area Chart */}
+      {dailyData.length > 0 && (
+        <div className="bg-gray-800 rounded-xl p-6">
+          <h3 className="text-lg font-semibold mb-4">Daily Visitors & Page Views</h3>
+          <RechartsAreaChart
+            data={dailyData}
+            lines={[
+              { key: 'pageViews', color: '#3B82F6', name: 'Page Views' },
+              { key: 'uniqueVisitors', color: '#10B981', name: 'Unique Visitors' },
+            ]}
+          />
+        </div>
+      )}
+
+      {/* Top Pages + Top Referrers */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {(data?.topPages || []).length > 0 && (
+          <div className="bg-gray-800 rounded-xl p-6">
+            <h3 className="text-lg font-semibold mb-4">Top Pages</h3>
+            <RechartsBarChart
+              data={(data.topPages || []).slice(0, 10).map((p: any) => ({ name: p.path, views: p.views }))}
+              dataKey="views"
+              color="#3B82F6"
+              layout="vertical"
+            />
+          </div>
+        )}
+        {(data?.topReferrers || []).length > 0 && (
+          <div className="bg-gray-800 rounded-xl p-6">
+            <h3 className="text-lg font-semibold mb-4">Top Referrers</h3>
+            <RechartsBarChart
+              data={(data.topReferrers || []).slice(0, 10).map((r: any) => {
+                let name = r.referrer
+                try { name = new URL(r.referrer).hostname } catch {}
+                return { name, count: r.count }
+              })}
+              dataKey="count"
+              color="#8B5CF6"
+              layout="vertical"
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Downloads by Platform + Device Type + OS + Browser */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        {(data?.downloadsByPlatform || []).length > 0 && (
+          <div className="bg-gray-800 rounded-xl p-6">
+            <h3 className="text-sm font-semibold mb-3 text-gray-300">Downloads by Platform</h3>
+            <RechartsPieChart data={(data.downloadsByPlatform || []).map((d: any) => ({ name: d.platform, value: d.count }))} />
+          </div>
+        )}
+        {(data?.deviceBreakdown || []).length > 0 && (
+          <div className="bg-gray-800 rounded-xl p-6">
+            <h3 className="text-sm font-semibold mb-3 text-gray-300">Device Type</h3>
+            <RechartsPieChart data={(data.deviceBreakdown || []).map((d: any) => ({ name: d.type, value: d.count }))} />
+          </div>
+        )}
+        {(data?.osBreakdown || []).length > 0 && (
+          <div className="bg-gray-800 rounded-xl p-6">
+            <h3 className="text-sm font-semibold mb-3 text-gray-300">Operating System</h3>
+            <RechartsPieChart data={(data.osBreakdown || []).map((o: any) => ({ name: o.name, value: o.count }))} />
+          </div>
+        )}
+        {(data?.browserBreakdown || []).length > 0 && (
+          <div className="bg-gray-800 rounded-xl p-6">
+            <h3 className="text-sm font-semibold mb-3 text-gray-300">Browser</h3>
+            <RechartsPieChart data={(data.browserBreakdown || []).map((b: any) => ({ name: b.name, value: b.count }))} />
+          </div>
+        )}
+      </div>
+
+      {/* Country Breakdown */}
+      {(data?.countryBreakdown || []).length > 0 && (
+        <div className="bg-gray-800 rounded-xl p-6">
+          <h3 className="text-lg font-semibold mb-4">Top Countries</h3>
+          <RechartsBarChart
+            data={(data.countryBreakdown || []).slice(0, 20).map((c: any) => ({ name: c.name || c.code, count: c.count }))}
+            dataKey="count"
+            color="#06B6D4"
+            layout="vertical"
+          />
+        </div>
+      )}
+
+      {/* Empty state */}
+      {data && data.totals?.pageViews === 0 && (
+        <div className="bg-gray-800 rounded-xl p-12 text-center">
+          <Globe className="w-12 h-12 text-gray-600 mx-auto mb-4" />
+          <h3 className="text-lg font-semibold text-gray-400 mb-2">No Analytics Data Yet</h3>
+          <p className="text-gray-500">Visit the website to start generating analytics data. Events are tracked anonymously with no cookies.</p>
+        </div>
+      )}
+    </div>
+  )
 }
 
 /**
@@ -224,7 +461,7 @@ export default function AdminCleanupPage() {
   // ============================================
   // NAVIGATION AND DATA STATE
   // ============================================
-  const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'deletions' | 'data' | 'costs' | 'storage' | 'crashes' | 'testing' | 'monitoring' | 'database' | 'lookup' | 'live' | 'logs'>('overview')
+  const [activeTab, setActiveTab] = useState<'overview' | 'users' | 'deletions' | 'data' | 'costs' | 'storage' | 'crashes' | 'testing' | 'monitoring' | 'database' | 'lookup' | 'live' | 'logs' | 'site-analytics'>('overview')
   const [systemOverview, setSystemOverview] = useState<SystemOverview | null>(null)
   const [detailedCleanupOverview, setDetailedCleanupOverview] = useState<any | null>(null)
   const [detailedUsers, setDetailedUsers] = useState<DetailedUser[]>([])
@@ -241,6 +478,13 @@ export default function AdminCleanupPage() {
   const [usersError, setUsersError] = useState<string | null>(null)
   const [pendingDeletions, setPendingDeletions] = useState<any[]>([])
   const [pendingDeletionsLoading, setPendingDeletionsLoading] = useState(false)
+
+  // ============================================
+  // SITE ANALYTICS STATE
+  // ============================================
+  const [siteAnalytics, setSiteAnalytics] = useState<any | null>(null)
+  const [siteAnalyticsLoading, setSiteAnalyticsLoading] = useState(false)
+  const [siteAnalyticsDays, setSiteAnalyticsDays] = useState(30)
 
   /**
    * Handler for user filter dropdown changes
@@ -771,6 +1015,19 @@ export default function AdminCleanupPage() {
       console.error('Failed to load pending deletions:', error)
     } finally {
       setPendingDeletionsLoading(false)
+    }
+  }
+
+  const loadSiteAnalytics = async (days?: number) => {
+    const d = days ?? siteAnalyticsDays
+    setSiteAnalyticsLoading(true)
+    try {
+      const data = await vpsService.getSiteAnalyticsOverview(d)
+      setSiteAnalytics(data)
+    } catch (error) {
+      console.error('Failed to load site analytics:', error)
+    } finally {
+      setSiteAnalyticsLoading(false)
     }
   }
 
@@ -1830,10 +2087,10 @@ export default function AdminCleanupPage() {
 
   /**
    * Handles admin logout
-   * Clears localStorage session and redirects to login page
+   * Clears sessionStorage session and redirects to login page
    */
   const handleLogout = () => {
-    localStorage.removeItem('syncflow_admin_session')
+    sessionStorage.removeItem('syncflow_admin_session')
     localStorage.removeItem('syncflow_user_id')
     router.push('/admin/login')
   }
@@ -1860,7 +2117,7 @@ export default function AdminCleanupPage() {
     }
 
     // VPS mode: skip Firebase auth, use localStorage session directly
-    const isVPS = !!process.env.NEXT_PUBLIC_VPS_URL || !!localStorage.getItem('vps_access_token')
+    const isVPS = !!process.env.NEXT_PUBLIC_VPS_URL || !!localStorage.getItem('vps_user_id') || true
     if (isVPS) {
       console.log('AdminCleanupPage: VPS mode - using session auth')
       const storedUserId = localStorage.getItem('syncflow_user_id') || localStorage.getItem('vps_user_id') || 'admin'
@@ -1885,7 +2142,7 @@ export default function AdminCleanupPage() {
     console.log('AdminCleanupPage: No VPS session, redirecting to login')
     setIsLoading(false)
     setIsAuthorized(false)
-    localStorage.removeItem('syncflow_admin_session')
+    sessionStorage.removeItem('syncflow_admin_session')
     router.push('/admin/login')
   }, [router])
 
@@ -1983,6 +2240,7 @@ export default function AdminCleanupPage() {
           { id: 'costs', label: 'Costs & Analytics', icon: DollarSign },
           { id: 'database', label: 'Database', icon: HardDrive },
           { id: 'monitoring', label: 'Performance Monitor', icon: LineChart },
+          { id: 'site-analytics', label: 'Site Analytics', icon: Globe },
           { id: 'testing', label: 'Testing', icon: Zap },
         ].map(({ id, label, icon: Icon }) => (
           <button
@@ -2001,6 +2259,7 @@ export default function AdminCleanupPage() {
               if (id === 'crashes' && crashReports.length === 0) loadCrashReports()
               if (id === 'data' && !e2eeHealth) vpsService.getAdminE2EEHealth().then(setE2eeHealth).catch(() => {})
               if (id === 'database' && dbTables.length === 0) { loadDbTables(); loadDbHealth() }
+              if (id === 'site-analytics' && !siteAnalytics) loadSiteAnalytics()
             }}
             className={`flex-shrink-0 flex items-center gap-2 px-4 py-3 border-b-2 font-medium text-sm transition-colors whitespace-nowrap ${
               activeTab === id
@@ -4804,6 +5063,17 @@ export default function AdminCleanupPage() {
               </div>
             )}
           </div>
+        )}
+
+        {/* ========== SITE ANALYTICS TAB ========== */}
+        {activeTab === 'site-analytics' && (
+          <SiteAnalyticsTab
+            data={siteAnalytics}
+            loading={siteAnalyticsLoading}
+            days={siteAnalyticsDays}
+            onDaysChange={(d: number) => { setSiteAnalyticsDays(d); loadSiteAnalytics(d) }}
+            onRefresh={() => loadSiteAnalytics()}
+          />
         )}
 
         {activeTab === 'testing' && (

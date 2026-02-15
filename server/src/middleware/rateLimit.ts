@@ -77,6 +77,13 @@ export const apiRateLimit = rateLimit({
   keyGenerator: (req) => req.userId || req.ip || 'unknown',
 });
 
+// Higher limit for polling endpoints (e.g., pairing status polled every 2s)
+export const pollingRateLimit = rateLimit({
+  windowMs: 60000,
+  maxRequests: 60,
+  keyPrefix: 'rl:poll',
+});
+
 export const adminRateLimit = rateLimit({
   windowMs: 60000,
   maxRequests: 50,

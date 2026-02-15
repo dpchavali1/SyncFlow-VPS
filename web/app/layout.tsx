@@ -1,10 +1,12 @@
 import type { Metadata, Viewport } from 'next'
 import { Inter } from 'next/font/google'
 import Script from 'next/script'
+import { Suspense } from 'react'
 import { ServiceWorkerRegistration } from '../components/ServiceWorkerRegistration'
 import { PerformanceProvider, PerformanceMonitor } from '../components/PerformanceComponents'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import SupportChat from '../components/SupportChat'
+import AnalyticsTracker from '../components/AnalyticsTracker'
 import './globals.css'
 
 const inter = Inter({ subsets: ['latin'] })
@@ -17,9 +19,11 @@ export const metadata: Metadata = {
   description: 'Access your phone messages from your desktop',
   manifest: '/manifest.json',
   appleWebApp: {
-    capable: true,
     statusBarStyle: 'default',
     title: 'SyncFlow',
+  },
+  other: {
+    'mobile-web-app-capable': 'yes',
   },
 }
 
@@ -45,6 +49,7 @@ export default function RootLayout({
         <ErrorBoundary>
           <PerformanceProvider>
             <ServiceWorkerRegistration />
+            <Suspense><AnalyticsTracker /></Suspense>
             {children}
             <PerformanceMonitor />
           </PerformanceProvider>

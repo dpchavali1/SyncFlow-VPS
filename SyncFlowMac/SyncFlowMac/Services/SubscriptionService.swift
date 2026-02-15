@@ -89,6 +89,7 @@ class SubscriptionService: ObservableObject {
     @Published var subscriptionStatus: SubscriptionStatus = .notSubscribed
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
+    @Published var hasStripeSubscription: Bool = false
 
     private var updateListenerTask: Task<Void, Error>?
     private let trialStartKey = "syncflow_trial_start_date"
@@ -145,7 +146,12 @@ class SubscriptionService: ObservableObject {
 
     /// Returns true if user has an active paid subscription (not trial)
     var isPremium: Bool {
-        // First check StoreKit subscription
+        // First check Stripe subscription from server
+        if hasStripeSubscription {
+            return true
+        }
+
+        // Then check StoreKit subscription
         switch subscriptionStatus {
         case .subscribed, .threeYear:
             return true
@@ -242,6 +248,9 @@ class SubscriptionService: ObservableObject {
     // MARK: - Update Status
 
     func updateSubscriptionStatus() async {
+        // Check server for Stripe subscription
+        await checkServerSubscription()
+
         // Check local data for admin-assigned plan (Testing tab)
         await syncUsagePlan()
 
@@ -338,6 +347,41 @@ class SubscriptionService: ObservableObject {
         return subscriptionStatus.isActive
     }
 
+    /// Checks the VPS server for an active subscription (Stripe or admin-assigned).
+    /// Sets hasStripeSubscription and updates subscriptionStatus if found.
+    private func checkServerSubscription() async {
+        guard VPSService.shared.isAuthenticated else { return }
+
+        do {
+            let status = try await VPSService.shared.getSubscriptionStatus()
+            let isStripe = status.hasStripeCustomer ?? false
+            let isPaid = status.plan != "free" && status.status == "active"
+
+            self.hasStripeSubscription = isStripe && isPaid
+
+            // Update plan status for ANY active paid plan (Stripe or admin-assigned)
+            if isPaid {
+                let planName = status.plan
+                let expiresAt = status.expiresAt ?? 0
+                PreferencesService.shared.setUserPlan(planName, expiresAt: expiresAt)
+
+                if planName.lowercased() == "3year" || planName.lowercased() == "lifetime" {
+                    let expiryDate = expiresAt > 0 ? Date(timeIntervalSince1970: TimeInterval(expiresAt) / 1000) : nil
+                    self.subscriptionStatus = .threeYear(expiresAt: expiryDate)
+                } else {
+                    let displayName = planName.lowercased() == "yearly" ? "Yearly" :
+                                      planName.lowercased() == "monthly" ? "Monthly" : planName
+                    let expiryDate = expiresAt > 0 ? Date(timeIntervalSince1970: TimeInterval(expiresAt) / 1000) : nil
+                    self.subscriptionStatus = .subscribed(plan: displayName, expiresAt: expiryDate)
+                }
+            }
+        } catch {
+            #if DEBUG
+            print("[Subscription] Server subscription check failed: \(error.localizedDescription)")
+            #endif
+        }
+    }
+
     /// Checks local PreferencesService data for admin-assigned plans.
     /// Uses only locally cached plan data.
     private func syncUsagePlan() async {
@@ -353,11 +397,11 @@ class SubscriptionService: ObservableObject {
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
 
         // If local data has a valid paid plan that hasn't expired, use it
-        if ["monthly", "yearly", "lifetime", "3year"].contains(plan.lowercased()) {
-            if plan.lowercased() == "lifetime" || plan.lowercased() == "3year" ||
+        if ["monthly", "yearly", "3year"].contains(plan.lowercased()) {
+            if plan.lowercased() == "3year" ||
                (planExpiresAt > 0 && planExpiresAt > nowMs) {
                 // Valid paid plan from local data
-                if plan.lowercased() == "lifetime" || plan.lowercased() == "3year" {
+                if plan.lowercased() == "3year" {
                     let expiryDate = planExpiresAt > 0 ? Date(timeIntervalSince1970: TimeInterval(planExpiresAt) / 1000) : nil
                     self.subscriptionStatus = .threeYear(expiresAt: expiryDate)
                 } else {

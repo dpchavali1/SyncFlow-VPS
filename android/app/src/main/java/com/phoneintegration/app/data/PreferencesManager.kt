@@ -100,6 +100,14 @@ class PreferencesManager(context: Context) {
     var notificationMirrorEnabled = mutableStateOf(prefs.getBoolean("notification_mirror_enabled", false))
         private set
 
+    // Photo Sync Setting (default OFF — user must opt-in)
+    var photoSyncEnabled = mutableStateOf(prefs.getBoolean("photo_sync_enabled", false))
+        private set
+
+    // Photo Sync Limit (how many recent photos to keep synced, default 20)
+    var photoSyncLimit = mutableStateOf(prefs.getInt("photo_sync_limit", 20))
+        private set
+
     // Recovery Backup Settings (enabled by default for seamless account recovery)
     var recoveryBackupEnabled = mutableStateOf(prefs.getBoolean("recovery_backup_enabled", true))
         private set
@@ -330,6 +338,19 @@ class PreferencesManager(context: Context) {
         prefs.edit().putBoolean("notification_mirror_enabled", enabled).apply()
         android.util.Log.d("PreferencesManager", "Notification mirror enabled set to: $enabled")
         autoBackupSyncSettings()
+    }
+
+    fun setPhotoSyncEnabled(enabled: Boolean) {
+        photoSyncEnabled.value = enabled
+        prefs.edit().putBoolean("photo_sync_enabled", enabled).apply()
+        android.util.Log.d("PreferencesManager", "Photo sync enabled set to: $enabled")
+    }
+
+    fun setPhotoSyncLimit(limit: Int) {
+        val clamped = limit.coerceIn(5, 100)
+        photoSyncLimit.value = clamped
+        prefs.edit().putInt("photo_sync_limit", clamped).apply()
+        android.util.Log.d("PreferencesManager", "Photo sync limit set to: $clamped")
     }
 
     fun setRecoveryBackupEnabled(context: Context, enabled: Boolean) {

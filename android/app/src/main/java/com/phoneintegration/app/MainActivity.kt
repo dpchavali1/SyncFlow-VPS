@@ -714,6 +714,11 @@ class MainActivity : ComponentActivity() {
                 val unifiedIdentityManager = com.phoneintegration.app.auth.UnifiedIdentityManager.getInstance(appContext)
                 val userId = unifiedIdentityManager.getUnifiedUserId()
                 android.util.Log.d("MainActivity", "VPS authenticated on startup: userId=$userId")
+
+                // Refresh plan from server so isPaidUser() is accurate before any screen loads
+                try {
+                    com.phoneintegration.app.usage.UsageTracker(appContext).getUsageStats("")
+                } catch (_: Exception) { }
             } catch (e: Exception) {
                 android.util.Log.e("MainActivity", "VPS startup auth failed: ${e.message}")
             }
@@ -968,6 +973,10 @@ class MainActivity : ComponentActivity() {
                     incomingCallId = callId
                     incomingCallerName = callerName
                     incomingIsVideo = isVideo
+                    // Clear extras to prevent re-processing on activity recreation
+                    intent.removeExtra("incoming_syncflow_call_id")
+                    intent.removeExtra("incoming_syncflow_call_name")
+                    intent.removeExtra("incoming_syncflow_call_video")
                 }
 
                 // Check for active call (already answered from notification)
@@ -975,6 +984,11 @@ class MainActivity : ComponentActivity() {
                 if (isActiveCall) {
                     android.util.Log.d("MainActivity", "Active SyncFlow call - showing call screen")
                     showActiveCallScreen = true
+                    // Clear extras to prevent re-processing on activity recreation
+                    intent.removeExtra("active_syncflow_call")
+                    intent.removeExtra("active_syncflow_call_id")
+                    intent.removeExtra("active_syncflow_call_name")
+                    intent.removeExtra("active_syncflow_call_video")
                 }
             }
 
@@ -1292,6 +1306,10 @@ class MainActivity : ComponentActivity() {
             _pendingIncomingCallName = callerName
             _pendingIncomingCallVideo = isVideo
             _incomingCallTrigger.value++
+            // Clear extras to prevent re-processing
+            intent.removeExtra("incoming_syncflow_call_id")
+            intent.removeExtra("incoming_syncflow_call_name")
+            intent.removeExtra("incoming_syncflow_call_video")
         }
     }
 

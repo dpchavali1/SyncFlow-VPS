@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { query, transaction } from '../services/database';
+import { query, queryOne, transaction } from '../services/database';
 import { authenticate } from '../middleware/auth';
 import { apiRateLimit } from '../middleware/rateLimit';
 import { broadcastToUser, broadcastToDevice, broadcastToAllDevicesExcept, getConnectedDeviceCount } from '../services/websocket';
@@ -117,6 +117,7 @@ router.post('/sync', async (req: Request, res: Response) => {
            (id, user_id, phone_number, contact_name, call_type, call_date, duration, sim_subscription_id)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            ON CONFLICT (id) DO UPDATE SET
+             user_id = EXCLUDED.user_id,
              contact_name = EXCLUDED.contact_name,
              duration = EXCLUDED.duration`,
           [
@@ -136,6 +137,14 @@ router.post('/sync', async (req: Request, res: Response) => {
       }
     }
 
+    // Notify other devices that call history is available
+    if (synced > 0) {
+      broadcastToUser(userId, 'calls', {
+        type: 'calls_synced',
+        data: { synced, total: body.calls.length },
+      });
+    }
+
     res.json({ synced, skipped, total: body.calls.length });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -144,6 +153,21 @@ router.post('/sync', async (req: Request, res: Response) => {
     }
     console.error('Sync calls error:', error);
     res.status(500).json({ error: 'Failed to sync call history' });
+  }
+});
+
+// POST /calls/request-sync - Ask Android to push call history (called by Mac/Web)
+router.post('/request-sync', async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId!;
+    broadcastToUser(userId, 'calls', {
+      type: 'request_sync',
+      data: { categories: ['calls'] },
+    });
+    res.json({ success: true, message: 'Sync request sent to Android device' });
+  } catch (error) {
+    console.error('Request call sync error:', error);
+    res.status(500).json({ error: 'Failed to request sync' });
   }
 });
 
@@ -341,12 +365,25 @@ router.get('/my-phone', async (req: Request, res: Response) => {
 });
 
 // GET /calls/lookup/:phoneNumber - Look up user by phone number (for video calling)
+// Only returns a result if the phone number exists in the caller's synced contacts
 router.get('/lookup/:phoneNumber', async (req: Request, res: Response) => {
   try {
     const { phoneNumber } = req.params;
+    const userId = req.userId!;
 
     // Normalize to E.164 format for lookup
     const normalizedPhone = normalizePhoneNumber(phoneNumber);
+
+    // Security: verify the caller has this number in their contacts to prevent enumeration
+    const isInContacts = await queryOne(
+      `SELECT 1 FROM user_contacts WHERE user_id = $1 AND (phone = $2 OR phone LIKE '%' || RIGHT($2, 10) || '%')`,
+      [userId, normalizedPhone]
+    );
+
+    if (!isInContacts) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
 
     const result = await query(
       `SELECT user_id FROM user_phone_registry WHERE phone_number = $1`,
@@ -381,15 +418,31 @@ router.post('/active', async (req: Request, res: Response) => {
       return;
     }
 
+    const normalizedPhone = normalizePhoneNumber(phoneNumber);
+
     await query(
       `INSERT INTO user_active_calls
        (id, user_id, phone_number, contact_name, call_state, call_type, started_at, updated_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
        ON CONFLICT (id) DO UPDATE SET
+         user_id = EXCLUDED.user_id,
          call_state = EXCLUDED.call_state,
          updated_at = NOW()`,
-      [id, userId, normalizePhoneNumber(phoneNumber), contactName, state, callType, timestamp || Date.now()]
+      [id, userId, normalizedPhone, contactName, state, callType, timestamp || Date.now()]
     );
+
+    // Broadcast to connected Mac/Web clients so they can show call notifications
+    broadcastToUser(userId, 'calls', {
+      type: 'active_call',
+      data: {
+        id,
+        phoneNumber: normalizedPhone,
+        contactName: contactName || '',
+        state,
+        callType: callType || 'incoming',
+        timestamp: timestamp || Date.now(),
+      },
+    });
 
     res.json({ success: true });
   } catch (error) {
@@ -438,11 +491,30 @@ router.put('/active/:id/state', async (req: Request, res: Response) => {
       return;
     }
 
+    // Get existing call info before update (for broadcast)
+    const existingCall = await queryOne(
+      `SELECT phone_number, contact_name, call_type FROM user_active_calls WHERE id = $1 AND user_id = $2`,
+      [id, userId]
+    );
+
     await query(
       `UPDATE user_active_calls SET call_state = $1, updated_at = NOW()
        WHERE id = $2 AND user_id = $3`,
       [state, id, userId]
     );
+
+    // Broadcast state change so Mac/Web can update (e.g. dismiss ringing notification)
+    broadcastToUser(userId, 'calls', {
+      type: 'active_call',
+      data: {
+        id,
+        phoneNumber: existingCall?.phone_number || '',
+        contactName: existingCall?.contact_name || '',
+        state,
+        callType: existingCall?.call_type || 'incoming',
+        timestamp: Date.now(),
+      },
+    });
 
     res.json({ success: true });
   } catch (error) {
@@ -457,10 +529,29 @@ router.delete('/active/:id', async (req: Request, res: Response) => {
     const { id } = req.params;
     const userId = req.userId!;
 
+    // Get call info before deleting (for broadcast)
+    const existingCall = await queryOne(
+      `SELECT phone_number, contact_name, call_type FROM user_active_calls WHERE id = $1 AND user_id = $2`,
+      [id, userId]
+    );
+
     await query(
       `DELETE FROM user_active_calls WHERE id = $1 AND user_id = $2`,
       [id, userId]
     );
+
+    // Broadcast ended state so Mac/Web dismisses notifications
+    broadcastToUser(userId, 'calls', {
+      type: 'active_call',
+      data: {
+        id,
+        phoneNumber: existingCall?.phone_number || '',
+        contactName: existingCall?.contact_name || '',
+        state: 'ended',
+        callType: existingCall?.call_type || 'incoming',
+        timestamp: Date.now(),
+      },
+    });
 
     res.json({ success: true });
   } catch (error) {
@@ -518,11 +609,26 @@ router.post('/commands', async (req: Request, res: Response) => {
 
     const commandId = `cmd_${Date.now()}_${Math.random().toString(36).substring(7)}`;
 
+    const timestamp = Date.now();
     await query(
       `INSERT INTO user_call_commands (id, user_id, call_id, command, phone_number, timestamp)
        VALUES ($1, $2, $3, $4, $5, $6)`,
-      [commandId, userId, callId, command, phoneNumber, Date.now()]
+      [commandId, userId, callId, command, phoneNumber, timestamp]
     );
+
+    // Broadcast to Android via WebSocket so it can act immediately
+    // Note: Android wsGson uses LOWER_CASE_WITH_UNDERSCORES naming policy
+    broadcastToUser(userId, 'calls', {
+      type: 'call_command',
+      data: {
+        id: commandId,
+        call_id: callId,
+        command,
+        phone_number: phoneNumber,
+        timestamp,
+        processed: false,
+      },
+    });
 
     res.json({ id: commandId, success: true });
   } catch (error) {
@@ -618,6 +724,14 @@ router.get('/syncflow/pending', async (req: Request, res: Response) => {
     const userId = req.userId!;
     const sixtySecondsAgo = Date.now() - 60_000;
 
+    // Auto-expire stale ringing calls older than 90 seconds to prevent ghost notifications
+    const ninetySecondsAgo = Date.now() - 90_000;
+    await query(
+      `UPDATE user_syncflow_calls SET status = 'missed', ended_at = $1
+       WHERE status = 'ringing' AND started_at < $2`,
+      [Date.now(), ninetySecondsAgo]
+    );
+
     const calls = await query(
       `SELECT c.id, c.caller_id, c.callee_id, c.status, c.started_at,
               u.display_name AS caller_name, u.phone AS caller_phone
@@ -661,14 +775,11 @@ router.post('/syncflow', async (req: Request, res: Response) => {
     let calleeUserId: string | null = null;
     const normalizedCalleeId = normalizePhoneNumber(body.calleeId);
 
-    console.log(`[CALL] Creating call: caller=${userId} (device=${callerDeviceId}), callee=${body.calleeId} (normalized=${normalizedCalleeId}), type=${body.callType}`);
-
     // Try phone_uid_mapping first (exact E.164 match)
     const phoneMapping = await query(
       `SELECT uid FROM phone_uid_mapping WHERE phone_number = $1`,
       [normalizedCalleeId]
     );
-    console.log(`[CALL] phone_uid_mapping lookup for '${normalizedCalleeId}': ${phoneMapping.length} results`);
     if (phoneMapping.length > 0) {
       calleeUserId = phoneMapping[0].uid;
     }
@@ -679,13 +790,10 @@ router.post('/syncflow', async (req: Request, res: Response) => {
         `SELECT user_id FROM user_phone_registry WHERE phone_number = $1`,
         [normalizedCalleeId]
       );
-      console.log(`[CALL] user_phone_registry lookup for '${normalizedCalleeId}': ${phoneRegistry.length} results`);
       if (phoneRegistry.length > 0) {
         calleeUserId = phoneRegistry[0].user_id;
       }
     }
-
-    console.log(`[CALL] Resolved calleeUserId=${calleeUserId}, callerUserId=${userId}, same=${calleeUserId === userId}`);
 
     // Insert call record with resolved callee_user_id for cross-user signaling
     await query(
@@ -710,15 +818,12 @@ router.post('/syncflow', async (req: Request, res: Response) => {
 
     if (calleeUserId && calleeUserId !== userId) {
       // Cross-user call: broadcast to callee's devices
-      console.log(`[CALL] Cross-user call: broadcasting to callee ${calleeUserId}`);
       broadcastToUser(calleeUserId, 'calls', callNotification);
     } else if (calleeUserId === null) {
       // Callee not found - still broadcast to same user's other devices as fallback
-      console.log(`[CALL] Callee not found in DB, falling back to same-user broadcast`);
       broadcastToAllDevicesExcept(userId, callerDeviceId, 'calls', callNotification);
     } else {
-      // Same-user call (Mac → Android): broadcast to all except caller device
-      console.log(`[CALL] Same-user call: broadcasting to all devices except ${callerDeviceId}`);
+      // Same-user call (Mac -> Android): broadcast to all except caller device
       broadcastToAllDevicesExcept(userId, callerDeviceId, 'calls', callNotification);
     }
 
@@ -743,7 +848,6 @@ router.post('/syncflow', async (req: Request, res: Response) => {
     // Return diagnostics to help debug notification delivery
     const calleeDeviceCount = calleeUserId ? getConnectedDeviceCount(calleeUserId) : 0;
     const callerDeviceCount = getConnectedDeviceCount(userId);
-    console.log(`[CALL] Diagnostics: calleeUserId=${calleeUserId}, calleeWsDevices=${calleeDeviceCount}, callerWsDevices=${callerDeviceCount}, fcmInitialized=${isFCMInitialized()}, fcmSent=${fcmSent}`);
 
     res.json({
       callId,

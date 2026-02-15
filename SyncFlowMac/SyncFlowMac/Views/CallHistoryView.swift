@@ -334,6 +334,32 @@ class CallHistoryStore: ObservableObject {
             }
             .store(in: &vpsCancellables)
 
+        // Listen for bulk calls_synced event (triggers refetch after Android initial sync)
+        VPSService.shared.callsSynced
+            .sink { [weak self] count in
+                guard let self = self else { return }
+                #if DEBUG
+                print("[CallHistoryStore VPS] Received calls_synced event (\(count) calls), refetching...")
+                #endif
+                Task {
+                    do {
+                        let response = try await VPSService.shared.getCallHistory(limit: 200)
+                        let fetchedCalls = response.calls.map { self.convertVPSCall($0) }
+                        await MainActor.run {
+                            self.calls = fetchedCalls.sorted { $0.callDate > $1.callDate }
+                            #if DEBUG
+                            print("[CallHistoryStore VPS] Refetched \(fetchedCalls.count) calls after sync event")
+                            #endif
+                        }
+                    } catch {
+                        #if DEBUG
+                        print("[CallHistoryStore VPS] Error refetching calls after sync: \(error.localizedDescription)")
+                        #endif
+                    }
+                }
+            }
+            .store(in: &vpsCancellables)
+
         // Fetch initial call history from VPS REST API
         Task {
             do {
@@ -343,10 +369,40 @@ class CallHistoryStore: ObservableObject {
                 await MainActor.run {
                     self.calls = fetchedCalls.sorted { $0.callDate > $1.callDate }
                     self.isLoading = false
+                    #if DEBUG
                     print("[CallHistoryStore VPS] Loaded \(fetchedCalls.count) calls")
+                    #endif
+                }
+
+                // If empty, ask Android to push call history then retry
+                if fetchedCalls.isEmpty {
+                    #if DEBUG
+                    print("[CallHistoryStore VPS] No calls found, requesting sync from Android...")
+                    #endif
+                    try? await VPSService.shared.requestCallsSync()
+                    // Wait for Android to sync, then retry multiple times
+                    for attempt in 1...3 {
+                        try? await Task.sleep(nanoseconds: UInt64(attempt) * 10_000_000_000) // 10s, 20s, 30s
+                        let retryResponse = try await VPSService.shared.getCallHistory(limit: 200)
+                        let retryCalls = retryResponse.calls.map { self.convertVPSCall($0) }
+                        if !retryCalls.isEmpty {
+                            await MainActor.run {
+                                self.calls = retryCalls.sorted { $0.callDate > $1.callDate }
+                                #if DEBUG
+                                print("[CallHistoryStore VPS] Retry #\(attempt) loaded \(retryCalls.count) calls")
+                                #endif
+                            }
+                            break
+                        }
+                        #if DEBUG
+                        print("[CallHistoryStore VPS] Retry #\(attempt) still empty")
+                        #endif
+                    }
                 }
             } catch {
+                #if DEBUG
                 print("[CallHistoryStore VPS] Error loading calls: \(error.localizedDescription)")
+                #endif
                 await MainActor.run {
                     self.isLoading = false
                 }

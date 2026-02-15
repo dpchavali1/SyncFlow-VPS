@@ -203,7 +203,8 @@ class FilterUpdateManager(private val context: Context) {
 
             // Fall back to bundled patterns (already loaded by SpamPatternMatcher)
             true
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to update spam patterns, using existing/bundled patterns", e)
             false
         }
     }

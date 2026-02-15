@@ -149,8 +149,8 @@ export default function TermsPage() {
               For questions about these Terms of Service, contact us at:
             </p>
             <ul className="list-none text-slate-700 dark:text-slate-300 space-y-2">
-              <li><strong>Email:</strong> <a href="mailto:legal@syncflow.app" className="text-blue-600 hover:underline">legal@syncflow.app</a></li>
-              <li><strong>Support:</strong> <a href="mailto:support@syncflow.app" className="text-blue-600 hover:underline">support@syncflow.app</a></li>
+              <li><strong>Email:</strong> <a href="mailto:syncflow.contact@gmail.com" className="text-blue-600 hover:underline">syncflow.contact@gmail.com</a></li>
+              <li><strong>Support:</strong> <a href="mailto:syncflow.contact@gmail.com" className="text-blue-600 hover:underline">syncflow.contact@gmail.com</a></li>
             </ul>
           </section>
         </div>

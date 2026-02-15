@@ -1,8 +1,24 @@
 /**
- * VPS Service
+ * VPSService - Central VPS Communication Layer
  *
- * This service handles all communication with the VPS server.
- * It provides REST API and WebSocket connectivity.
+ * This singleton service manages all communication with the SyncFlow VPS server,
+ * providing both REST API and WebSocket connectivity. It serves as the network
+ * backbone for the entire macOS application.
+ *
+ * Responsibilities:
+ * - Token-based authentication (access + refresh tokens stored in Keychain)
+ * - REST API calls for messages, contacts, calls, files, photos, and device management
+ * - Persistent WebSocket connection for real-time push events
+ * - QR-code based device pairing flow
+ * - E2EE public key exchange coordination via VPS relay
+ * - Automatic token refresh on 401 responses, rate-limit retry with backoff
+ *
+ * WebSocket Architecture:
+ * - Connects with access token as query parameter
+ * - Subscribes to per-channel events (messages, contacts, calls, devices, etc.)
+ * - Reconnects with exponential backoff (2s, 4s, 8s, 16s, 30s cap)
+ * - Falls back from wss:// to ws:// on TLS failures (self-signed certs)
+ * - Publishes events via Combine PassthroughSubjects consumed by stores/views
  */
 
 import Foundation
@@ -347,11 +363,45 @@ public struct VPSUsageInfo: Codable {
     let messageCount: Int64?
     let contactCount: Int64?
     let lastUpdatedAt: Int64?
+    let monthlyUploadLimit: Int64?
+    let storageLimit: Int64?
+    let maxFileSize: Int64?
+    let maxDevices: Int?
+    let monthlyResetDate: Int64?
 }
 
 public struct VPSUsageResponse: Codable {
     let success: Bool?
     let usage: VPSUsageInfo
+}
+
+// MARK: - Stripe Billing Response Models
+
+public struct VPSCheckoutResponse: Codable {
+    let url: String
+}
+
+public struct VPSPortalResponse: Codable {
+    let url: String
+}
+
+public struct VPSCancelResponse: Codable {
+    let success: Bool?
+    let message: String?
+}
+
+public struct VPSSubscriptionSyncResponse: Codable {
+    let synced: Bool
+    let message: String?
+    let plan: String?
+}
+
+public struct VPSSubscriptionStatus: Codable {
+    let plan: String
+    let status: String
+    let startedAt: Int64?
+    let expiresAt: Int64?
+    let hasStripeCustomer: Bool?
 }
 
 // MARK: - Generic Response
@@ -549,6 +599,10 @@ public class VPSService: NSObject, ObservableObject {
     private var reconnectTimer: Timer?
     private var reconnectAttempts = 0
     private let maxReconnectAttempts = 5
+    private var pendingReconnectWork: DispatchWorkItem?
+
+    // Plan refresh timer (checks subscription expiry every 30 minutes)
+    private var planRefreshTimer: Timer?
 
     // Publishers for real-time updates
     public let messageAdded = PassthroughSubject<VPSMessage, Never>()
@@ -558,6 +612,8 @@ public class VPSService: NSObject, ObservableObject {
     public let contactUpdated = PassthroughSubject<VPSContact, Never>()
     public let contactDeleted = PassthroughSubject<String, Never>()
     public let callAdded = PassthroughSubject<VPSCallHistoryEntry, Never>()
+    public let contactsSynced = PassthroughSubject<Int, Never>()  // count of synced contacts
+    public let callsSynced = PassthroughSubject<Int, Never>()     // count of synced calls
     public let deviceRemoved = PassthroughSubject<String, Never>()
 
     // Publishers for service sync
@@ -569,6 +625,7 @@ public class VPSService: NSObject, ObservableObject {
     public let voicemailUpdated = PassthroughSubject<[String: Any], Never>()
     public let spamUpdated = PassthroughSubject<[String: Any], Never>()
     public let deliveryStatusChanged = PassthroughSubject<(String, String), Never>() // (messageId, deliveryStatus)
+    public let activeCallUpdated = PassthroughSubject<[String: Any], Never>() // Phone call state from Android
 
     /// Set to true when server pushes e2ee_key_available for this device
     public var e2eeKeyPushReceived = false
@@ -583,11 +640,15 @@ public class VPSService: NSObject, ObservableObject {
             self.wsUrl = self.baseUrl.replacingOccurrences(of: "https://", with: "wss://")
                                      .replacingOccurrences(of: "http://", with: "ws://")
         }
+        #if DEBUG
         if wsUrl.hasPrefix("wss://") {
             self.wsUrlFallback = wsUrl.replacingOccurrences(of: "wss://", with: "ws://")
         } else {
             self.wsUrlFallback = nil
         }
+        #else
+        self.wsUrlFallback = nil
+        #endif
         self.activeWsUrl = wsUrl
         self.session = URLSession.shared
 
@@ -607,8 +668,15 @@ public class VPSService: NSObject, ObservableObject {
 
         isAuthenticated = accessToken != nil && userId != nil
 
+        #if DEBUG
         if isAuthenticated {
             print("[VPS] Restored authentication for user \(userId ?? "unknown")")
+        }
+        #endif
+
+        // Connect WebSocket if we have valid tokens
+        if isAuthenticated {
+            connectWebSocket()
         }
     }
 
@@ -712,7 +780,9 @@ public class VPSService: NSObject, ObservableObject {
                 retryAfterSeconds = max(0.5, retry)
             }
 
+            #if DEBUG
             print("[VPS] Rate limited (429). Retrying in \(retryAfterSeconds)s (attempt \(retryCount + 1))")
+            #endif
             try await Task.sleep(nanoseconds: UInt64(retryAfterSeconds * 1_000_000_000))
             return try await self.request(method, path, body: body, skipAuth: skipAuth, retryCount: retryCount + 1)
         }
@@ -744,10 +814,14 @@ public class VPSService: NSObject, ObservableObject {
     // MARK: - Authentication
 
     public func initiatePairing(deviceName: String) async throws -> VPSPairingRequest {
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "deviceName": deviceName,
             "deviceType": "macos"
         ]
+        // Include signing key if available
+        if let signingKey = E2EEManager.shared.getSigningPublicKeyX963Base64() {
+            body["signingKey"] = signingKey
+        }
 
         let response: VPSPairingRequest = try await post("/api/auth/pair/initiate", body: body, skipAuth: true)
 
@@ -759,7 +833,9 @@ public class VPSService: NSObject, ObservableObject {
             deviceId: response.deviceId
         )
 
-        print("[VPS] Pairing initiated with token \(response.pairingToken)")
+        #if DEBUG
+        print("[VPS] Pairing initiated")
+        #endif
         return response
     }
 
@@ -798,6 +874,10 @@ public class VPSService: NSObject, ObservableObject {
         if let currentUserId = userId {
             body["tempUserId"] = currentUserId
         }
+        // Include signing key if available
+        if let signingKey = E2EEManager.shared.getSigningPublicKeyX963Base64() {
+            body["signingKey"] = signingKey
+        }
 
         let response: VPSAuthResponse = try await post("/api/auth/pair/redeem", body: body, skipAuth: true)
 
@@ -808,7 +888,9 @@ public class VPSService: NSObject, ObservableObject {
             deviceId: response.deviceId
         )
 
-        print("[VPS] Pairing redeemed, userId=\(response.userId)")
+        #if DEBUG
+        print("[VPS] Pairing redeemed successfully")
+        #endif
 
         // Connect WebSocket after successful pairing
         connectWebSocket()
@@ -845,32 +927,62 @@ public class VPSService: NSObject, ObservableObject {
         return try await get("/api/e2ee/device-keys/\(userId)")
     }
 
-    /// Publish this device's public E2EE key to VPS
-    public func publishE2EEPublicKey(publicKey: String) async throws {
-        let body: [String: Any] = [
-            "publicKey": publicKey,
-            "keyType": "ecdh_p256",
-            "version": 2
-        ]
-        let _: VPSSuccessResponse = try await post("/api/e2ee/public-key", body: body)
-    }
-
     /// Request E2EE key sync from a target device (e.g., Android)
     /// This creates a key request that notifies the target via WebSocket
     public func requestE2EEKeySync(targetDevice: String) async throws {
         let body: [String: Any] = ["targetDevice": targetDevice]
         let _: VPSSuccessResponse = try await post("/api/e2ee/key-request", body: body)
+        #if DEBUG
         print("[VPS] E2EE key request sent to device: \(targetDevice)")
+        #endif
     }
 
+    /// Repair encryption: clears stale server-side E2EE keys and triggers Android
+    /// to re-sync all messages encrypted with the current keys.
+    public func repairEncryption() async throws {
+        let _: VPSSuccessResponse = try await post("/api/e2ee/repair", body: [:])
+        #if DEBUG
+        print("[VPS] Encryption repair requested")
+        #endif
+    }
+
+    /// Fetch encrypted key backups from the server
+    public func getKeyBackups() async throws -> [[String: Any]] {
+        struct BackupResponse: Decodable {
+            struct Backup: Decodable {
+                let encryptedBackup: String
+                let salt: String
+                let iterations: Int
+                let keyVersion: Int
+            }
+            let backups: [Backup]
+        }
+        let response: BackupResponse = try await get("/api/e2ee/key-backup")
+        return response.backups.map { backup in
+            [
+                "encryptedBackup": backup.encryptedBackup,
+                "salt": backup.salt,
+                "iterations": backup.iterations,
+                "keyVersion": backup.keyVersion,
+            ] as [String: Any]
+        }
+    }
+
+    /// Polls VPS for this device's E2EE key until found or timeout.
+    /// Uses a push-aware polling strategy: if a WebSocket push arrives during
+    /// the wait, the next poll fires immediately instead of sleeping.
     public func waitForDeviceE2eeKey(timeout: TimeInterval = 60, pollInterval: TimeInterval = 3, initialDelay: TimeInterval = 1) async throws -> String? {
         guard let userId = userId, let deviceId = deviceId else {
+            #if DEBUG
             print("[VPS E2EE] Cannot poll - userId=\(userId ?? "nil"), deviceId=\(self.deviceId ?? "nil")")
+            #endif
             return nil
         }
         let deadline = Date().addingTimeInterval(timeout)
         e2eeKeyPushReceived = false
+        #if DEBUG
         print("[VPS E2EE] Polling for key (deviceId=\(deviceId), timeout=\(Int(timeout))s)")
+        #endif
 
         // Short initial delay, but skip if WebSocket already pushed key notification
         if initialDelay > 0 && !e2eeKeyPushReceived {
@@ -879,9 +991,11 @@ public class VPSService: NSObject, ObservableObject {
             while Date() < delayEnd && !e2eeKeyPushReceived {
                 try await Task.sleep(nanoseconds: 200_000_000) // 200ms
             }
+            #if DEBUG
             if e2eeKeyPushReceived {
                 print("[VPS E2EE] Key push received during initial delay, polling immediately")
             }
+            #endif
         }
 
         var pollCount = 0
@@ -889,27 +1003,35 @@ public class VPSService: NSObject, ObservableObject {
             pollCount += 1
             do {
                 let keys = try await getDeviceE2eeKeys(userId: userId)
+                #if DEBUG
                 if pollCount == 1 || pollCount % 5 == 0 {
                     print("[VPS E2EE] Poll #\(pollCount): got \(keys.count) keys, looking for deviceId=\(deviceId)")
                     if !keys.isEmpty {
                         print("[VPS E2EE]   Available deviceIds: \(keys.keys.sorted())")
                     }
                 }
+                #endif
                 if let key = keys[deviceId]?.encryptedKey, !key.isEmpty {
+                    #if DEBUG
                     print("[VPS E2EE] Key found after \(pollCount) polls (key length=\(key.count))")
+                    #endif
                     return key
                 }
             } catch {
+                #if DEBUG
                 print("[VPS E2EE] Poll #\(pollCount) error: \(error)")
+                #endif
                 let errorDesc = "\(error)"
                 if errorDesc.contains("429") || errorDesc.contains("Too many requests") {
                     try await Task.sleep(nanoseconds: UInt64(10 * 1_000_000_000))
                     continue
                 }
+                #if DEBUG
                 // Log detailed error for debugging
                 if let decodingError = error as? DecodingError {
                     print("[VPS E2EE] Decoding error detail: \(decodingError)")
                 }
+                #endif
             }
             // If push arrived, poll immediately instead of waiting
             if e2eeKeyPushReceived {
@@ -923,7 +1045,9 @@ public class VPSService: NSObject, ObservableObject {
             }
         }
 
+        #if DEBUG
         print("[VPS E2EE] Timed out after \(pollCount) polls")
+        #endif
         return nil
     }
 
@@ -989,6 +1113,16 @@ public class VPSService: NSObject, ObservableObject {
         return try await get(path)
     }
 
+    // Request Android to push contacts to server
+    public func requestContactsSync() async throws {
+        let _: VPSSuccessResponse = try await post("/api/contacts/request-sync", body: [:] as [String: String])
+    }
+
+    // Request Android to push call history to server
+    public func requestCallsSync() async throws {
+        let _: VPSSuccessResponse = try await post("/api/calls/request-sync", body: [:] as [String: String])
+    }
+
     // MARK: - Call History
 
     public func getCallHistory(limit: Int = 100, before: Int64? = nil) async throws -> VPSCallsResponse {
@@ -1005,6 +1139,18 @@ public class VPSService: NSObject, ObservableObject {
             body["simSubscriptionId"] = simId
         }
         let _: [String: String] = try await post("/api/calls/request", body: body)
+    }
+
+    /// Send a call command (answer/reject/end) to the Android device via the server
+    public func sendCallCommand(callId: String, command: String, phoneNumber: String? = nil) async throws {
+        var body: [String: Any] = [
+            "callId": callId,
+            "command": command
+        ]
+        if let phone = phoneNumber {
+            body["phoneNumber"] = phone
+        }
+        let _: EmptyCodable = try await post("/api/calls/commands", body: body)
     }
 
     // MARK: - SyncFlow Calls & WebRTC Signaling
@@ -1198,6 +1344,40 @@ public class VPSService: NSObject, ObservableObject {
         let _: VPSGenericResponse = try await post("/api/usage/reset-storage", body: [:])
     }
 
+    // MARK: - Stripe Billing
+
+    /// Creates a Stripe checkout session and returns the checkout URL
+    public func createCheckoutSession(plan: String) async throws -> String {
+        let response: VPSCheckoutResponse = try await post("/api/usage/subscription/checkout", body: ["plan": plan])
+        return response.url
+    }
+
+    /// Gets the Stripe billing portal URL for managing subscriptions
+    public func getBillingPortalUrl() async throws -> String {
+        let response: VPSPortalResponse = try await get("/api/usage/subscription/portal")
+        return response.url
+    }
+
+    /// Cancels the Stripe subscription at end of billing period
+    public func cancelStripeSubscription() async throws {
+        let _: VPSCancelResponse = try await post("/api/usage/subscription/cancel", body: [:])
+    }
+
+    /// Syncs subscription from Stripe checkout into the database (for when webhooks aren't available)
+    public func syncSubscription() async throws -> VPSSubscriptionSyncResponse {
+        return try await post("/api/usage/subscription/sync", body: [:])
+    }
+
+    /// Gets subscription status from server
+    public func getSubscriptionStatus() async throws -> VPSSubscriptionStatus {
+        return try await get("/api/usage/subscription")
+    }
+
+    /// Public wrapper to refresh plan from server on demand
+    public func refreshPlanNow() async {
+        await refreshPlanFromServer()
+    }
+
     // MARK: - File Transfers
 
     public func getDownloadUrl(r2Key: String) async throws -> String {
@@ -1296,6 +1476,14 @@ public class VPSService: NSObject, ObservableObject {
             throw VPSError.invalidResponse
         }
         return url
+    }
+
+    public func deletePhoto(photoId: String, r2Key: String? = nil) async throws {
+        var body: [String: String] = ["photoId": photoId]
+        if let r2Key = r2Key {
+            body["r2Key"] = r2Key
+        }
+        let _: [String: Bool] = try await post("/api/photos/delete", body: body)
     }
 
     // MARK: - Notifications
@@ -1500,46 +1688,71 @@ public class VPSService: NSObject, ObservableObject {
 
     // MARK: - WebSocket
 
+    /// Opens a WebSocket connection to the VPS server for real-time event streaming.
+    /// The token is passed as a query parameter for authentication.
+    /// On success, subscribes to all data channels for the current user.
+    /// On failure, triggers exponential-backoff reconnection.
     public func connectWebSocket() {
         guard let token = accessToken else {
+            #if DEBUG
             print("[VPS Warning] Cannot connect WebSocket - not authenticated")
+            #endif
             return
         }
 
         guard let url = URL(string: "\(activeWsUrl)?token=\(token)") else {
+            #if DEBUG
             print("[VPS Error] Invalid WebSocket URL")
+            #endif
             return
         }
 
+        // Cancel any pending reconnect
+        pendingReconnectWork?.cancel()
+        pendingReconnectWork = nil
+
         webSocketTask?.cancel()
-        webSocketTask = session.webSocketTask(with: url)
-        webSocketTask?.resume()
+        let task = session.webSocketTask(with: url)
+        webSocketTask = task
+        task.resume()
 
         isConnected = true
         reconnectAttempts = 0
+        #if DEBUG
         print("[VPS] WebSocket connected")
+        #endif
 
-        // Start receiving messages
-        receiveWebSocketMessage()
+        // Start receiving messages (pass task reference to ignore stale callbacks)
+        receiveWebSocketMessage(for: task)
 
         // Subscribe to user's data
         if let userId = userId {
             subscribeToUser(userId)
         }
+
+        // Start periodic plan refresh (every 30 minutes)
+        startPlanRefreshTimer()
     }
 
     public func disconnectWebSocket() {
+        pendingReconnectWork?.cancel()
+        pendingReconnectWork = nil
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
         isConnected = false
         subscriptions.removeAll()
         reconnectTimer?.invalidate()
+        stopPlanRefreshTimer()
+        #if DEBUG
         print("[VPS] WebSocket disconnected")
+        #endif
     }
 
-    private func receiveWebSocketMessage() {
-        webSocketTask?.receive { [weak self] result in
+    private func receiveWebSocketMessage(for task: URLSessionWebSocketTask) {
+        task.receive { [weak self] result in
             guard let self = self else { return }
+            // Ignore callbacks from old/cancelled tasks
+            guard self.webSocketTask === task else { return }
 
             switch result {
             case .success(let message):
@@ -1553,11 +1766,15 @@ public class VPSService: NSObject, ObservableObject {
                 @unknown default:
                     break
                 }
-                // Continue receiving
-                self.receiveWebSocketMessage()
+                // Continue receiving on the same task
+                self.receiveWebSocketMessage(for: task)
 
             case .failure(let error):
+                // Ignore errors from old tasks that were replaced
+                guard self.webSocketTask === task else { return }
+                #if DEBUG
                 print("[VPS Error] WebSocket error: \(error.localizedDescription)")
+                #endif
                 self.isConnected = false
                 if self.maybeFallbackToInsecureWebSocket(error: error) {
                     self.connectWebSocket()
@@ -1629,6 +1846,22 @@ public class VPSService: NSObject, ObservableObject {
                 }
             }
 
+        case "contacts_synced":
+            if let data = json["data"] as? [String: Any],
+               let synced = data["synced"] as? Int {
+                DispatchQueue.main.async {
+                    self.contactsSynced.send(synced)
+                }
+            }
+
+        case "calls_synced":
+            if let data = json["data"] as? [String: Any],
+               let synced = data["synced"] as? Int {
+                DispatchQueue.main.async {
+                    self.callsSynced.send(synced)
+                }
+            }
+
         case "messages_synced":
             // Handle batch of synced messages from Android
             if let data = json["data"] as? [String: Any],
@@ -1648,7 +1881,9 @@ public class VPSService: NSObject, ObservableObject {
             if let data = json["data"] as? [String: Any],
                let targetDeviceId = data["deviceId"] as? String,
                targetDeviceId == self.deviceId {
+                #if DEBUG
                 print("[VPS E2EE] Key push notification received for this device")
+                #endif
                 self.e2eeKeyPushReceived = true
             }
 
@@ -1656,13 +1891,17 @@ public class VPSService: NSObject, ObservableObject {
             if let data = json["data"] as? [String: Any] {
                 let removedDeviceId = (data["id"] as? String) ?? (data["deviceId"] as? String) ?? ""
                 if removedDeviceId == self.deviceId || removedDeviceId.isEmpty {
+                    #if DEBUG
                     print("[VPS] Remote unpair detected")
+                    #endif
                     DispatchQueue.main.async {
                         self.deviceRemoved.send(removedDeviceId)
                     }
                 }
             } else {
+                #if DEBUG
                 print("[VPS] Remote unpair detected")
+                #endif
                 DispatchQueue.main.async {
                     self.deviceRemoved.send("")
                 }
@@ -1778,6 +2017,26 @@ public class VPSService: NSObject, ObservableObject {
                 }
             }
 
+        case "active_call":
+            #if DEBUG
+            print("[VPS DEBUG] Received active_call WebSocket message")
+            #endif
+            if let data = json["data"] as? [String: Any] {
+                #if DEBUG
+                print("[VPS DEBUG] active_call data: state=\(data["state"] ?? "nil"), phone=\(data["phoneNumber"] ?? "nil"), contact=\(data["contactName"] ?? "nil")")
+                #endif
+                DispatchQueue.main.async {
+                    #if DEBUG
+                    print("[VPS DEBUG] Publishing activeCallUpdated")
+                    #endif
+                    self.activeCallUpdated.send(data)
+                }
+            } else {
+                #if DEBUG
+                print("[VPS DEBUG] active_call: failed to parse data from json")
+                #endif
+            }
+
         case "pong":
             // Heartbeat response
             break
@@ -1801,31 +2060,52 @@ public class VPSService: NSObject, ObservableObject {
                let text = String(data: data, encoding: .utf8) {
                 webSocketTask?.send(.string(text)) { error in
                     if let error = error {
+                        #if DEBUG
                         print("[VPS Error] Failed to subscribe to \(channel): \(error.localizedDescription)")
+                        #endif
                     } else {
                         self.subscriptions.insert(channel)
+                        #if DEBUG
                         print("[VPS] Subscribed to \(channel) channel")
+                        #endif
                     }
                 }
             }
         }
     }
 
+    /// Schedules a WebSocket reconnection with exponential backoff.
+    /// Delay doubles each attempt (2s, 4s, 8s, 16s) capped at 30s.
+    /// No maximum attempt limit -- reconnects indefinitely.
     private func scheduleReconnect() {
         reconnectAttempts += 1
+
+        guard reconnectAttempts <= maxReconnectAttempts else {
+            #if DEBUG
+            print("[VPS] WebSocket max reconnect attempts (\(maxReconnectAttempts)) reached, giving up")
+            #endif
+            return
+        }
+
         // Exponential backoff: 2, 4, 8, 16, 30, 30, 30... seconds (capped at 30s)
         let delay = min(Double(1 << min(reconnectAttempts, 5)), 30.0)
 
+        #if DEBUG
         if reconnectAttempts <= 3 || reconnectAttempts % 10 == 0 {
             print("[VPS] WebSocket reconnect in \(Int(delay))s (attempt \(reconnectAttempts))")
         }
+        #endif
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+        pendingReconnectWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
             self?.connectWebSocket()
         }
+        pendingReconnectWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     private func maybeFallbackToInsecureWebSocket(error: Error) -> Bool {
+        #if DEBUG
         guard !didFallbackToInsecureWebSocket, let fallback = wsUrlFallback else {
             return false
         }
@@ -1852,6 +2132,54 @@ public class VPSService: NSObject, ObservableObject {
         activeWsUrl = fallback
         print("[VPS] WebSocket TLS failed; falling back to insecure WebSocket: \(fallback)")
         return true
+        #else
+        return false
+        #endif
+    }
+
+    // MARK: - Plan Refresh Timer
+
+    private func startPlanRefreshTimer() {
+        stopPlanRefreshTimer()
+        DispatchQueue.main.async { [weak self] in
+            self?.planRefreshTimer = Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { [weak self] _ in
+                Task { [weak self] in
+                    await self?.refreshPlanFromServer()
+                }
+            }
+        }
+    }
+
+    private func stopPlanRefreshTimer() {
+        planRefreshTimer?.invalidate()
+        planRefreshTimer = nil
+    }
+
+    private func refreshPlanFromServer() async {
+        do {
+            let response = try await getUsage()
+            let usage = response.usage
+            guard !usage.plan.isEmpty else { return }
+
+            let oldPlan = PreferencesService.shared.userPlan
+            PreferencesService.shared.setUserPlan(usage.plan, expiresAt: usage.planExpiresAt ?? 0)
+
+            // Notify UI if plan was downgraded to free
+            let wasPaid = oldPlan != "free"
+            let isNowFree = usage.plan == "free"
+            if wasPaid && isNowFree {
+                #if DEBUG
+                print("[VPS] Plan downgraded from \(oldPlan) to free — notifying UI")
+                #endif
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .vpsPlanDowngraded, object: nil)
+                }
+            }
+        } catch {
+            #if DEBUG
+            print("[VPS] Plan refresh failed: \(error.localizedDescription)")
+            #endif
+        }
     }
 
     // MARK: - Pairing QR Code
@@ -1872,13 +2200,18 @@ public class VPSService: NSObject, ObservableObject {
             URLQueryItem(name: "deviceId", value: pairing.deviceId)
         ]
 
-        // Include E2EE public key if available
+        // Include E2EE public key if available so Android can encrypt
+        // the sync group keys for this macOS device during pairing
         try? await E2EEManager.shared.initializeKeys()
         if let publicKeyX963 = E2EEManager.shared.getMyPublicKeyX963Base64() {
             components.queryItems?.append(URLQueryItem(name: "e2eeKey", value: publicKeyX963))
+            #if DEBUG
             print("[VPS] Including E2EE public key in QR code")
+            #endif
         } else {
+            #if DEBUG
             print("[VPS] Warning: No E2EE public key available for QR code")
+            #endif
         }
 
         let qrData = components.url?.absoluteString
@@ -1921,10 +2254,11 @@ public class VPSService: NSObject, ObservableObject {
 
     public func publishE2eePublicKey(publicKeyX963Base64: String) async throws {
         let body: [String: Any] = [
-            "publicKeyX963": publicKeyX963Base64,
-            "platform": "macos"
+            "publicKey": publicKeyX963Base64,
+            "keyType": "ecdh_p256",
+            "version": 2
         ]
-        let _: VPSGenericResponse = try await post("/api/e2ee/publish-key", body: body)
+        let _: VPSSuccessResponse = try await post("/api/e2ee/public-key", body: body)
     }
 }
 
@@ -1934,4 +2268,5 @@ extension Notification.Name {
     static let webRTCSignalReceived = Notification.Name("webRTCSignalReceived")
     static let syncFlowCallIncoming = Notification.Name("syncFlowCallIncoming")
     static let syncFlowCallStatusChanged = Notification.Name("syncFlowCallStatusChanged")
+    static let vpsPlanDowngraded = Notification.Name("vpsPlanDowngraded")
 }

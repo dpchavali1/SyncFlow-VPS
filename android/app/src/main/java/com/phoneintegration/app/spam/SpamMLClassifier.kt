@@ -122,7 +122,9 @@ class SpamMLClassifier(private val context: Context) {
                 })
                 modelVersion = getModelVersionFromFile(downloadedModel)
                 return
-            } catch (_: Exception) { }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to load downloaded ML model, falling back to bundled", e)
+            }
         }
 
         // Fall back to bundled model in assets
@@ -134,7 +136,9 @@ class SpamMLClassifier(private val context: Context) {
                 })
                 modelVersion = "bundled-1.0"
             }
-        } catch (_: Exception) { }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to load bundled ML model from assets", e)
+        }
     }
 
     private fun loadModelFromFile(file: File): MappedByteBuffer {
@@ -177,14 +181,16 @@ class SpamMLClassifier(private val context: Context) {
             try {
                 vocabulary = loadVocabFromFile(downloadedVocab)
                 return
-            } catch (_: Exception) { }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to load downloaded vocabulary, falling back to bundled", e)
+            }
         }
 
         // Fall back to bundled or default vocabulary
         try {
             vocabulary = loadVocabFromAssets()
-        } catch (_: Exception) {
-            // Use minimal default vocabulary
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to load vocabulary from assets, using default vocabulary", e)
             vocabulary = createDefaultVocabulary()
         }
     }

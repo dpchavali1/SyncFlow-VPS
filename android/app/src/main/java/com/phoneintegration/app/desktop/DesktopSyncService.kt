@@ -6,6 +6,7 @@ import com.phoneintegration.app.SmsMessage
 import com.phoneintegration.app.data.database.Group
 import com.phoneintegration.app.data.database.GroupMember
 import com.phoneintegration.app.data.database.SpamMessage
+import com.phoneintegration.app.data.PreferencesManager
 import com.phoneintegration.app.e2ee.SignalProtocolManager
 import com.phoneintegration.app.vps.VPSClient
 import com.phoneintegration.app.vps.VPSOutgoingMessage
@@ -92,9 +93,10 @@ class DesktopSyncService(context: Context) {
         var synced = 0
         val total = messages.size
 
-        for (message in messages) {
-            vpsSyncService.syncMessage(message, skipAttachments)
-            synced++
+        // Batch sync in chunks of 100 instead of one-at-a-time
+        messages.chunked(100).forEach { batch ->
+            vpsSyncService.syncMessagesBatch(batch, skipAttachments)
+            synced += batch.size
             onProgress?.invoke(synced, total)
         }
     }
@@ -371,8 +373,9 @@ class DesktopSyncService(context: Context) {
             // Device limit applies to paired (non-Android) devices only
             // The Android phone is the host device and doesn't count toward the limit
             val pairedCount = desktopDevices.size
-            val deviceLimit = 2
-            val plan = "free"
+            val prefs = PreferencesManager(appContext)
+            val plan = prefs.userPlan.value
+            val deviceLimit = if (prefs.isPaidUser()) 5 else 2
             val canAdd = pairedCount < deviceLimit
             DeviceInfoResult(
                 deviceCount = pairedCount,
@@ -430,13 +433,19 @@ class DesktopSyncService(context: Context) {
                 put("privateKeyPKCS8", privateKeyPKCS8)
                 put("publicKeyX963", publicKeyX963)
                 put("version", 2)
+                put("keyVersion", e2eeManager.getCurrentKeyVersion())
                 put("timestamp", System.currentTimeMillis())
             }.toString()
+
+            // Sign the payload with ECDSA signing key for authentication
+            val payloadBytes = keyPayload.toByteArray(Charsets.UTF_8)
+            val signature = e2eeManager.signData(payloadBytes)
+            val signingDeviceId = vpsClient.deviceId ?: "android"
 
             // Encrypt the key payload with the target device's public key
             val encryptedPayload = e2eeManager.encryptDataKeyForDevice(
                 targetPublicKeyX963,
-                keyPayload.toByteArray(Charsets.UTF_8)
+                payloadBytes
             )
 
             if (encryptedPayload == null) {
@@ -446,13 +455,17 @@ class DesktopSyncService(context: Context) {
 
             Log.d(TAG, "pushE2EEKeysToDevice: Encrypted payload length=${encryptedPayload.length}, posting to /api/e2ee/device-key/$targetDeviceId")
 
-            // Store encrypted key on VPS for the target device
-            val keyData = mapOf(
+            // Store encrypted key on VPS for the target device (include signature for verification)
+            val keyData = mutableMapOf<String, Any>(
                 "encryptedKey" to encryptedPayload,
                 "keyType" to "sync_group_v2",
-                "fromDevice" to (vpsClient.deviceId ?: "android"),
+                "fromDevice" to signingDeviceId,
                 "timestamp" to System.currentTimeMillis()
             )
+            if (signature != null) {
+                keyData["signature"] = signature
+                keyData["signingDeviceId"] = signingDeviceId
+            }
 
             vpsClient.publishDeviceE2eeKey(targetDeviceId, keyData)
             Log.i(TAG, "Successfully pushed E2EE keys to device $targetDeviceId")

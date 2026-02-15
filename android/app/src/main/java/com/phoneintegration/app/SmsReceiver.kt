@@ -5,17 +5,22 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.provider.Telephony
-import android.util.Log
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import com.phoneintegration.app.data.database.SyncFlowDatabase
 import com.phoneintegration.app.data.database.SpamMessage
 import com.phoneintegration.app.spam.SpamFilterService
+import com.phoneintegration.app.utils.DefaultSmsHelper
 import com.phoneintegration.app.utils.SecureLogger
 import com.phoneintegration.app.utils.SpamFilter
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
+/**
+ * Receives incoming SMS via SMS_DELIVER/SMS_RECEIVED intents, writes them to the SMS database
+ * (required when app is the default SMS handler), runs spam/block/mute checks, shows notifications,
+ * broadcasts locally for UI updates, and triggers sync to paired desktop/web clients.
+ */
 class SmsReceiver : BroadcastReceiver() {
 
     companion object {
@@ -81,22 +86,28 @@ class SmsReceiver : BroadcastReceiver() {
                 recentMessages[messageKey] = now
             }
 
-            // IMPORTANT: Write SMS to database (required for default SMS apps)
-            try {
-                val values = ContentValues().apply {
-                    put(Telephony.Sms.ADDRESS, sender)
-                    put(Telephony.Sms.BODY, fullMessage)
-                    put(Telephony.Sms.DATE, timestamp)
-                    put(Telephony.Sms.DATE_SENT, timestamp)
-                    put(Telephony.Sms.READ, 0) // Mark as unread
-                    put(Telephony.Sms.SEEN, 1)
-                    put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_INBOX)
-                }
+            // Write SMS to database — only when we are the default SMS app.
+            // The default app is *required* to persist incoming messages; if we're
+            // not the default, the actual default app handles persistence.
+            if (DefaultSmsHelper.isDefaultSmsApp(context)) {
+                try {
+                    val values = ContentValues().apply {
+                        put(Telephony.Sms.ADDRESS, sender)
+                        put(Telephony.Sms.BODY, fullMessage)
+                        put(Telephony.Sms.DATE, timestamp)
+                        put(Telephony.Sms.DATE_SENT, timestamp)
+                        put(Telephony.Sms.READ, 0) // Mark as unread
+                        put(Telephony.Sms.SEEN, 1)
+                        put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_INBOX)
+                    }
 
-                context.contentResolver.insert(Telephony.Sms.Inbox.CONTENT_URI, values)
-                SecureLogger.d("SMS_RECEIVER", "SMS written to database")
-            } catch (e: Exception) {
-                SecureLogger.e("SMS_RECEIVER", "Failed to write SMS to database", e)
+                    context.contentResolver.insert(Telephony.Sms.Inbox.CONTENT_URI, values)
+                    SecureLogger.d("SMS_RECEIVER", "SMS written to database")
+                } catch (e: Exception) {
+                    SecureLogger.e("SMS_RECEIVER", "Failed to write SMS to database", e)
+                }
+            } else {
+                SecureLogger.d("SMS_RECEIVER", "Not default SMS app, skipping DB write (handled by default app)")
             }
 
             // Get contact name
@@ -138,33 +149,39 @@ class SmsReceiver : BroadcastReceiver() {
 
                     // Use both basic and advanced spam checking
                     val spamResult = if (isSpamFilterEnabled) {
-                        // Basic pattern matching
-                        val basicResult = SpamFilter.checkMessage(fullMessage, sender, isFromContact, spamThreshold)
-
-                        // Advanced checking (URL blocklist, ML) - non-blocking
-                        val advancedResult = try {
-                            val advancedService = SpamFilterService.getInstance(context)
-                            advancedService.checkMessage(
-                                address = sender,
-                                body = fullMessage,
-                                isRead = false,
-                                messageAgeHours = 0,
-                                isFromContact = isFromContact
-                            )
-                        } catch (e: Exception) {
-                            SecureLogger.w("SMS_RECEIVER", "Advanced spam check failed, using basic only")
-                            null
-                        }
-
-                        // Combine results - use higher confidence
-                        if (advancedResult != null && advancedResult.confidence > basicResult.confidence) {
-                            SpamFilter.SpamCheckResult(
-                                isSpam = advancedResult.isSpam || basicResult.isSpam,
-                                confidence = advancedResult.confidence,
-                                reasons = advancedResult.reasons.map { it.description } + basicResult.reasons
-                            )
+                        // Check whitelist FIRST — whitelisted senders bypass all spam detection
+                        val spamService = try { SpamFilterService.getInstance(context) } catch (_: Exception) { null }
+                        if (spamService != null && spamService.isWhitelisted(sender)) {
+                            SecureLogger.d("SMS_RECEIVER", "Sender is whitelisted, skipping spam detection")
+                            SpamFilter.SpamCheckResult(isSpam = false, confidence = 0f, reasons = emptyList())
                         } else {
-                            basicResult
+                            // Basic pattern matching
+                            val basicResult = SpamFilter.checkMessage(fullMessage, sender, isFromContact, spamThreshold)
+
+                            // Advanced checking (URL blocklist, ML) - non-blocking
+                            val advancedResult = try {
+                                spamService?.checkMessage(
+                                    address = sender,
+                                    body = fullMessage,
+                                    isRead = false,
+                                    messageAgeHours = 0,
+                                    isFromContact = isFromContact
+                                )
+                            } catch (e: Exception) {
+                                SecureLogger.w("SMS_RECEIVER", "Advanced spam check failed, using basic only")
+                                null
+                            }
+
+                            // Combine results - use higher confidence
+                            if (advancedResult != null && advancedResult.confidence > basicResult.confidence) {
+                                SpamFilter.SpamCheckResult(
+                                    isSpam = advancedResult.isSpam || basicResult.isSpam,
+                                    confidence = advancedResult.confidence,
+                                    reasons = advancedResult.reasons.map { it.description } + basicResult.reasons
+                                )
+                            } else {
+                                basicResult
+                            }
                         }
                     } else {
                         SpamFilter.SpamCheckResult(isSpam = false, confidence = 0f, reasons = emptyList())
@@ -219,7 +236,7 @@ class SmsReceiver : BroadcastReceiver() {
                     // Show notification only if not blocked, not spam, and not muted
                     val notificationHelper = NotificationHelper(context)
                     notificationHelper.showSmsNotification(sender, fullMessage, contactName, threadId = threadId)
-                    Log.d("SMS_RECEIVER", "Notification shown for message")
+                    SecureLogger.d("SMS_RECEIVER", "Notification shown for message")
                 } catch (e: Exception) {
                     // Fallback: show notification if checks fail
                     SecureLogger.e("SMS_RECEIVER", "Error checking blocked/mute status", e)
@@ -243,27 +260,41 @@ class SmsReceiver : BroadcastReceiver() {
                 SecureLogger.e("SMS_RECEIVER", "Error broadcasting SMS received", e)
             }
 
-            // Only sync to desktop if devices are paired (saves battery for Android-only users)
+            // Sync to VPS if authenticated (real-time push to Mac/Web)
+            val vpsSyncService = try {
+                com.phoneintegration.app.vps.VPSSyncService.getInstance(context)
+            } catch (e: Exception) { null }
+
+            if (vpsSyncService?.isAuthenticated == true) {
+                CoroutineScope(Dispatchers.IO).launch {
+                    try {
+                        val smsRepository = SmsRepository(context)
+                        val recentMessages = smsRepository.getAllRecentMessages(1)
+                        if (recentMessages.isNotEmpty()) {
+                            vpsSyncService.syncMessage(recentMessages[0])
+                            SecureLogger.d("SMS_RECEIVER", "Message synced to VPS")
+                        }
+                    } catch (e: Exception) {
+                        SecureLogger.e("SMS_RECEIVER", "Error syncing message to VPS", e)
+                    }
+                }
+            }
+
+            // Also sync to Firebase if devices are paired (legacy desktop sync)
             if (com.phoneintegration.app.desktop.DesktopSyncService.hasPairedDevices(context)) {
-                // Immediately sync this message to Firebase for desktop
-                // Use WorkManager for guaranteed execution even if app is in background
                 try {
                     com.phoneintegration.app.desktop.SmsSyncWorker.syncNow(context)
                 } catch (e: Exception) {
                     SecureLogger.e("SMS_RECEIVER", "Error scheduling SMS sync", e)
                 }
 
-                // Also try immediate sync in coroutine (faster if app is active)
                 CoroutineScope(Dispatchers.IO).launch {
                     try {
                         val smsRepository = SmsRepository(context)
                         val syncService = com.phoneintegration.app.desktop.DesktopSyncService(context)
-
-                        // Get the most recent message (the one we just received)
                         val recentMessages = smsRepository.getAllRecentMessages(1)
                         if (recentMessages.isNotEmpty()) {
                             syncService.syncMessage(recentMessages[0])
-                            SecureLogger.d("SMS_RECEIVER", "Message synced to Firebase for desktop")
                         }
                     } catch (e: Exception) {
                         SecureLogger.e("SMS_RECEIVER", "Error syncing message to Firebase", e)

@@ -171,6 +171,12 @@ class MessageStore: ObservableObject {
     /// Combine cancellables for reactive subscriptions.
     private var cancellables = Set<AnyCancellable>()
 
+    /// Prevents auto-repair from firing more than once per session.
+    private var hasAttemptedAutoRepair = false
+
+    /// After repair, poll for re-encrypted messages from Android.
+    private var repairPollTask: Task<Void, Never>?
+
     /// VPS-specific cancellables
     private var vpsCancellables = Set<AnyCancellable>()
 
@@ -345,40 +351,7 @@ class MessageStore: ObservableObject {
     }
 
     private func handleBatteryStateChange(_ state: BatteryAwareServiceManager.ServiceState) {
-        switch state {
-        case .reduced:
-            // Reduce message processing frequency
-            reduceMessageProcessing()
-        case .minimal:
-            // Minimize message processing
-            minimizeMessageProcessing()
-        case .suspended:
-            // Pause message processing
-            pauseMessageProcessing()
-        case .full:
-            // Resume normal message processing
-            resumeNormalProcessing()
-        }
-    }
-
-    private func reduceMessageProcessing() {
-        // Reduce frequency of message updates and processing
-        // Implementation would adjust timers and processing queues
-    }
-
-    private func minimizeMessageProcessing() {
-        // Further minimize processing
-        // Clear non-visible message caches
-    }
-
-    private func pauseMessageProcessing() {
-        // Pause background message processing
-        // Stop background processing but keep UI responsive
-    }
-
-    private func resumeNormalProcessing() {
-        // Resume normal processing
-        // Restore normal processing frequency
+        // No-op: battery optimization handled at app level (AppState)
     }
 
     @objc private func handleMemoryPressure() {
@@ -407,33 +380,118 @@ class MessageStore: ObservableObject {
     /// 3. Decrypts them locally using new keys
     /// 4. Updates UI with decrypted messages
     @objc private func handleE2EEKeysUpdated(_ notification: Notification) {
-        print("[MessageStore] E2EE keys updated, e2eeInitialized=\(E2EEManager.shared.isInitialized)")
+        #if DEBUG
+        print("[MessageStore] E2EE keys updated, hasSyncGroupKeys=\(E2EEManager.shared.hasSyncGroupKeys)")
+        #endif
 
-        guard let userId = currentUserId else {
+        guard currentUserId != nil else {
+            #if DEBUG
             print("[MessageStore] No user ID, skipping re-decryption")
+            #endif
             return
         }
 
         Task {
-            do {
-                let response = try await VPSService.shared.getMessages(limit: 500)
-                let fetchedMessages = response.messages.map { self.convertVPSMessage($0) }
+            let result = await self.fetchAndDecryptMessages()
+            guard let result = result else { return }
 
-                let encrypted = fetchedMessages.filter { $0.isEncrypted == true }
-                let failed = encrypted.filter { $0.e2eeFailed == true }
-                print("[MessageStore VPS] Re-decryption: \(encrypted.count - failed.count)/\(encrypted.count) decrypted, \(failed.count) failed")
+            let encrypted = result.encrypted
+            let failed = result.failed
 
-                await MainActor.run {
-                    let processedMessages = self.applyReadStatus(to: fetchedMessages)
-                    let mergeResult = self.mergeMessagesWithPendingOutgoing(remoteMessages: processedMessages)
-                    let newConversations = self.buildConversations(from: mergeResult.mergedMessages)
-
-                    self.messages = mergeResult.mergedMessages
-                    self.conversations = newConversations
+            // Auto-repair: if ANY encrypted messages fail after key sync,
+            // the server has messages encrypted with old keys. Trigger repair once
+            // to have Android re-sync messages with the current keys.
+            if !self.hasAttemptedAutoRepair && failed > 0 {
+                self.hasAttemptedAutoRepair = true
+                #if DEBUG
+                print("[MessageStore VPS] Decryption failures detected (\(failed)/\(encrypted)) — auto-triggering encryption repair")
+                #endif
+                do {
+                    try await VPSService.shared.repairEncryption()
+                    E2EEManager.shared.clearSyncGroupKeys()
+                    self.clearMessages()
+                    await MainActor.run {
+                        NotificationCenter.default.post(
+                            name: Notification.Name("triggerE2EERepairSync"),
+                            object: nil
+                        )
+                    }
+                } catch {
+                    #if DEBUG
+                    print("[MessageStore VPS] Auto-repair failed: \(error.localizedDescription)")
+                    #endif
                 }
-            } catch {
-                print("[MessageStore VPS] Re-decryption fetch error: \(error.localizedDescription)")
+                return
             }
+
+            // After repair, if still failing, start polling — Android is still
+            // re-syncing messages to the server. Poll every 5s for up to 90s.
+            if self.hasAttemptedAutoRepair && failed > 0 {
+                self.startRepairPolling()
+            }
+        }
+    }
+
+    /// Fetch messages from VPS, decrypt, update UI, and return stats.
+    private func fetchAndDecryptMessages() async -> (encrypted: Int, failed: Int)? {
+        do {
+            let response = try await VPSService.shared.getMessages(limit: 500)
+            let fetchedMessages = response.messages.map { self.convertVPSMessage($0) }
+
+            let encrypted = fetchedMessages.filter { $0.isEncrypted == true }
+            let failed = encrypted.filter { $0.e2eeFailed == true }
+            #if DEBUG
+            print("[MessageStore VPS] Re-decryption: \(encrypted.count - failed.count)/\(encrypted.count) decrypted, \(failed.count) failed")
+            #endif
+
+            await MainActor.run {
+                let processedMessages = self.applyReadStatus(to: fetchedMessages)
+                let mergeResult = self.mergeMessagesWithPendingOutgoing(remoteMessages: processedMessages)
+                let newConversations = self.buildConversations(from: mergeResult.mergedMessages)
+
+                self.messages = mergeResult.mergedMessages
+                self.conversations = newConversations
+            }
+
+            return (encrypted: encrypted.count, failed: failed.count)
+        } catch {
+            #if DEBUG
+            print("[MessageStore VPS] Re-decryption fetch error: \(error.localizedDescription)")
+            #endif
+            return nil
+        }
+    }
+
+    /// Poll for re-encrypted messages after repair. Android may take 30-60s to
+    /// re-sync all messages. We check every 5 seconds for up to 90 seconds.
+    private func startRepairPolling() {
+        repairPollTask?.cancel()
+        repairPollTask = Task {
+            #if DEBUG
+            print("[MessageStore VPS] Starting repair poll — waiting for Android to re-sync messages")
+            #endif
+            for attempt in 1...18 { // 18 × 5s = 90s max
+                try? await Task.sleep(nanoseconds: 5_000_000_000) // 5 seconds
+                if Task.isCancelled { return }
+
+                let result = await self.fetchAndDecryptMessages()
+                guard let result = result else { continue }
+
+                #if DEBUG
+                print("[MessageStore VPS] Repair poll #\(attempt): \(result.encrypted - result.failed)/\(result.encrypted) decrypted")
+                #endif
+
+                // Success: all messages now decrypt
+                if result.failed == 0 {
+                    #if DEBUG
+                    print("[MessageStore VPS] Repair poll complete — messages decrypted successfully")
+                    #endif
+                    return
+                }
+            }
+            #if DEBUG
+            print("[MessageStore VPS] Repair poll timed out — some messages may still be encrypted")
+            #endif
         }
     }
 
@@ -497,12 +555,15 @@ class MessageStore: ObservableObject {
 
         currentUserId = userId
         isLoading = true
+        hasAttemptedAutoRepair = false
 
         // Reset pagination state for new user
         loadedTimeRangeStart = nil
         canLoadMore = false
 
+        #if DEBUG
         print("[MessageStore] VPS mode active - using VPS for messages")
+        #endif
         startListeningVPS(userId: userId)
     }
 
@@ -523,8 +584,41 @@ class MessageStore: ObservableObject {
                 guard let self = self else { return }
                 let message = self.convertVPSMessage(vpsMessage)
 
-                // Skip if message already exists
+                // Skip if message already exists (by ID)
                 guard !self.messages.contains(where: { $0.id == message.id }) else { return }
+
+                // Skip sent messages that match an existing message by content
+                // (prevents duplicates from Android sync echoing back a message
+                // the Mac already has under a different ID)
+                if message.type == 2 {
+                    let normalizedAddr = self.normalizePhoneNumber(message.address)
+                    let trimmedBody = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let maxDeltaMs = 60.0 * 1000.0 // 1 minute window
+                    let isDuplicate = self.messages.contains { existing in
+                        existing.type == 2 &&
+                        self.normalizePhoneNumber(existing.address) == normalizedAddr &&
+                        existing.body.trimmingCharacters(in: .whitespacesAndNewlines) == trimmedBody &&
+                        existing.isMms == message.isMms &&
+                        abs(existing.date - message.date) <= maxDeltaMs
+                    }
+                    if isDuplicate {
+                        // Replace pending version with confirmed version if present
+                        if let pendingIdx = self.messages.firstIndex(where: {
+                            $0.id.hasPrefix("pending_") &&
+                            $0.type == 2 &&
+                            self.normalizePhoneNumber($0.address) == normalizedAddr &&
+                            $0.body.trimmingCharacters(in: .whitespacesAndNewlines) == trimmedBody
+                        }) {
+                            let pendingId = self.messages[pendingIdx].id
+                            self.messages[pendingIdx] = message
+                            self.updateConversations(from: self.messages)
+                            self.pendingOutgoingQueue.sync {
+                                _ = self.pendingOutgoingMessages.removeValue(forKey: pendingId)
+                            }
+                        }
+                        return
+                    }
+                }
 
                 var currentMessages = self.messages
                 currentMessages.append(message)
@@ -619,6 +713,7 @@ class MessageStore: ObservableObject {
 
                 let fetchedMessages = response.messages.map { self.convertVPSMessage($0) }
 
+                #if DEBUG
                 // Log decryption summary (not per-message)
                 let encrypted = fetchedMessages.filter { $0.isEncrypted == true }
                 let failed = encrypted.filter { $0.e2eeFailed == true }
@@ -628,6 +723,7 @@ class MessageStore: ObservableObject {
                         print("[MessageStore VPS] First failed msg: \(first.id), reason=\(first.e2eeFailureReason ?? "unknown")")
                     }
                 }
+                #endif
 
                 await MainActor.run {
                     let processedMessages = self.applyReadStatus(to: fetchedMessages)
@@ -639,10 +735,14 @@ class MessageStore: ObservableObject {
                     self.isLoading = false
                     self.canLoadMore = response.hasMore
 
+                    #if DEBUG
                     print("[MessageStore VPS] Loaded \(fetchedMessages.count) messages, \(newConversations.count) conversations")
+                    #endif
                 }
             } catch {
+                #if DEBUG
                 print("[MessageStore VPS] Error loading messages: \(error.localizedDescription)")
+                #endif
                 await MainActor.run {
                     self.error = error
                     self.isLoading = false
@@ -733,7 +833,7 @@ class MessageStore: ObservableObject {
         if vpsMessage.encrypted == true {
             if !E2EEManager.shared.isInitialized {
                 decryptionFailed = true
-                failureReason = "E2EE keys not loaded"
+                failureReason = "E2EE not initialized"
                 body = "[🔒 Encrypted message - E2EE keys not loaded]"
             } else if let encryptedBody = vpsMessage.encryptedBody,
                let encryptedNonce = vpsMessage.encryptedNonce,
@@ -822,18 +922,37 @@ class MessageStore: ObservableObject {
                     )
                 }
 
+                // Build lookup from ALL phone numbers per contact (not just the first).
+                // latestContacts only stores the primary phone, but the VPS response
+                // has the full phoneNumbers array. Index every number so conversations
+                // on any of a contact's numbers resolve to their name.
+                var lookup: [String: String] = [:]
+                for vpsContact in response.contacts {
+                    guard let name = vpsContact.displayName, !name.isEmpty else { continue }
+                    for phone in vpsContact.phoneNumbers ?? [] {
+                        let normalized = normalizePhoneNumber(phone)
+                        if !normalized.isEmpty {
+                            lookup[normalized] = name
+                        }
+                    }
+                }
+
                 await MainActor.run {
                     self.latestContacts = contacts
-                    self.rebuildContactLookup()
+                    self.contactNameLookup = lookup
 
                     // Rebuild conversations with contact names
                     let newConversations = self.buildConversations(from: self.messages)
                     self.conversations = newConversations
 
-                    print("[MessageStore VPS] Loaded \(contacts.count) contacts")
+                    #if DEBUG
+                    print("[MessageStore VPS] Loaded \(contacts.count) contacts, \(lookup.count) phone lookup entries")
+                    #endif
                 }
             } catch {
+                #if DEBUG
                 print("[MessageStore VPS] Error loading contacts: \(error.localizedDescription)")
+                #endif
             }
         }
     }
@@ -849,6 +968,8 @@ class MessageStore: ObservableObject {
         vpsCancellables.removeAll()
         spamListenerUserId = nil
         stopListeningForContacts()
+        repairPollTask?.cancel()
+        repairPollTask = nil
 
         // Clear state
         currentUserId = nil
@@ -859,11 +980,23 @@ class MessageStore: ObservableObject {
         canLoadMore = false
     }
 
+    /// Clear all cached messages and conversations so they can be reloaded
+    /// after encryption keys are repaired.
+    func clearMessages() {
+        DispatchQueue.main.async {
+            self.messages = []
+            self.conversations = []
+            self.isLoading = true
+        }
+    }
+
     // MARK: - Cleanup
 
     deinit {
         stopListening()
+        #if DEBUG
         print("[MessageStore] Deinitialized - all listeners removed")
+        #endif
     }
 
     // MARK: - Load More Messages (Pagination)
@@ -906,11 +1039,15 @@ class MessageStore: ObservableObject {
                     self.canLoadMore = response.hasMore
                     self.isLoadingMore = false
 
+                    #if DEBUG
                     print("[MessageStore] Loaded \(newMessages.count) more messages via VPS pagination")
+                    #endif
                 }
             } catch {
                 await MainActor.run {
+                    #if DEBUG
                     print("[MessageStore] Error loading more messages: \(error)")
+                    #endif
                     self.error = error
                     self.isLoadingMore = false
                 }
@@ -1266,6 +1403,13 @@ class MessageStore: ObservableObject {
         )
     }
 
+    /// Reconciles optimistic pending outgoing messages with confirmed remote messages.
+    ///
+    /// When a user sends a message, a "pending_*" placeholder is added to the UI
+    /// immediately. Once Android confirms delivery and the message syncs back via VPS,
+    /// this method matches pending messages to their remote counterparts using address +
+    /// body + timestamp proximity (within 5 minutes). Matched pending messages are
+    /// removed; unmatched ones remain visible as still-sending.
     private func mergeMessagesWithPendingOutgoing(remoteMessages: [Message]) -> (mergedMessages: [Message], matchedPendingIds: Set<String>) {
         let pendingSnapshot = pendingOutgoingQueue.sync { pendingOutgoingMessages }
         guard !pendingSnapshot.isEmpty else {
@@ -1328,7 +1472,9 @@ class MessageStore: ObservableObject {
             do {
                 try await VPSService.shared.deleteMessages(messageIds: [message.id])
             } catch {
+                #if DEBUG
                 print("Failed to delete message: \(error)")
+                #endif
             }
         }
     }
@@ -1352,7 +1498,9 @@ class MessageStore: ObservableObject {
             do {
                 try await VPSService.shared.deleteMessages(messageIds: Array(ids))
             } catch {
+                #if DEBUG
                 print("Failed to delete messages: \(error)")
+                #endif
             }
         }
     }
@@ -1408,7 +1556,10 @@ class MessageStore: ObservableObject {
             )
 
             // PUT file data to presigned URL
-            var uploadRequest = URLRequest(url: URL(string: uploadResponse.uploadUrl)!)
+            guard let uploadUrl = URL(string: uploadResponse.uploadUrl) else {
+                throw VPSError.invalidResponse
+            }
+            var uploadRequest = URLRequest(url: uploadUrl)
             uploadRequest.httpMethod = "PUT"
             uploadRequest.setValue(attachment.contentType, forHTTPHeaderField: "Content-Type")
             uploadRequest.httpBody = attachment.data
@@ -1468,7 +1619,9 @@ class MessageStore: ObservableObject {
 
                 try await VPSService.shared.syncSentMessage(syncPayload)
             } catch {
+                #if DEBUG
                 print("[MessageStore] Failed to sync encrypted sent message: \(error.localizedDescription)")
+                #endif
             }
         }
     }
@@ -1720,12 +1873,16 @@ class MessageStore: ObservableObject {
                     if self.selectedSpamAddress == nil {
                         self.selectedSpamAddress = self.spamMessages.first?.address
                     }
+                    #if DEBUG
                     if mapped.count != previousCount {
                         print("[MessageStore VPS] Loaded \(mapped.count) spam messages")
                     }
+                    #endif
                 }
             } catch {
+                #if DEBUG
                 print("[MessageStore VPS] Error loading spam: \(error.localizedDescription)")
+                #endif
             }
         }
     }

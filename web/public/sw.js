@@ -1,15 +1,14 @@
 // Service Worker for PWA functionality and offline support
 // This file should be placed in the public directory
 
-const CACHE_NAME = 'syncflow-v1.0.0';
-const STATIC_CACHE = 'syncflow-static-v1.0.0';
-const DYNAMIC_CACHE = 'syncflow-dynamic-v1.0.0';
-const API_CACHE = 'syncflow-api-v1.0.0';
+const CACHE_NAME = 'syncflow-v1.0.1';
+const STATIC_CACHE = 'syncflow-static-v1.0.1';
+const DYNAMIC_CACHE = 'syncflow-dynamic-v1.0.1';
+const API_CACHE = 'syncflow-api-v1.0.1';
 
 // Static assets to cache (only assets guaranteed to exist at these exact paths)
 const STATIC_ASSETS = [
   '/manifest.json',
-  '/favicon.ico',
   '/icon-192.png',
   '/icon-512.png',
 ];
@@ -73,7 +72,18 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Handle static assets and pages
+  // Navigation requests (HTML pages): always network-first to avoid stale content
+  if (request.mode === 'navigate') {
+    event.respondWith(
+      fetch(request).catch(async () => {
+        const cached = await caches.match('/offline.html');
+        return cached || new Response('Offline', { status: 503, headers: { 'Content-Type': 'text/html' } });
+      })
+    );
+    return;
+  }
+
+  // Static assets (JS, CSS, images, fonts): cache-first with network fallback
   event.respondWith(
     caches.match(request)
       .then((cachedResponse) => {
@@ -93,10 +103,8 @@ self.addEventListener('fetch', (event) => {
         });
       })
       .catch(() => {
-        // Return offline fallback for navigation requests
-        if (request.mode === 'navigate') {
-          return caches.match('/offline.html') || new Response('Offline', { status: 503 });
-        }
+        // No cache and network failed
+        return new Response('', { status: 503 });
       })
   );
 });

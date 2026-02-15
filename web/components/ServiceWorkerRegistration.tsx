@@ -23,12 +23,9 @@ export function ServiceWorkerRegistration() {
       const isAdminRoute = pathname?.startsWith('/admin');
 
       if (isAdminRoute) {
-        console.log('[PWA] Skipping service worker registration on admin route:', pathname);
-
         // Unregister any existing service workers on admin routes
         navigator.serviceWorker.getRegistrations().then((registrations) => {
           registrations.forEach((registration) => {
-            console.log('[PWA] Unregistering service worker on admin route');
             registration.unregister();
           });
         });
@@ -40,17 +37,13 @@ export function ServiceWorkerRegistration() {
       navigator.serviceWorker
         .register('/sw.js', { scope: '/' })
         .then((registration) => {
-          console.log('[PWA] Service worker registered:', registration);
-
           // Handle updates
           registration.addEventListener('updatefound', () => {
             const newWorker = registration.installing;
             if (newWorker) {
               newWorker.addEventListener('statechange', () => {
                 if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
-                  // New version available
-                  console.log('[PWA] New version available');
-                  // You could show a notification to the user here
+                  // New version available - could show a notification to the user
                 }
               });
             }
@@ -58,9 +51,7 @@ export function ServiceWorkerRegistration() {
 
           // Request notification permission
           if ('Notification' in window && Notification.permission === 'default') {
-            Notification.requestPermission().then((permission) => {
-              console.log('[PWA] Notification permission:', permission);
-            });
+            Notification.requestPermission();
           }
         })
         .catch((error) => {
@@ -68,18 +59,10 @@ export function ServiceWorkerRegistration() {
         });
 
       // Handle PWA install prompt
-      let deferredPrompt: any;
-
       window.addEventListener('beforeinstallprompt', (e) => {
-        // Prevent the mini-infobar from appearing on mobile
-        e.preventDefault();
-        // Stash the event so it can be triggered later
-        deferredPrompt = e;
-        console.log('[PWA] Install prompt saved');
+        // Stash the event so it can be triggered later via manual install button
+        (window as any).deferredPrompt = e;
       });
-
-      // Make deferredPrompt available globally for manual install trigger
-      (window as any).deferredPrompt = deferredPrompt;
     }
   }, [pathname]);
 

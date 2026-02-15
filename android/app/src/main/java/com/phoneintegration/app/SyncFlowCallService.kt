@@ -75,22 +75,63 @@ class SyncFlowCallService : Service() {
 
         // Track recently handled call IDs to prevent duplicate notifications
         // (e.g., FCM arriving after WebSocket already handled the call)
+        // In-memory set for fast lookup within the current process lifecycle.
         private val recentlyHandledCallIds = LinkedHashSet<String>()
         private const val MAX_RECENT_CALL_IDS = 20
+        private const val HANDLED_CALLS_PREFS = "handled_syncflow_calls"
+        private const val HANDLED_CALLS_KEY = "call_ids"
+        private const val HANDLED_CALLS_MAX_AGE_MS = 120_000L // 2 minutes
 
-        fun markCallHandled(callId: String) {
+        fun markCallHandled(callId: String, context: Context? = null) {
             synchronized(recentlyHandledCallIds) {
                 recentlyHandledCallIds.add(callId)
-                // Trim old entries to prevent unbounded growth
                 while (recentlyHandledCallIds.size > MAX_RECENT_CALL_IDS) {
                     recentlyHandledCallIds.iterator().let { it.next(); it.remove() }
                 }
             }
+            // Persist to SharedPreferences so dedup survives process death
+            context?.let { persistHandledCallId(it, callId) }
         }
 
-        fun wasCallRecentlyHandled(callId: String): Boolean {
+        fun wasCallRecentlyHandled(callId: String, context: Context? = null): Boolean {
             synchronized(recentlyHandledCallIds) {
-                return callId in recentlyHandledCallIds
+                if (callId in recentlyHandledCallIds) return true
+            }
+            // Check persistent storage as fallback
+            return context?.let { isCallInPersistedSet(it, callId) } ?: false
+        }
+
+        private fun persistHandledCallId(context: Context, callId: String) {
+            try {
+                val prefs = context.getSharedPreferences(HANDLED_CALLS_PREFS, Context.MODE_PRIVATE)
+                val existing = prefs.getStringSet(HANDLED_CALLS_KEY, emptySet())?.toMutableSet() ?: mutableSetOf()
+                // Store as "callId|timestamp" for expiry
+                existing.add("$callId|${System.currentTimeMillis()}")
+                // Prune expired entries
+                val now = System.currentTimeMillis()
+                val pruned = existing.filter { entry ->
+                    val ts = entry.substringAfterLast("|", "0").toLongOrNull() ?: 0
+                    now - ts < HANDLED_CALLS_MAX_AGE_MS
+                }.toSet()
+                prefs.edit().putStringSet(HANDLED_CALLS_KEY, pruned).apply()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to persist handled call ID: ${e.message}")
+            }
+        }
+
+        private fun isCallInPersistedSet(context: Context, callId: String): Boolean {
+            return try {
+                val prefs = context.getSharedPreferences(HANDLED_CALLS_PREFS, Context.MODE_PRIVATE)
+                val entries = prefs.getStringSet(HANDLED_CALLS_KEY, emptySet()) ?: emptySet()
+                val now = System.currentTimeMillis()
+                entries.any { entry ->
+                    val parts = entry.split("|")
+                    val id = parts.firstOrNull() ?: ""
+                    val ts = parts.lastOrNull()?.toLongOrNull() ?: 0
+                    id == callId && now - ts < HANDLED_CALLS_MAX_AGE_MS
+                }
+            } catch (e: Exception) {
+                false
             }
         }
 
@@ -253,9 +294,9 @@ class SyncFlowCallService : Service() {
                 Log.d(TAG, "Incoming user call: callId=$callId, caller=$callerName")
 
                 // Guard: ignore duplicate notifications for the same call
-                // This handles: same WebSocket message twice, FCM after WebSocket, service restart
-                if (pendingIncomingCall?.id == callId || isCallActive || wasCallRecentlyHandled(callId)) {
-                    Log.d(TAG, "Ignoring duplicate incoming call notification for $callId (pending=${pendingIncomingCall?.id}, active=$isCallActive, recentlyHandled=${wasCallRecentlyHandled(callId)})")
+                // This handles: same WebSocket message twice, FCM after WebSocket, service restart, process death
+                if (pendingIncomingCall?.id == callId || isCallActive || wasCallRecentlyHandled(callId, applicationContext)) {
+                    Log.d(TAG, "Ignoring duplicate incoming call notification for $callId (pending=${pendingIncomingCall?.id}, active=$isCallActive, recentlyHandled=${wasCallRecentlyHandled(callId, applicationContext)})")
                     return START_NOT_STICKY
                 }
 
@@ -269,7 +310,7 @@ class SyncFlowCallService : Service() {
 
                 val userId = vpsClient.userId ?: return START_NOT_STICKY
 
-                markCallHandled(callId)
+                markCallHandled(callId, applicationContext)
 
                 // Create the pending incoming call
                 val call = com.phoneintegration.app.models.SyncFlowCall(
@@ -527,8 +568,8 @@ class SyncFlowCallService : Service() {
             for (callMap in pendingCalls) {
                 val callId = callMap["id"] as? String ?: continue
 
-                // Skip if already handled
-                if (wasCallRecentlyHandled(callId) || pendingIncomingCall?.id == callId || isCallActive) {
+                // Skip if already handled (checks both in-memory and persisted set)
+                if (wasCallRecentlyHandled(callId, applicationContext) || pendingIncomingCall?.id == callId || isCallActive) {
                     continue
                 }
                 if (_callManager?.currentCall?.value?.id == callId) {
@@ -1038,7 +1079,7 @@ class SyncFlowCallService : Service() {
     private fun answerCall(callId: String, withVideo: Boolean) {
         val userId = vpsClient.userId ?: return
 
-        markCallHandled(callId) // Prevent duplicate notifications for this call
+        markCallHandled(callId, applicationContext) // Prevent duplicate notifications for this call
 
         val incomingCall = pendingIncomingCall
         val isUserCall = incomingCall?.isUserCall ?: false

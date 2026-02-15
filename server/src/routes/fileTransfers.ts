@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { query, queryOne } from '../services/database';
+import { getEffectivePlan, getPlanLimits } from './usage';
 import { authenticate } from '../middleware/auth';
 import { apiRateLimit } from '../middleware/rateLimit';
 import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
@@ -15,14 +16,14 @@ router.use(apiRateLimit);
 // R2/S3 Client configuration
 const s3Client = new S3Client({
   region: 'auto',
-  endpoint: config.r2?.endpoint || process.env.R2_ENDPOINT,
+  endpoint: config.r2.endpoint,
   credentials: {
-    accessKeyId: config.r2?.accessKeyId || process.env.R2_ACCESS_KEY_ID || '',
-    secretAccessKey: config.r2?.secretAccessKey || process.env.R2_SECRET_ACCESS_KEY || '',
+    accessKeyId: config.r2.accessKeyId,
+    secretAccessKey: config.r2.secretAccessKey,
   },
 });
 
-const BUCKET_NAME = config.r2?.bucketName || process.env.R2_BUCKET_NAME || 'syncflow-files';
+const BUCKET_NAME = config.r2.bucketName;
 
 // Validation schemas
 const uploadUrlSchema = z.object({
@@ -88,6 +89,30 @@ router.post('/upload-url', async (req: Request, res: Response) => {
     const body = uploadUrlSchema.parse(req.body);
     const userId = req.userId!;
 
+    // Enforce upload limits
+    const usage = await queryOne(
+      'SELECT storage_bytes, bandwidth_bytes_month FROM user_usage WHERE user_id = $1',
+      [userId]
+    );
+    const { plan: effectivePlan } = await getEffectivePlan(userId);
+    const limits = getPlanLimits(effectivePlan);
+    const currentMonthly = parseInt(usage?.bandwidth_bytes_month || '0');
+    const currentStorage = parseInt(usage?.storage_bytes || '0');
+
+    if (body.fileSize > limits.maxFileSize) {
+      res.status(413).json({ error: `File too large. Max ${Math.round(limits.maxFileSize / (1024 * 1024))} MB for your plan.`, upgrade: true });
+      return;
+    }
+    if (currentMonthly + body.fileSize > limits.monthlyUploadLimit) {
+      res.status(429).json({ error: 'Monthly upload limit reached. Upgrade to Pro for more.', upgrade: true });
+      return;
+    }
+    // File transfers are ephemeral so only check storage for non-file types (MMS)
+    if (body.transferType === 'mms' && currentStorage + body.fileSize > limits.storageLimit) {
+      res.status(429).json({ error: 'Storage limit reached. Delete existing data or upgrade to Pro.', upgrade: true });
+      return;
+    }
+
     // Generate file key - deterministic for MMS (prevents duplicate uploads),
     // timestamp-based for other transfers (allows multiple versions)
     const fileKey = body.transferType === 'mms'
@@ -128,8 +153,18 @@ router.post('/download-url', async (req: Request, res: Response) => {
       return;
     }
 
-    // Verify the file belongs to this user
-    if (!fileKey.startsWith(`${userId}/`)) {
+    // Verify ownership via DB (not path prefix, which breaks after user migration)
+    // Check file_transfers, photos, and MMS parts
+    const ownerCheck = await query(
+      `SELECT 1 FROM user_file_transfers WHERE user_id = $1 AND r2_key = $2
+       UNION ALL
+       SELECT 1 FROM user_photos WHERE user_id = $1 AND r2_key = $2
+       UNION ALL
+       SELECT 1 FROM user_messages WHERE user_id = $1 AND mms_parts::text LIKE '%' || $2 || '%'
+       LIMIT 1`,
+      [userId, fileKey]
+    );
+    if (ownerCheck.length === 0) {
       res.status(403).json({ error: 'Access denied' });
       return;
     }
@@ -156,6 +191,12 @@ router.post('/confirm-upload', async (req: Request, res: Response) => {
     const userId = req.userId!;
     const deviceId = req.deviceId;
 
+    // MMS uploads are tracked in user_messages.mms_parts — don't duplicate into file_transfers
+    if (body.transferType === 'mms') {
+      res.json({ success: true, id: 'mms' });
+      return;
+    }
+
     // Extract filename from fileKey
     const fileName = body.fileKey.split('/').pop() || body.fileKey;
     const transferId = `transfer_${Date.now()}_${Math.random().toString(36).substring(7)}`;
@@ -166,6 +207,18 @@ router.post('/confirm-upload', async (req: Request, res: Response) => {
        VALUES ($1, $2, $3, $4, $5, $6, 'completed', $7)`,
       [transferId, userId, fileName, body.fileSize, body.fileKey, deviceId, Date.now()]
     );
+
+    // Record file transfer usage (bandwidth only, not persistent storage)
+    if (body.fileSize > 0) {
+      await query(
+        `INSERT INTO user_usage (user_id, storage_bytes, bandwidth_bytes_month, updated_at)
+         VALUES ($1, 0, $2, NOW())
+         ON CONFLICT (user_id) DO UPDATE SET
+           bandwidth_bytes_month = user_usage.bandwidth_bytes_month + $2,
+           updated_at = NOW()`,
+        [userId, body.fileSize]
+      );
+    }
 
     res.json({ success: true, id: transferId });
   } catch (error) {
@@ -279,8 +332,15 @@ router.post('/delete-file', async (req: Request, res: Response) => {
       return;
     }
 
-    // Verify the file belongs to this user
-    if (!fileKey.startsWith(`${userId}/`)) {
+    // Verify ownership via DB (not path prefix, which breaks after user migration)
+    const ownerCheck = await query(
+      `SELECT 1 FROM user_file_transfers WHERE user_id = $1 AND r2_key = $2
+       UNION ALL
+       SELECT 1 FROM user_photos WHERE user_id = $1 AND r2_key = $2
+       LIMIT 1`,
+      [userId, fileKey]
+    );
+    if (ownerCheck.length === 0) {
       res.status(403).json({ error: 'Access denied' });
       return;
     }

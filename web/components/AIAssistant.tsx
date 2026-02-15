@@ -503,9 +503,16 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     for (const msg of messages) {
       const bodyLower = msg.body.toLowerCase()
 
-      // Skip credits/refunds (same as Android — no debit keyword requirement)
+      // Skip credits/refunds and balance-only messages
       if (bodyLower.includes('credited') || bodyLower.includes('refund') ||
           bodyLower.includes('reversal') || bodyLower.includes('deposit')) {
+        continue
+      }
+
+      // Skip balance notifications (not spending transactions)
+      if ((bodyLower.includes('balance') || bodyLower.includes('avl bal') || bodyLower.includes('available bal')) &&
+          !bodyLower.includes('debited') && !bodyLower.includes('spent') && !bodyLower.includes('paid') &&
+          !bodyLower.includes('purchased') && !bodyLower.includes('charged')) {
         continue
       }
 

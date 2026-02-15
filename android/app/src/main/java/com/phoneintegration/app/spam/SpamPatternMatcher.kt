@@ -78,7 +78,9 @@ class SpamPatternMatcher {
                 val json = patternsFile.readText()
                 loadPatternsFromJson(json)
                 return
-            } catch (_: Exception) { }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to load patterns from file, falling back to defaults", e)
+            }
         }
         loadDefaultPatterns()
     }

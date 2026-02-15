@@ -13,35 +13,11 @@ export default function AdminLoginPage() {
   const [error, setError] = useState('')
   const [isLoading, setIsLoading] = useState(false)
 
-  // Debug: Check if page is loading properly
-  useEffect(() => {
-    console.log('AdminLoginPage: Component mounted')
-    console.log('AdminLoginPage: Current loading state:', isLoading)
-  }, [])
-
-  // Debug: Check for any automatic form submission
-  useEffect(() => {
-    const handleFormSubmit = (e: Event) => {
-      console.log('Form submit event detected:', e)
-    }
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Enter') {
-        console.log('Enter key pressed')
-      }
-    }
-    document.addEventListener('submit', handleFormSubmit)
-    document.addEventListener('keydown', handleKeyDown)
-    return () => {
-      document.removeEventListener('submit', handleFormSubmit)
-      document.removeEventListener('keydown', handleKeyDown)
-    }
-  }, [])
-
   // Check if already authenticated on mount
   useEffect(() => {
     const checkExistingSession = () => {
       try {
-        const sessionStr = localStorage.getItem('syncflow_admin_session')
+        const sessionStr = sessionStorage.getItem('syncflow_admin_session')
         if (sessionStr) {
           const session = JSON.parse(sessionStr)
           if (session.authenticated && Date.now() < session.expiresAt) {
@@ -49,12 +25,12 @@ export default function AdminLoginPage() {
             return
           } else {
             // Session expired
-            localStorage.removeItem('syncflow_admin_session')
+            sessionStorage.removeItem('syncflow_admin_session')
           }
         }
       } catch (err) {
         console.error('Session check error:', err)
-        localStorage.removeItem('syncflow_admin_session')
+        sessionStorage.removeItem('syncflow_admin_session')
       }
     }
 
@@ -78,14 +54,8 @@ export default function AdminLoginPage() {
         role: 'admin'
       }
 
-      console.log('Setting admin session:', adminSession)
-      localStorage.setItem('syncflow_admin_session', JSON.stringify(adminSession))
+      sessionStorage.setItem('syncflow_admin_session', JSON.stringify(adminSession))
 
-      // Verify session was set
-      const storedSession = localStorage.getItem('syncflow_admin_session')
-      console.log('Stored session:', storedSession)
-
-      console.log('Redirecting to /admin/cleanup...')
       // Redirect to admin dashboard
       router.push('/admin/cleanup')
     } catch (error: any) {
@@ -115,10 +85,7 @@ export default function AdminLoginPage() {
         </div>
 
         <div className="max-w-md mx-auto">
-          <form onSubmit={(e) => {
-            console.log('Form submitted')
-            handleLogin(e)
-          }} className="space-y-6">
+          <form onSubmit={handleLogin} className="space-y-6">
             {error && (
               <div className="flex items-center gap-3 p-4 bg-red-900/50 border border-red-700 rounded-lg">
                 <AlertTriangle className="w-5 h-5 text-red-400 flex-shrink-0" />
@@ -134,12 +101,7 @@ export default function AdminLoginPage() {
                  id="username"
                  type="text"
                  value={username}
-                 onChange={(e) => {
-                   console.log('Username input changed:', e.target.value)
-                   setUsername(e.target.value)
-                 }}
-                 onFocus={() => console.log('Username input focused')}
-                 onBlur={() => console.log('Username input blurred')}
+                 onChange={(e) => setUsername(e.target.value)}
                  className="w-full px-4 py-3 bg-gray-700 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                  placeholder="admin"
                  required

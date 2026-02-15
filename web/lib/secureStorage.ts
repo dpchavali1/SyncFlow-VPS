@@ -55,7 +55,7 @@ class SecureStorage {
           }
         },
       })
-      console.log('[SecureStorage] IndexedDB initialized')
+      // IndexedDB initialized successfully
     } catch (error) {
       console.error('[SecureStorage] Failed to initialize IndexedDB:', error)
       throw error
@@ -85,7 +85,6 @@ class SecureStorage {
     }
 
     await this.db.put(this.storeName, item)
-    console.log(`[SecureStorage] Stored key: ${key} (encrypted: ${encrypted})`)
   }
 
   /**
@@ -127,7 +126,6 @@ class SecureStorage {
     }
 
     await this.db.delete(this.storeName, key)
-    console.log(`[SecureStorage] Removed key: ${key}`)
   }
 
   /**
@@ -141,7 +139,6 @@ class SecureStorage {
     }
 
     await this.db.clear(this.storeName)
-    console.log('[SecureStorage] Cleared all keys')
   }
 
   /**
@@ -182,22 +179,17 @@ class SecureStorage {
    * @param keys - Array of localStorage keys to migrate
    */
   async migrateFromLocalStorage(keys: string[]): Promise<void> {
-    console.log('[SecureStorage] Starting migration from localStorage')
-
     for (const key of keys) {
       const value = localStorage.getItem(key)
       if (value !== null) {
         try {
           await this.setItem(key, value, true)
           localStorage.removeItem(key)
-          console.log(`[SecureStorage] Migrated key: ${key}`)
         } catch (error) {
           console.error(`[SecureStorage] Failed to migrate key: ${key}`, error)
         }
       }
     }
-
-    console.log('[SecureStorage] Migration complete')
   }
 
   /**

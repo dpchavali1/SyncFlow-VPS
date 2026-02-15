@@ -9,17 +9,13 @@ import SwiftUI
 
 private let trialDays: Int64 = 7 // 7 day trial
 
-// Trial/Free tier: 500MB upload/month, 100MB storage
-private let trialMonthlyBytes: Int64 = 500 * 1024 * 1024
-private let trialStorageBytes: Int64 = 100 * 1024 * 1024
-
-// Paid tier: 10GB upload/month, 2GB storage
-private let paidMonthlyBytes: Int64 = 10 * 1024 * 1024 * 1024
-private let paidStorageBytes: Int64 = 2 * 1024 * 1024 * 1024
-
-// File size limits (no daily transfer limits - egress is free with R2)
-private let maxFileSizeFree: Int64 = 50 * 1024 * 1024      // 50MB per file
-private let maxFileSizePro: Int64 = 1024 * 1024 * 1024     // 1GB per file
+// Fallback limits when server doesn't provide them
+private let freeMonthlyBytes: Int64 = 200 * 1024 * 1024
+private let freeStorageBytes: Int64 = 100 * 1024 * 1024
+private let freeMaxFileSize: Int64 = 50 * 1024 * 1024
+private let paidMonthlyBytes: Int64 = 2 * 1024 * 1024 * 1024
+private let paidStorageBytes: Int64 = 1 * 1024 * 1024 * 1024
+private let paidMaxFileSize: Int64 = 500 * 1024 * 1024
 
 struct UsageSettingsView: View {
     @EnvironmentObject var appState: AppState
@@ -70,8 +66,8 @@ struct UsageSettingsView: View {
 
             if let summary = summary {
                 let planLabel = planLabel(plan: summary.plan, isPaid: summary.isPaid)
-                let monthlyLimit = summary.isPaid ? paidMonthlyBytes : trialMonthlyBytes
-                let storageLimit = summary.isPaid ? paidStorageBytes : trialStorageBytes
+                let monthlyLimit = summary.monthlyUploadLimit
+                let storageLimit = summary.storageLimit
 
                 Section {
                     LabeledContent("Plan") {
@@ -99,6 +95,11 @@ struct UsageSettingsView: View {
                     Text("MMS: \(formatBytes(summary.monthlyMmsBytes)) • Photos: \(formatBytes(summary.monthlyPhotoBytes)) • Files: \(formatBytes(summary.monthlyFileBytes))")
                         .font(.caption)
                         .foregroundColor(.secondary)
+                    if let resetDate = summary.monthlyResetDate {
+                        Text("Resets on \(formatDate(resetDate))")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 } header: {
                     Text("Usage")
                 }
@@ -114,7 +115,7 @@ struct UsageSettingsView: View {
                 }
 
                 // File Transfer section
-                let maxFileSize = summary.isPaid ? maxFileSizePro : maxFileSizeFree
+                let maxFileSize = summary.maxFileSize
 
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
@@ -246,7 +247,11 @@ struct UsageSettingsView: View {
                 monthlyFileBytes: usage.monthlyFileBytes ?? 0,
                 monthlyPhotoBytes: usage.monthlyPhotoBytes ?? 0,
                 lastUpdatedAt: usage.lastUpdatedAt,
-                isPaid: isPaid
+                isPaid: isPaid,
+                monthlyUploadLimit: (usage.monthlyUploadLimit ?? 0) > 0 ? usage.monthlyUploadLimit! : (isPaid ? paidMonthlyBytes : freeMonthlyBytes),
+                storageLimit: (usage.storageLimit ?? 0) > 0 ? usage.storageLimit! : (isPaid ? paidStorageBytes : freeStorageBytes),
+                maxFileSize: (usage.maxFileSize ?? 0) > 0 ? usage.maxFileSize! : (isPaid ? paidMaxFileSize : freeMaxFileSize),
+                monthlyResetDate: usage.monthlyResetDate
             )
         } catch {
             errorMessage = "Failed to load usage: \(error.localizedDescription)"
@@ -267,6 +272,10 @@ private struct UsageSummary {
     let monthlyPhotoBytes: Int64
     let lastUpdatedAt: Int64?
     let isPaid: Bool
+    let monthlyUploadLimit: Int64
+    let storageLimit: Int64
+    let maxFileSize: Int64
+    let monthlyResetDate: Int64?
 }
 
 private struct UsageBarRow: View {

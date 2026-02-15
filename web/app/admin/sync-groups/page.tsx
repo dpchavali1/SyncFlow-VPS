@@ -22,12 +22,12 @@ interface SyncGroup {
 
 const isValidAdminSession = (): boolean => {
   try {
-    const sessionStr = localStorage.getItem('syncflow_admin_session')
+    const sessionStr = sessionStorage.getItem('syncflow_admin_session')
     if (!sessionStr) return false
     const session: AdminSession = JSON.parse(sessionStr)
     if (!session.authenticated) return false
     if (Date.now() > session.expiresAt) {
-      localStorage.removeItem('syncflow_admin_session')
+      sessionStorage.removeItem('syncflow_admin_session')
       return false
     }
     return true

@@ -61,17 +61,13 @@ import kotlin.math.min
 private const val TRIAL_DAYS = 7 // 7 day trial
 private const val MILLIS_PER_DAY = 24L * 60L * 60L * 1000L
 
-// Trial/Free tier: 500MB upload/month, 100MB storage
-private const val TRIAL_MONTHLY_UPLOAD_BYTES = 500L * 1024L * 1024L
-private const val TRIAL_STORAGE_BYTES = 100L * 1024L * 1024L
-
-// Paid tier: 10GB upload/month, 2GB storage
-private const val PAID_MONTHLY_UPLOAD_BYTES = 10L * 1024L * 1024L * 1024L
-private const val PAID_STORAGE_BYTES = 2L * 1024L * 1024L * 1024L
-
-// File size limits (no daily limits - R2 has free egress)
-private const val MAX_FILE_SIZE_FREE = 50L * 1024L * 1024L     // 50MB per file
-private const val MAX_FILE_SIZE_PRO = 1024L * 1024L * 1024L    // 1GB per file
+// Fallback limits when server doesn't provide them
+private const val FREE_MONTHLY_UPLOAD_BYTES = 200L * 1024L * 1024L
+private const val FREE_STORAGE_BYTES = 100L * 1024L * 1024L
+private const val FREE_MAX_FILE_SIZE = 50L * 1024L * 1024L
+private const val PAID_MONTHLY_UPLOAD_BYTES = 2L * 1024L * 1024L * 1024L
+private const val PAID_STORAGE_BYTES = 1L * 1024L * 1024L * 1024L
+private const val PAID_MAX_FILE_SIZE = 500L * 1024L * 1024L
 
 private data class UsageSummary(
     val plan: String?,
@@ -83,7 +79,11 @@ private data class UsageSummary(
     val monthlyFileBytes: Long,
     val monthlyPhotoBytes: Long,
     val lastUpdatedAt: Long?,
-    val isPaid: Boolean
+    val isPaid: Boolean,
+    val monthlyUploadLimit: Long,
+    val storageLimit: Long,
+    val maxFileSize: Long,
+    val monthlyResetDate: Long?
 )
 
 private sealed class UsageUiState {
@@ -238,8 +238,8 @@ fun UsageSettingsScreen(onBack: () -> Unit) {
                     val now = System.currentTimeMillis()
                     val planLabel = planLabel(summary.plan, summary.isPaid)
                     val trialDays = trialDaysRemaining(summary.trialStartedAt, now)
-                    val monthlyLimit = if (summary.isPaid) PAID_MONTHLY_UPLOAD_BYTES else TRIAL_MONTHLY_UPLOAD_BYTES
-                    val storageLimit = if (summary.isPaid) PAID_STORAGE_BYTES else TRIAL_STORAGE_BYTES
+                    val monthlyLimit = summary.monthlyUploadLimit
+                    val storageLimit = summary.storageLimit
 
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Column(
@@ -327,6 +327,13 @@ fun UsageSettingsScreen(onBack: () -> Unit) {
                                 text = "MMS: ${formatBytes(summary.monthlyMmsBytes)} • Photos: ${formatBytes(summary.monthlyPhotoBytes)} • Files: ${formatBytes(summary.monthlyFileBytes)}",
                                 style = MaterialTheme.typography.bodySmall
                             )
+                            if (summary.monthlyResetDate != null) {
+                                Text(
+                                    text = "Resets on ${formatDate(summary.monthlyResetDate)}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
 
@@ -346,7 +353,7 @@ fun UsageSettingsScreen(onBack: () -> Unit) {
                     }
 
                     // File Transfer section
-                    val maxFileSize = if (summary.isPaid) MAX_FILE_SIZE_PRO else MAX_FILE_SIZE_FREE
+                    val maxFileSize = summary.maxFileSize
 
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Column(
@@ -447,29 +454,27 @@ private fun UsageBar(label: String, progress: Float) {
 }
 
 private fun parseUsageFromVPS(data: VPSUsageData): UsageSummary {
-    val plan = data.plan
-    val planExpiresAt = data.planExpiresAt
-    val trialStartedAt = data.trialStartedAt
-    val storageBytes = data.storageBytes
-    val lastUpdatedAt = data.lastUpdatedAt
-    val monthlyUploadBytes = data.monthlyUploadBytes
-    val monthlyMmsBytes = data.monthlyMmsBytes
-    val monthlyFileBytes = data.monthlyFileBytes
-
     val now = System.currentTimeMillis()
-    val isPaid = isPaidPlan(plan, planExpiresAt, now)
+    val isPaid = isPaidPlan(data.plan, data.planExpiresAt, now)
 
     return UsageSummary(
-        plan = plan,
-        planExpiresAt = planExpiresAt,
-        trialStartedAt = trialStartedAt,
-        storageBytes = storageBytes,
-        monthlyUploadBytes = monthlyUploadBytes,
-        monthlyMmsBytes = monthlyMmsBytes,
-        monthlyFileBytes = monthlyFileBytes,
+        plan = data.plan,
+        planExpiresAt = data.planExpiresAt,
+        trialStartedAt = data.trialStartedAt,
+        storageBytes = data.storageBytes,
+        monthlyUploadBytes = data.monthlyUploadBytes,
+        monthlyMmsBytes = data.monthlyMmsBytes,
+        monthlyFileBytes = data.monthlyFileBytes,
         monthlyPhotoBytes = data.monthlyPhotoBytes,
-        lastUpdatedAt = lastUpdatedAt,
-        isPaid = isPaid
+        lastUpdatedAt = data.lastUpdatedAt,
+        isPaid = isPaid,
+        monthlyUploadLimit = if (data.monthlyUploadLimit > 0) data.monthlyUploadLimit
+            else if (isPaid) PAID_MONTHLY_UPLOAD_BYTES else FREE_MONTHLY_UPLOAD_BYTES,
+        storageLimit = if (data.storageLimit > 0) data.storageLimit
+            else if (isPaid) PAID_STORAGE_BYTES else FREE_STORAGE_BYTES,
+        maxFileSize = if (data.maxFileSize > 0) data.maxFileSize
+            else if (isPaid) PAID_MAX_FILE_SIZE else FREE_MAX_FILE_SIZE,
+        monthlyResetDate = data.monthlyResetDate
     )
 }
 
@@ -484,7 +489,11 @@ private fun defaultUsageSummary(): UsageSummary {
         monthlyFileBytes = 0L,
         monthlyPhotoBytes = 0L,
         lastUpdatedAt = null,
-        isPaid = false
+        isPaid = false,
+        monthlyUploadLimit = FREE_MONTHLY_UPLOAD_BYTES,
+        storageLimit = FREE_STORAGE_BYTES,
+        maxFileSize = FREE_MAX_FILE_SIZE,
+        monthlyResetDate = null
     )
 }
 

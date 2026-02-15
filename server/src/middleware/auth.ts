@@ -43,7 +43,9 @@ export function authenticate(
   req.deviceId = payload.deviceId;
 
   // Update device last seen (async, don't wait)
-  updateDeviceLastSeen(payload.deviceId).catch(() => {});
+  updateDeviceLastSeen(payload.deviceId).catch((err) => {
+    console.warn('[Auth] Failed to update device last seen:', err?.message || err);
+  });
 
   next();
 }

@@ -1,3 +1,16 @@
+/**
+ * WebSocket server for real-time push to connected clients (Mac, Web, Android).
+ *
+ * Architecture:
+ *   - Clients authenticate via a JWT token passed as a query parameter on connect.
+ *   - Each client subscribes to one or more channels (messages, contacts, calls, etc.).
+ *   - The server maintains an in-memory map of userId -> Set<WebSocket> for routing.
+ *   - A PostgreSQL LISTEN/NOTIFY listener (via a dedicated pool connection) forwards
+ *     database-level trigger notifications to the appropriate user's WebSocket clients.
+ *   - WebRTC signaling is also relayed here for SyncFlow calls between devices.
+ *   - A 30-second heartbeat (ping/pong) detects and cleans up dead connections.
+ */
+
 import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage, Server as HttpServer } from 'http';
 import { verifyToken, TokenPayload } from './auth';
@@ -86,8 +99,6 @@ export function createWebSocketServer(server: HttpServer): WebSocketServer {
     }
     userConnections.get(client.userId)!.add(client);
 
-    console.log(`WebSocket connected: user=${client.userId}, device=${client.deviceId}`);
-
     // Send connection confirmation
     client.send(JSON.stringify({
       type: 'connected',
@@ -125,7 +136,6 @@ export function createWebSocketServer(server: HttpServer): WebSocketServer {
           }
         }
       }
-      console.log(`WebSocket disconnected: user=${client.userId}, device=${client.deviceId}`);
     });
 
     // Handle errors
@@ -239,8 +249,12 @@ async function handleWebRTCSignal(client: AuthenticatedWebSocket, message: Subsc
   broadcastToAllDevicesExcept(client.userId, client.deviceId || '', 'calls', signalMessage);
 }
 
+// PostgreSQL LISTEN/NOTIFY integration.
+// DB triggers (defined in schema.sql) fire NOTIFY on INSERT/UPDATE/DELETE for
+// user-scoped tables. The channel name encodes the table and user, e.g.
+// "user_messages_<userId>". This function holds a dedicated pool connection
+// that receives those notifications and fans them out to WebSocket clients.
 async function setupDatabaseListeners(): Promise<void> {
-  // Listen to notifications from PostgreSQL triggers
   const tables = [
     'user_messages',
     'user_contacts',
@@ -259,8 +273,6 @@ async function setupDatabaseListeners(): Promise<void> {
       }
     });
 
-    // We'll listen for specific user channels dynamically
-    // For now, set up a general pattern
     client.on('error', (err) => {
       console.error('PostgreSQL listener error:', err);
     });

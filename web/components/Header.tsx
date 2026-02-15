@@ -3,14 +3,17 @@
 import { useRouter } from 'next/navigation'
 import { Smartphone, LogOut, Settings, Menu, Download } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
+import { unpairDevice } from '@/lib/auth'
 
 export default function Header() {
   const router = useRouter()
   const { toggleSidebar } = useAppStore()
 
-  const handleLogout = () => {
-    localStorage.removeItem('syncflow_user_id')
+  const handleLogout = async () => {
+    // Remove device from server (broadcasts device_removed to Android), clear tokens, disconnect WebSocket
+    await unpairDevice()
     useAppStore.getState().setUserId(null)
+    useAppStore.getState().setMessages([])
     router.push('/')
   }
 

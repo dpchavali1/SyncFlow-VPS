@@ -66,6 +66,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.NumberFormat
 import java.util.*
+import kotlin.math.abs
 import kotlin.math.min
 import com.phoneintegration.app.MessageCategory
 
@@ -371,6 +372,12 @@ object SpendingParser {
                 lower.contains("deposit")
             ) return@forEach
 
+            // Skip balance notifications (not spending transactions)
+            if ((lower.contains("balance") || lower.contains("avl bal") || lower.contains("available bal")) &&
+                !lower.contains("debited") && !lower.contains("spent") && !lower.contains("paid") &&
+                !lower.contains("purchased") && !lower.contains("charged")
+            ) return@forEach
+
             var amount: Double? = null
             for (r in amountRegex) {
                 val m = r.find(body)
@@ -607,6 +614,38 @@ fun AIAssistantScreen(messages: List<SmsMessage>, onDismiss: () -> Unit) {
                             sb.toString()
                         }
                     }
+                }
+            ),
+            QueryHandler(
+                name = "COMPARE_MONTHS",
+                regex = Regex("""compare|vs last|trend|versus""", RegexOption.IGNORE_CASE),
+                handler = {
+                    val cal = Calendar.getInstance()
+                    cal.set(Calendar.DAY_OF_MONTH, 1)
+                    cal.set(Calendar.HOUR_OF_DAY, 0)
+                    cal.set(Calendar.MINUTE, 0)
+                    cal.set(Calendar.SECOND, 0)
+                    cal.set(Calendar.MILLISECOND, 0)
+                    val thisMonthStart = cal.timeInMillis
+
+                    cal.add(Calendar.MONTH, -1)
+                    val lastMonthStart = cal.timeInMillis
+
+                    val thisMonthTxns = transactions.filter { it.date >= thisMonthStart }
+                    val lastMonthTxns = transactions.filter { it.date >= lastMonthStart && it.date < thisMonthStart }
+
+                    val thisMonthTotal = thisMonthTxns.sumOf { it.amount }
+                    val lastMonthTotal = lastMonthTxns.sumOf { it.amount }
+                    val currency = thisMonthTxns.firstOrNull()?.currency ?: transactions.firstOrNull()?.currency ?: "INR"
+
+                    val diff = thisMonthTotal - lastMonthTotal
+                    val percentChange = if (lastMonthTotal > 0) String.format("%.1f", (diff / lastMonthTotal) * 100) else "0"
+                    val trend = if (diff > 0) "increased" else "decreased"
+
+                    "📊 **Spending Trends**\n\n" +
+                    "This Month: **${formatCurrency(thisMonthTotal, currency)}** (${thisMonthTxns.size} transactions)\n" +
+                    "Last Month: **${formatCurrency(lastMonthTotal, currency)}** (${lastMonthTxns.size} transactions)\n\n" +
+                    "Your spending has $trend by **${formatCurrency(abs(diff), currency)}** ($percentChange%)"
                 }
             ),
             QueryHandler(

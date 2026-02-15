@@ -13,6 +13,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.phoneintegration.app.auth.AuthManager
+import com.phoneintegration.app.data.PreferencesManager
 import com.phoneintegration.app.desktop.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -231,7 +232,8 @@ class BatteryAwareServiceManager private constructor(private val context: Contex
                 if (userEnabledServices.contains("files") && shouldStartService("files")) {
                     startFileTransferService()
                 }
-                if (userEnabledServices.contains("photos") && shouldStartService("photos")) {
+                val prefsManager = PreferencesManager(context)
+                if (prefsManager.photoSyncEnabled.value && shouldStartService("photos")) {
                     startPhotoSyncService()
                 }
             }

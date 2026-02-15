@@ -1,12 +1,21 @@
 /**
- * VPS Service for Web - Replacement for Firebase
+ * VPS WebSocket + REST service for the web client.
  *
- * This module provides all VPS functionality for the web client,
- * including authentication, real-time sync, and data management.
+ * Replaces the Firebase Realtime Database path with a self-hosted VPS
+ * backend (Express + PostgreSQL). Provides:
+ *   - JWT-based auth with access/refresh token rotation
+ *   - QR-code pairing flow (web generates token, Android scans + approves)
+ *   - REST endpoints for messages, contacts, calls, file transfers, spam
+ *   - WebSocket for real-time push (message_added, delivery_status_changed, etc.)
+ *   - Full admin API surface (users, cleanup, R2 storage, crash reports)
+ *
+ * The class is exported as a true singleton (attached to window) so it
+ * survives Next.js chunk re-evaluation across page navigations.
  */
 
-import { getPublicKeyX963Base64 } from './e2ee';
+import { getPublicKeyX963Base64, getOrCreateSigningKeyPair } from './e2ee';
 import { PhoneNumberNormalizer } from './phoneNumberNormalizer';
+import { secureStorage } from './secureStorage';
 
 // VPS Server Configuration
 const VPS_BASE_URL = process.env.NEXT_PUBLIC_VPS_URL || 'https://api.sfweb.app';
@@ -109,9 +118,47 @@ type WebSocketEventType =
   | 'device_removed'
   | 'e2ee_key_available'
   | 'outgoing_status_changed'
-  | 'delivery_status_changed';
+  | 'delivery_status_changed'
+  | 'spam_updated';
 
-type EventCallback = (data: any) => void;
+/** Default request timeout in milliseconds (30 seconds). */
+const REQUEST_TIMEOUT_MS = 30_000;
+
+// ==================== WebSocket Event Data Types ====================
+
+/** Payload for message-related WebSocket events. */
+export interface WSMessageData {
+  id?: string;
+  messageId?: string;
+  messages?: VPSMessage[];
+  [key: string]: unknown;
+}
+
+/** Payload for device-related WebSocket events. */
+export interface WSDeviceData {
+  id?: string;
+  deviceId?: string;
+  [key: string]: unknown;
+}
+
+/** Payload for delivery/outgoing status events. */
+export interface WSStatusData {
+  id?: string;
+  status?: string;
+  deliveryStatus?: string;
+  [key: string]: unknown;
+}
+
+/** Union of all possible WebSocket event payloads. */
+export type WSEventData = WSMessageData | WSDeviceData | WSStatusData | Event | null;
+
+/** Parsed WebSocket message envelope. */
+interface WSMessageEnvelope {
+  type: string;
+  data?: Record<string, unknown>;
+}
+
+type EventCallback = (data: WSEventData) => void;
 
 // VPS Service Class
 class VPSService {
@@ -124,15 +171,59 @@ class VPSService {
   private eventListeners: Map<WebSocketEventType, Set<EventCallback>> = new Map();
   private reconnectAttempts = 0;
   private e2eeKeyPushResolver: (() => void) | null = null;
+  private tokenRestorePromise: Promise<void> | null = null;
 
   constructor() {
-    // Restore tokens from localStorage
+    // Restore non-secret identifiers from localStorage (synchronous)
     if (typeof window !== 'undefined') {
-      this.accessToken = localStorage.getItem(STORAGE_KEYS.accessToken);
-      this.refreshToken = localStorage.getItem(STORAGE_KEYS.refreshToken);
       this.userId = localStorage.getItem(STORAGE_KEYS.userId);
       this.deviceId = localStorage.getItem(STORAGE_KEYS.deviceId);
-      console.log('[VPS] Service init: userId=', this.userId, 'hasToken=', !!this.accessToken);
+
+      // Migrate tokens from localStorage to secureStorage (IndexedDB) if present
+      // Then restore tokens from secureStorage asynchronously
+      this.tokenRestorePromise = this.restoreTokensFromSecureStorage();
+    }
+  }
+
+  /**
+   * Restore tokens from IndexedDB-based secureStorage.
+   * If tokens still exist in localStorage (pre-migration), migrate them over
+   * and remove from localStorage.
+   */
+  private async restoreTokensFromSecureStorage(): Promise<void> {
+    try {
+      // Check for legacy localStorage tokens and migrate
+      const legacyAccess = localStorage.getItem(STORAGE_KEYS.accessToken);
+      const legacyRefresh = localStorage.getItem(STORAGE_KEYS.refreshToken);
+      if (legacyAccess) {
+        await secureStorage.setItem(STORAGE_KEYS.accessToken, legacyAccess);
+        localStorage.removeItem(STORAGE_KEYS.accessToken);
+      }
+      if (legacyRefresh) {
+        await secureStorage.setItem(STORAGE_KEYS.refreshToken, legacyRefresh);
+        localStorage.removeItem(STORAGE_KEYS.refreshToken);
+      }
+
+      // Restore from secureStorage
+      const [storedAccess, storedRefresh] = await Promise.all([
+        secureStorage.getItem(STORAGE_KEYS.accessToken),
+        secureStorage.getItem(STORAGE_KEYS.refreshToken),
+      ]);
+      if (storedAccess) this.accessToken = storedAccess;
+      if (storedRefresh) this.refreshToken = storedRefresh;
+    } catch (err) {
+      console.error('[VPS] Failed to restore tokens from secureStorage:', err);
+    }
+  }
+
+  /**
+   * Ensure tokens have been restored from secureStorage before proceeding.
+   * Call this before any operation that depends on authentication state.
+   */
+  async ensureTokensRestored(): Promise<void> {
+    if (this.tokenRestorePromise) {
+      await this.tokenRestorePromise;
+      this.tokenRestorePromise = null;
     }
   }
 
@@ -150,18 +241,26 @@ class VPSService {
     return this.deviceId;
   }
 
-  private saveTokens(accessToken: string, refreshToken: string, userId: string, deviceId: string) {
-    console.log('[VPS] saveTokens: userId=', userId, 'deviceId=', deviceId);
+  private async saveTokens(accessToken: string, refreshToken: string, userId: string, deviceId: string) {
     this.accessToken = accessToken;
     this.refreshToken = refreshToken;
     this.userId = userId;
     this.deviceId = deviceId;
 
     if (typeof window !== 'undefined') {
-      localStorage.setItem(STORAGE_KEYS.accessToken, accessToken);
-      localStorage.setItem(STORAGE_KEYS.refreshToken, refreshToken);
+      // Non-secret identifiers stay in localStorage
       localStorage.setItem(STORAGE_KEYS.userId, userId);
       localStorage.setItem(STORAGE_KEYS.deviceId, deviceId);
+
+      // Tokens go to secureStorage (IndexedDB) instead of localStorage
+      try {
+        await Promise.all([
+          secureStorage.setItem(STORAGE_KEYS.accessToken, accessToken),
+          secureStorage.setItem(STORAGE_KEYS.refreshToken, refreshToken),
+        ]);
+      } catch (err) {
+        console.error('[VPS] Failed to persist tokens to secureStorage:', err);
+      }
     }
   }
 
@@ -172,10 +271,19 @@ class VPSService {
     this.deviceId = null;
 
     if (typeof window !== 'undefined') {
-      localStorage.removeItem(STORAGE_KEYS.accessToken);
-      localStorage.removeItem(STORAGE_KEYS.refreshToken);
-      localStorage.removeItem(STORAGE_KEYS.userId);
-      localStorage.removeItem(STORAGE_KEYS.deviceId);
+      // Clear all syncflow_* and vps_* keys from localStorage
+      const keysToRemove: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && (key.startsWith('syncflow_') || key.startsWith('vps_'))) {
+          keysToRemove.push(key);
+        }
+      }
+      keysToRemove.forEach(key => localStorage.removeItem(key));
+
+      // Remove tokens from secureStorage (IndexedDB)
+      secureStorage.removeItem(STORAGE_KEYS.accessToken).catch(() => {});
+      secureStorage.removeItem(STORAGE_KEYS.refreshToken).catch(() => {});
     }
 
     this.disconnectWebSocket();
@@ -183,7 +291,7 @@ class VPSService {
 
   // ==================== HTTP Helpers ====================
 
-  private async request<T>(method: string, path: string, body?: any, skipAuth = false): Promise<T> {
+  private async request<T>(method: string, path: string, body?: unknown, skipAuth = false): Promise<T> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
@@ -192,24 +300,32 @@ class VPSService {
       headers['Authorization'] = `Bearer ${this.accessToken}`;
     }
 
-    const response = await fetch(`${VPS_BASE_URL}${path}`, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
-    if (response.status === 401 && !skipAuth) {
-      // Try to refresh token
-      await this.refreshAccessToken();
-      return this.request(method, path, body, false);
+    try {
+      const response = await fetch(`${VPS_BASE_URL}${path}`, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+
+      if (response.status === 401 && !skipAuth) {
+        // Try to refresh token
+        await this.refreshAccessToken();
+        return this.request(method, path, body, false);
+      }
+
+      if (!response.ok) {
+        const error = await response.text();
+        throw new Error(`HTTP ${response.status}: ${error}`);
+      }
+
+      return response.json();
+    } finally {
+      clearTimeout(timeoutId);
     }
-
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`HTTP ${response.status}: ${error}`);
-    }
-
-    return response.json();
   }
 
   private async refreshAccessToken(): Promise<void> {
@@ -226,7 +342,8 @@ class VPSService {
 
     this.accessToken = response.accessToken;
     if (typeof window !== 'undefined') {
-      localStorage.setItem(STORAGE_KEYS.accessToken, response.accessToken);
+      // Persist refreshed access token to secureStorage (IndexedDB)
+      secureStorage.setItem(STORAGE_KEYS.accessToken, response.accessToken).catch(() => {});
     }
   }
 
@@ -246,10 +363,14 @@ class VPSService {
   }
 
   async initiatePairing(deviceName: string): Promise<VPSPairingRequest> {
+    const signingKey = await getOrCreateSigningKeyPair();
+    const body: Record<string, string> = { deviceName, deviceType: 'web' };
+    if (signingKey) body.signingKey = signingKey;
+
     const response = await this.request<VPSPairingRequest>(
       'POST',
       '/api/auth/pair/initiate',
-      { deviceName, deviceType: 'web' },
+      body,
       true
     );
 
@@ -278,7 +399,10 @@ class VPSService {
   }
 
   async redeemPairing(token: string): Promise<VPSUser> {
-    console.log('[Pairing] Calling pair/redeem...');
+    const signingKey = await getOrCreateSigningKeyPair();
+    const body: Record<string, string> = { token, deviceType: 'web' };
+    if (signingKey) body.signingKey = signingKey;
+
     const response = await this.request<{
       userId: string;
       deviceId: string;
@@ -287,11 +411,10 @@ class VPSService {
     }>(
       'POST',
       '/api/auth/pair/redeem',
-      { token, deviceType: 'web' },
+      body,
       true
     );
 
-    console.log('[Pairing] Redeem success, userId:', response.userId);
     this.saveTokens(
       response.accessToken,
       response.refreshToken,
@@ -324,7 +447,6 @@ class VPSService {
 
       if (status.approved) {
         // Redeem errors should NOT be swallowed - throw immediately
-        console.log('[Pairing] Approved! Redeeming...');
         return this.redeemPairing(token);
       }
 
@@ -492,7 +614,9 @@ class VPSService {
 
   connectWebSocket() {
     if (!this.accessToken) {
-      console.warn('[VPS] Cannot connect WebSocket - not authenticated');
+      if (process.env.NODE_ENV === 'development') {
+        console.log('[VPS] Cannot connect WebSocket - not authenticated');
+      }
       return;
     }
 
@@ -511,7 +635,6 @@ class VPSService {
       this.ws = new WebSocket(`${VPS_WS_URL}?token=${this.accessToken}`);
 
       this.ws.onopen = () => {
-        console.log('[VPS] WebSocket connected');
         this.reconnectAttempts = 0;
         this.emit('connected', null);
 
@@ -519,13 +642,12 @@ class VPSService {
         if (this.ws?.readyState === WebSocket.OPEN) {
           this.ws.send(JSON.stringify({
             type: 'subscribe',
-            channels: ['messages', 'contacts', 'calls', 'devices'],
+            channels: ['messages', 'contacts', 'calls', 'devices', 'spam'],
           }));
         }
       };
 
       this.ws.onclose = () => {
-        console.log('[VPS] WebSocket disconnected');
         this.emit('disconnected', null);
         this.scheduleReconnect();
       };
@@ -537,24 +659,21 @@ class VPSService {
 
       this.ws.onmessage = (event) => {
         try {
-          const data = JSON.parse(event.data);
-          if (data.type) {
+          const envelope: WSMessageEnvelope = JSON.parse(event.data);
+          if (envelope.type) {
             // Handle E2EE key push: wake up polling immediately
-            if (data.type === 'e2ee_key_available') {
-              const targetDeviceId = data.data?.deviceId;
+            if (envelope.type === 'e2ee_key_available') {
+              const targetDeviceId = envelope.data?.deviceId;
               if (targetDeviceId === this.deviceId && this.e2eeKeyPushResolver) {
-                console.log('[VPS] E2EE key push received, waking up poll');
                 this.e2eeKeyPushResolver();
                 this.e2eeKeyPushResolver = null;
               }
             }
 
             // Handle device removal: if this device was unpaired remotely, clear auth
-            if (data.type === 'device_removed') {
-              const removedId = data.data?.id || data.data?.deviceId || '';
-              console.log(`[VPS] Device removed notification: ${removedId}, myDeviceId=${this.deviceId}`);
+            if (envelope.type === 'device_removed') {
+              const removedId = (envelope.data?.id || envelope.data?.deviceId || '') as string;
               if (removedId === this.deviceId || removedId === '') {
-                console.log('[VPS] This device was unpaired remotely - clearing auth');
                 this.clearTokens();
                 // Redirect to pairing screen
                 if (typeof window !== 'undefined') {
@@ -562,7 +681,7 @@ class VPSService {
                 }
               }
             }
-            this.emit(data.type as WebSocketEventType, data.data || data);
+            this.emit(envelope.type as WebSocketEventType, (envelope.data || envelope) as WSEventData);
           }
         } catch (error) {
           console.error('[VPS] Failed to parse WebSocket message:', error);
@@ -586,16 +705,21 @@ class VPSService {
     }
   }
 
+  /**
+   * Reconnect with exponential backoff.
+   * Delay doubles each attempt (2s, 4s, 8s, 16s) and caps at 30s.
+   * Resets to 0 on successful connection (see ws.onopen).
+   * Skipped entirely if auth tokens have been cleared (user logged out).
+   */
   private scheduleReconnect() {
     if (!this.accessToken) return;
 
     this.reconnectAttempts++;
-    // Exponential backoff capped at 30s: 2, 4, 8, 16, 30, 30, ...
-    const delay = Math.min(Math.pow(2, Math.min(this.reconnectAttempts, 5)) * 1000, 30000);
-
-    if (this.reconnectAttempts <= 3 || this.reconnectAttempts % 10 === 0) {
-      console.log(`[VPS] Scheduling reconnect in ${delay}ms (attempt ${this.reconnectAttempts})`);
+    if (this.reconnectAttempts > 20) {
+      console.warn('[VPS] WebSocket max reconnect attempts (20) reached, giving up');
+      return;
     }
+    const delay = Math.min(Math.pow(2, Math.min(this.reconnectAttempts, 5)) * 1000, 30000);
 
     this.wsReconnectTimer = setTimeout(() => {
       this.connectWebSocket();
@@ -615,7 +739,7 @@ class VPSService {
     this.eventListeners.get(event)?.delete(callback);
   }
 
-  private emit(event: WebSocketEventType, data: any) {
+  private emit(event: WebSocketEventType, data: WSEventData) {
     this.eventListeners.get(event)?.forEach(callback => callback(data));
   }
 
@@ -660,6 +784,22 @@ class VPSService {
       this.e2eeKeyPushResolver = null;
     }
     return null;
+  }
+
+  async publishE2EEPublicKey(publicKey: string): Promise<{ success: boolean }> {
+    return this.request('POST', '/api/e2ee/public-key', { publicKey });
+  }
+
+  async requestE2EEKeySync(targetDevice: string): Promise<{ success: boolean }> {
+    return this.request('POST', '/api/e2ee/key-request', { targetDevice });
+  }
+
+  async repairEncryption(): Promise<{ success: boolean }> {
+    return this.request('POST', '/api/e2ee/repair');
+  }
+
+  async getKeyBackups(): Promise<{ backups: Array<{ encryptedBackup: string; salt: string; iterations: number; keyVersion: number; createdAt: number }> }> {
+    return this.request('GET', '/api/e2ee/key-backup');
   }
 
   // ==================== Admin API ====================
@@ -900,6 +1040,20 @@ class VPSService {
     return this.request('GET', '/api/admin/analytics/features');
   }
 
+  // ==================== Admin: Site Analytics ====================
+
+  async getSiteAnalyticsOverview(days: number = 30): Promise<any> {
+    return this.request('GET', `/api/analytics/admin/overview?days=${days}`);
+  }
+
+  async getSiteAnalyticsVisits(days: number = 30): Promise<any> {
+    return this.request('GET', `/api/analytics/admin/visits?days=${days}`);
+  }
+
+  async getSiteAnalyticsDownloads(days: number = 30): Promise<any> {
+    return this.request('GET', `/api/analytics/admin/downloads?days=${days}`);
+  }
+
   // ==================== Admin: Pending Deletions ====================
 
   async getPendingDeletions(): Promise<any> {
@@ -914,10 +1068,50 @@ class VPSService {
     return this.request('POST', `/api/admin/cancel-deletion/${userId}`);
   }
 
+  // ==================== Spam ====================
+
+  async getSpamMessages(limit = 100): Promise<{ messages: any[] }> {
+    return this.request('GET', `/api/spam/messages?limit=${limit}`);
+  }
+
+  async deleteSpamMessage(messageId: string): Promise<void> {
+    await this.request('DELETE', `/api/spam/messages/${messageId}`);
+  }
+
+  async clearAllSpamMessages(): Promise<void> {
+    await this.request('DELETE', '/api/spam/messages');
+  }
+
+  async addToWhitelist(phoneNumber: string): Promise<void> {
+    await this.request('POST', '/api/spam/whitelist', { phoneNumber });
+  }
+
+  async removeFromWhitelist(phoneNumber: string): Promise<void> {
+    await this.request('DELETE', '/api/spam/whitelist', { phoneNumber });
+  }
+
   // ==================== Usage ====================
 
   async getUsage(): Promise<any> {
     return this.request('GET', '/api/usage');
+  }
+
+  async syncSubscription(): Promise<any> {
+    return this.request('POST', '/api/usage/subscription/sync');
+  }
+
+  // Photos
+  async getPhotos(limit = 50): Promise<any> {
+    return this.request('GET', `/api/photos?limit=${limit}`);
+  }
+
+  async getPhotoDownloadUrl(r2Key: string): Promise<string> {
+    const res: any = await this.request('POST', '/api/photos/download-url', { r2Key });
+    return res.downloadUrl;
+  }
+
+  async deletePhoto(photoId: string): Promise<void> {
+    await this.request('POST', '/api/photos/delete', { photoId });
   }
 }
 

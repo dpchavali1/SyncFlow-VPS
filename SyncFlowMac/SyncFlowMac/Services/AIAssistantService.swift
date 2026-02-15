@@ -250,7 +250,7 @@ class AIAssistantService: ObservableObject {
 
         case .spendingTrends:
             let thisMonth = analyzeSpending(messages: messages, merchant: nil, timeFilter: .thisMonth)
-            let lastMonth = analyzeSpending(messages: messages, merchant: nil, timeFilter: .last30Days)
+            let lastMonth = analyzeSpending(messages: messages, merchant: nil, timeFilter: .lastMonth)
             let diff = thisMonth.total - lastMonth.total
             let trend = diff > 0 ? "increased" : "decreased"
             let summary = "Your spending has \(trend) by \(thisMonth.currency == "INR" ? "₹" : "$")\(String(format: "%.2f", abs(diff)))"
@@ -492,6 +492,13 @@ class AIAssistantService: ObservableObject {
             // Skip credit/refund messages (same as Android)
             if bodyLower.contains("credited") || bodyLower.contains("refund") ||
                bodyLower.contains("reversal") || bodyLower.contains("deposit") {
+                continue
+            }
+
+            // Skip balance notifications (not spending transactions)
+            let isBalanceMsg = bodyLower.contains("balance") || bodyLower.contains("avl bal") || bodyLower.contains("available bal")
+            let hasDebitKeyword = bodyLower.contains("debited") || bodyLower.contains("spent") || bodyLower.contains("paid") || bodyLower.contains("purchased") || bodyLower.contains("charged")
+            if isBalanceMsg && !hasDebitKeyword {
                 continue
             }
 

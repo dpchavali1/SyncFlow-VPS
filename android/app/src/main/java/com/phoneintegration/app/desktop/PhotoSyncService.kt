@@ -11,6 +11,8 @@ import android.os.Looper
 import android.provider.MediaStore
 import android.util.Log
 import com.phoneintegration.app.auth.UnifiedIdentityManager
+import com.phoneintegration.app.data.PreferencesManager
+import com.phoneintegration.app.utils.NetworkUtils
 import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.*
 import okhttp3.MediaType.Companion.toMediaType
@@ -145,6 +147,9 @@ class PhotoSyncService(context: Context) {
     /** Unified identity manager for cross-platform user identification */
     private val unifiedIdentityManager = UnifiedIdentityManager.getInstance(context)
 
+    /** Preferences manager for user-configurable photo limit */
+    private val preferencesManager = PreferencesManager(this.context)
+
     /** MediaStore observer for detecting new photos */
     private var contentObserver: ContentObserver? = null
 
@@ -188,10 +193,10 @@ class PhotoSyncService(context: Context) {
         private const val THUMBNAIL_QUALITY = 80
 
         /**
-         * Maximum number of recent photos to sync and keep in VPS.
-         * Older photos beyond this limit are cleaned up.
+         * Default number of recent photos to sync and keep in VPS.
+         * User can configure this via settings (5-100).
          */
-        private const val MAX_PHOTOS_TO_SYNC = 20
+        private const val DEFAULT_PHOTO_LIMIT = 20
 
         /**
          * Debounce delay for sync operations in milliseconds.
@@ -199,6 +204,10 @@ class PhotoSyncService(context: Context) {
          */
         private const val SYNC_DEBOUNCE_MS = 2000L
     }
+
+    /** Get the user-configured photo sync limit */
+    private val photoLimit: Int
+        get() = preferencesManager.photoSyncLimit.value.coerceIn(5, 100)
 
     // -------------------------------------------------------------------------
     // REGION: Premium Subscription Validation
@@ -448,12 +457,18 @@ class PhotoSyncService(context: Context) {
                 return Result.failure(Exception("User authentication required"))
             }
 
+            // Photo sync requires WiFi to avoid using mobile data for uploads
+            if (!NetworkUtils.isWifiConnected(context)) {
+                Log.i(TAG, "Photo sync skipped - not on WiFi (cellular only)")
+                return Result.success("Photo sync deferred - waiting for WiFi connection")
+            }
+
             Log.d(TAG, "Syncing recent photos...")
 
             // Load already synced IDs from VPS first to prevent duplicates
             loadSyncedPhotoIds()
 
-            val photos = getRecentPhotos(MAX_PHOTOS_TO_SYNC)
+            val photos = getRecentPhotos(photoLimit)
             Log.d(TAG, "Found ${photos.size} recent photos")
 
             for (photo in photos) {
@@ -785,13 +800,13 @@ class PhotoSyncService(context: Context) {
             val photos = vpsClient.getPhotos()
             val photoCount = photos.size
 
-            if (photoCount > MAX_PHOTOS_TO_SYNC) {
+            if (photoCount > photoLimit) {
                 // Sort by syncedAt ascending (oldest first)
                 val sortedPhotos = photos.sortedBy {
                     (it["syncedAt"] as? Number)?.toLong() ?: 0L
                 }
 
-                val photosToDelete = photoCount - MAX_PHOTOS_TO_SYNC
+                val photosToDelete = photoCount - photoLimit
                 var deleted = 0
 
                 for (photo in sortedPhotos) {

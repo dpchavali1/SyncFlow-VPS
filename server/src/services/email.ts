@@ -57,6 +57,42 @@ export async function sendDeletionCancelledEmail(
   );
 }
 
+export async function sendSupportContactEmail(
+  name: string,
+  email: string,
+  subject: string,
+  message: string
+) {
+  const escapedName = escapeHtml(name);
+  const escapedEmail = escapeHtml(email);
+  const escapedSubject = escapeHtml(subject);
+  const escapedMessage = escapeHtml(message).replace(/\n/g, '<br>');
+
+  await sendMail(
+    `[SyncFlow Support] ${subject}`,
+    `<div style="font-family:sans-serif;max-width:600px;margin:0 auto;color:#e2e8f0;background:#1e293b;padding:24px;border-radius:12px">
+      <h2 style="color:#60a5fa;margin-top:0">New Support Request</h2>
+      <table style="width:100%;border-collapse:collapse">
+        <tr><td style="padding:8px 12px;color:#94a3b8;width:100px">Name</td><td style="padding:8px 12px;font-weight:600">${escapedName}</td></tr>
+        <tr><td style="padding:8px 12px;color:#94a3b8">Email</td><td style="padding:8px 12px"><a href="mailto:${escapedEmail}" style="color:#60a5fa">${escapedEmail}</a></td></tr>
+        <tr><td style="padding:8px 12px;color:#94a3b8">Subject</td><td style="padding:8px 12px;font-weight:600">${escapedSubject}</td></tr>
+      </table>
+      <hr style="border:none;border-top:1px solid #334155;margin:16px 0">
+      <div style="padding:12px;background:#0f172a;border-radius:8px;line-height:1.6">${escapedMessage}</div>
+      <hr style="border:none;border-top:1px solid #334155;margin:16px 0">
+      <p style="color:#64748b;font-size:12px">Reply directly to this email to respond to the user at ${escapedEmail}.</p>
+    </div>`
+  );
+}
+
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 export async function sendCleanupReportEmail(
   results: Record<string, number>,
   e2eeResults: Record<string, number>,

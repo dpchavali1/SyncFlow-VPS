@@ -3,6 +3,46 @@
  * Ensures contacts sync correctly between Android, macOS, and Web
  */
 
+// ==================== Conversation-level normalization ====================
+
+/**
+ * LRU Cache for conversation-level phone number normalization.
+ * Shared across all components that group messages by address.
+ */
+const normalizationCache = new Map<string, string>()
+const MAX_CACHE_SIZE = 1000
+
+/**
+ * Normalize a phone number for conversation grouping / comparison.
+ *
+ * - Emails and short codes (< 6 chars): lowercased as-is
+ * - Phone numbers: stripped to digits, last 10 digits used (handles country codes)
+ *
+ * Results are cached in an LRU map for performance.
+ */
+export function normalizePhoneForConversation(address: string): string {
+  const cached = normalizationCache.get(address)
+  if (cached !== undefined) return cached
+
+  let result: string
+  if (address.includes('@') || address.length < 6) {
+    result = address.toLowerCase()
+  } else {
+    const digitsOnly = address.replace(/[^0-9]/g, '')
+    result = digitsOnly.length >= 10 ? digitsOnly.slice(-10) : digitsOnly
+  }
+
+  // Maintain cache size with LRU eviction
+  if (normalizationCache.size >= MAX_CACHE_SIZE) {
+    const firstKey = normalizationCache.keys().next().value
+    if (firstKey) normalizationCache.delete(firstKey)
+  }
+  normalizationCache.set(address, result)
+  return result
+}
+
+// ==================== Full phone number normalization ====================
+
 export class PhoneNumberNormalizer {
   /**
    * Normalize phone number to standard format for comparison

@@ -1,6 +1,36 @@
+/**
+ * Authentication and device pairing routes.
+ *
+ * Auth flows:
+ *   1. Firebase (Android) - POST /auth/firebase
+ *      Android authenticates with its Firebase UID. The server creates or looks up
+ *      a user record, reuses existing devices of the same type to prevent pile-up
+ *      on reinstall, and returns a JWT access + refresh token pair.
+ *
+ *   2. Pairing (Mac/Web) - Three-step QR-code flow:
+ *      a) POST /auth/pair/initiate  - Mac/Web generates a pairing token (no DB user created)
+ *      b) POST /auth/pair/complete  - Android scans QR and approves, linking its userId
+ *      c) POST /auth/pair/redeem    - Mac/Web exchanges approved token for real JWT tokens
+ *
+ *   3. Anonymous - POST /auth/anonymous (creates a throwaway user for testing)
+ *
+ *   4. Admin login - POST /auth/admin/login (username/password from config)
+ *
+ * JWT structure:
+ *   - Access token (short-lived): { sub, deviceId, admin?, pairedUid? }
+ *   - Refresh token (long-lived): same claims, type='refresh'
+ *   - pairedUid is set when a Mac/Web device is paired to an Android user
+ *
+ * Anti-abuse:
+ *   On Firebase auth, the server checks deleted_accounts for recently deleted
+ *   accounts on the same device and carries forward their bandwidth usage to
+ *   prevent delete-and-recreate limit evasion.
+ */
+
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { randomUUID } from 'crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
+import bcrypt from 'bcrypt';
 import {
   createAnonymousUser,
   generateTokenPair,
@@ -15,9 +45,9 @@ import {
   migrateUserData,
 } from '../services/auth';
 import { authenticate } from '../middleware/auth';
-import { authRateLimit } from '../middleware/rateLimit';
+import { authRateLimit, pollingRateLimit } from '../middleware/rateLimit';
 import { config } from '../config';
-import { query } from '../services/database';
+import { query, queryOne } from '../services/database';
 
 const router = Router();
 
@@ -36,6 +66,7 @@ const redeemPairingSchema = z.object({
   deviceName: z.string().min(1).max(255).optional(),
   deviceType: z.enum(['android', 'macos', 'web']).optional(),
   tempUserId: z.string().optional(),
+  signingKey: z.string().max(4096).optional(),
 });
 
 const refreshTokenSchema = z.object({
@@ -46,6 +77,7 @@ const firebaseAuthSchema = z.object({
   firebaseUid: z.string().min(1).max(128),
   deviceName: z.string().min(1).max(255),
   deviceType: z.enum(['android', 'macos', 'web']),
+  signingKey: z.string().max(4096).optional(),
 });
 
 // POST /auth/firebase - Authenticate with Firebase UID (for Android app)
@@ -54,7 +86,7 @@ router.post('/firebase', authRateLimit, async (req: Request, res: Response) => {
     const body = firebaseAuthSchema.parse(req.body);
 
     // Get or create user with Firebase UID
-    const userId = await getOrCreateUserByFirebaseUid(body.firebaseUid);
+    const { userId, migrationPerformed, existingUser } = await getOrCreateUserByFirebaseUid(body.firebaseUid);
 
     // Reuse existing device of the same type if one exists (prevents device pile-up on reinstall)
     const existingDevice = await query<{ id: string }>(
@@ -64,7 +96,7 @@ router.post('/firebase', authRateLimit, async (req: Request, res: Response) => {
 
     const deviceId = existingDevice.length > 0
       ? existingDevice[0].id
-      : `${body.deviceType}_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+      : randomUUID();
 
     if (existingDevice.length > 0) {
       console.log(`[Auth] Reusing existing ${body.deviceType} device: ${deviceId}`);
@@ -74,17 +106,44 @@ router.post('/firebase', authRateLimit, async (req: Request, res: Response) => {
     await registerDevice(userId, deviceId, {
       name: body.deviceName,
       type: body.deviceType,
+      signingKey: body.signingKey,
     });
+
+    // Anti-abuse: carry forward bandwidth from recently deleted account on same device
+    try {
+      const priorDeletion = await queryOne(
+        `SELECT bandwidth_bytes_at_deletion FROM deleted_accounts
+         WHERE $1 = ANY(device_ids) AND deleted_at > NOW() - INTERVAL '30 days'
+         ORDER BY deleted_at DESC LIMIT 1`,
+        [deviceId]
+      );
+      if (priorDeletion && parseInt(priorDeletion.bandwidth_bytes_at_deletion || '0') > 0) {
+        const priorBandwidth = parseInt(priorDeletion.bandwidth_bytes_at_deletion);
+        await query(
+          `INSERT INTO user_usage (user_id, storage_bytes, bandwidth_bytes_month, updated_at)
+           VALUES ($1, 0, $2, NOW())
+           ON CONFLICT (user_id) DO UPDATE SET
+             bandwidth_bytes_month = GREATEST(user_usage.bandwidth_bytes_month, $2),
+             updated_at = NOW()`,
+          [userId, priorBandwidth]
+        );
+        console.log(`[Auth] Anti-abuse: carried forward ${priorBandwidth} bytes bandwidth for user ${userId} from deleted account`);
+      }
+    } catch (e) {
+      console.error('[Auth] Anti-abuse check failed (non-fatal):', e);
+    }
 
     // Generate tokens
     const tokens = generateTokenPair(userId, deviceId);
 
-    console.log(`[Auth] Firebase user authenticated: ${userId} (device: ${body.deviceName})`);
+    console.log(`[Auth] Firebase user authenticated: ${userId} (device: ${body.deviceName})${migrationPerformed ? ' [MIGRATION]' : ''}${existingUser ? ' [EXISTING]' : ' [NEW]'}`);
 
     res.json({
       userId,
       deviceId,
       ...tokens,
+      migrationPerformed,
+      existingUser,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -152,8 +211,8 @@ router.post('/pair/initiate', authRateLimit, async (req: Request, res: Response)
   }
 });
 
-// GET /auth/pair/status/:token - Check pairing status
-router.get('/pair/status/:token', async (req: Request, res: Response) => {
+// GET /auth/pair/status/:token - Check pairing status (polled every 2s by web/Mac)
+router.get('/pair/status/:token', pollingRateLimit, async (req: Request, res: Response) => {
   try {
     const request = await getPairingRequest(req.params.token);
 
@@ -206,21 +265,18 @@ router.post('/pair/redeem', authRateLimit, async (req: Request, res: Response) =
   try {
     const body = redeemPairingSchema.parse(req.body);
 
-    console.log(`[Auth] pair/redeem called with token=${body.token}`);
     const result = await redeemPairingToken(body.token, body.tempUserId);
 
     if (!result) {
-      console.log(`[Auth] pair/redeem failed: pairing not approved or already redeemed`);
       res.status(400).json({ error: 'Pairing not approved or already redeemed' });
       return;
     }
-
-    console.log(`[Auth] pair/redeem success: userId=${result.userId}, deviceId=${result.deviceId}`);
 
     // Register the device under the paired user (Android's user)
     await registerDevice(result.userId, result.deviceId, {
       name: body.deviceName,
       type: body.deviceType || 'web',
+      signingKey: body.signingKey,
     });
 
     // Generate tokens with pairedUid
@@ -292,8 +348,27 @@ router.post('/admin/login', authRateLimit, async (req: Request, res: Response) =
   try {
     const body = adminLoginSchema.parse(req.body);
 
-    // Validate credentials
-    if (body.username !== config.admin.username || body.password !== config.admin.password) {
+    // Validate credentials - supports both bcrypt-hashed and plaintext ADMIN_PASSWORD
+    // Use timing-safe comparison for plaintext to prevent timing attacks
+    const expectedUsername = config.admin.username;
+    const usernameMatch = body.username.length === expectedUsername.length &&
+      timingSafeEqual(Buffer.from(body.username), Buffer.from(expectedUsername));
+    const storedPassword = config.admin.password;
+    const isBcryptHash = storedPassword.startsWith('$2');
+    let passwordMatch: boolean;
+    if (isBcryptHash) {
+      passwordMatch = await bcrypt.compare(body.password, storedPassword);
+    } else {
+      // Pad both to same length for timingSafeEqual (requires equal-length buffers)
+      const maxLen = Math.max(body.password.length, storedPassword.length);
+      const inputBuf = Buffer.alloc(maxLen, 0);
+      const storedBuf = Buffer.alloc(maxLen, 0);
+      Buffer.from(body.password).copy(inputBuf);
+      Buffer.from(storedPassword).copy(storedBuf);
+      passwordMatch = body.password.length === storedPassword.length &&
+        timingSafeEqual(inputBuf, storedBuf);
+    }
+    if (!usernameMatch || !passwordMatch) {
       res.status(401).json({ error: 'Invalid credentials' });
       return;
     }

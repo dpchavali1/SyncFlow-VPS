@@ -28,7 +28,7 @@ export const config = {
 
   // JWT
   jwt: {
-    secret: process.env.JWT_SECRET || 'change-this-in-production',
+    secret: process.env.JWT_SECRET || (() => { throw new Error('JWT_SECRET environment variable is required'); })(),
     expiresIn: process.env.JWT_EXPIRES_IN || '7d',
     refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '30d',
   },
@@ -43,9 +43,10 @@ export const config = {
   corsOrigins: (process.env.CORS_ORIGINS || 'http://localhost:3000,http://localhost:3001,https://sfweb.app,https://www.sfweb.app').split(','),
 
   // Admin credentials (for VPS admin API)
+  // ADMIN_PASSWORD can be plaintext or a bcrypt hash (e.g., generated via: node -e "require('bcrypt').hash('yourpass',10).then(console.log)")
   admin: {
     username: process.env.ADMIN_USERNAME || 'admin',
-    password: process.env.ADMIN_PASSWORD || '***REMOVED***',
+    password: process.env.ADMIN_PASSWORD || (() => { throw new Error('ADMIN_PASSWORD environment variable is required'); })(),
     apiKey: process.env.ADMIN_API_KEY || '',
   },
 
@@ -80,6 +81,11 @@ export const config = {
     webhookSecret: process.env.STRIPE_WEBHOOK_SECRET || '',
     priceMonthly: process.env.STRIPE_PRICE_MONTHLY || '',
     priceYearly: process.env.STRIPE_PRICE_YEARLY || '',
-    priceLifetime: process.env.STRIPE_PRICE_LIFETIME || '',
+    price3Year: process.env.STRIPE_PRICE_3YEAR || '',
   },
 };
+
+// Startup warnings for missing optional security config
+if (!config.admin.apiKey) {
+  console.warn('[WARN] ADMIN_API_KEY is not set — admin API key auth will be disabled');
+}

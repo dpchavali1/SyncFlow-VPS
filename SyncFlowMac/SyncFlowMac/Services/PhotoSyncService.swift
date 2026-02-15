@@ -166,6 +166,23 @@ class PhotoSyncService: ObservableObject {
         }
     }
 
+    // MARK: - Delete Photo
+
+    @MainActor
+    func deletePhoto(_ photo: SyncedPhoto) async {
+        do {
+            try await VPSService.shared.deletePhoto(photoId: photo.id, r2Key: photo.thumbnailUrl)
+
+            // Remove from local cache
+            try? FileManager.default.removeItem(at: photo.localPath)
+
+            // Remove from list
+            recentPhotos.removeAll { $0.id == photo.id }
+        } catch {
+            print("[PhotoSyncService] Error deleting photo \(photo.id): \(error.localizedDescription)")
+        }
+    }
+
     // MARK: - Cache Management
 
     func clearCache() {

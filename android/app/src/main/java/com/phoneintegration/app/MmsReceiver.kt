@@ -140,19 +140,30 @@ class MmsReceiver : BroadcastReceiver() {
                 .getInstance(context)
                 .sendBroadcast(local)
 
-            // Sync to Firebase only if devices are paired (saves battery for Android-only users)
-            if (com.phoneintegration.app.desktop.DesktopSyncService.hasPairedDevices(context)) {
+            // Sync to VPS if authenticated (real-time push to Mac/Web)
+            val vpsSyncService = try {
+                com.phoneintegration.app.vps.VPSSyncService.getInstance(context)
+            } catch (e: Exception) { null }
+
+            if (vpsSyncService?.isAuthenticated == true) {
                 try {
-                    Log.d("MmsReceiver", "Starting Firebase sync for MMS $mmsId")
-                    syncService.syncMessage(message)
+                    vpsSyncService.syncMessage(message)
                     markMmsSynced(mmsId)
                     syncedCount++
-                    Log.d("MmsReceiver", "MMS message synced to Firebase successfully: $mmsId")
+                    Log.d("MmsReceiver", "MMS $mmsId synced to VPS")
+                } catch (e: Exception) {
+                    Log.e("MmsReceiver", "Failed to sync MMS $mmsId to VPS", e)
+                }
+            }
+
+            // Also sync to Firebase if devices are paired (legacy desktop sync)
+            if (com.phoneintegration.app.desktop.DesktopSyncService.hasPairedDevices(context)) {
+                try {
+                    syncService.syncMessage(message)
+                    Log.d("MmsReceiver", "MMS $mmsId synced to Firebase")
                 } catch (e: Exception) {
                     Log.e("MmsReceiver", "Failed to sync MMS $mmsId to Firebase", e)
                 }
-            } else {
-                Log.d("MmsReceiver", "Skipping Firebase sync for MMS $mmsId - no paired devices")
             }
         }
 

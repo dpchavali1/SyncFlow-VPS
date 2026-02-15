@@ -27,6 +27,7 @@ struct UsageStats {
     let isPaid: Bool
     let isTrialExpired: Bool
     let trialDaysRemaining: Int
+    let monthlyResetDate: Int64?
 
     var monthlyUsagePercent: Double {
         guard monthlyLimitBytes > 0 else { return 0 }
@@ -81,13 +82,11 @@ class UsageTracker: ObservableObject {
     private let trialDuration: TimeInterval = 7 * 24 * 60 * 60 // 7 days trial
     private let trialDays = 7
 
-    // Trial/Free tier: 500MB upload/month, 100MB storage
-    private let trialMonthlyBytes: Int64 = 500 * 1024 * 1024
-    private let trialStorageBytes: Int64 = 100 * 1024 * 1024
-
-    // Paid tier: 10GB upload/month, 2GB storage
-    private let paidMonthlyBytes: Int64 = 10 * 1024 * 1024 * 1024
-    private let paidStorageBytes: Int64 = 2 * 1024 * 1024 * 1024
+    // Fallback limits when server doesn't provide them
+    private let freeMonthlyBytes: Int64 = 200 * 1024 * 1024
+    private let freeStorageBytes: Int64 = 100 * 1024 * 1024
+    private let paidMonthlyBytes: Int64 = 2 * 1024 * 1024 * 1024
+    private let paidStorageBytes: Int64 = 1 * 1024 * 1024 * 1024
 
     @Published var usageStats: UsageStats?
     @Published var showLimitWarning: Bool = false
@@ -105,8 +104,15 @@ class UsageTracker: ObservableObject {
             let usage = response.usage
             let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
             let isPaid = isPaidPlan(plan: usage.plan, planExpiresAt: usage.planExpiresAt, nowMs: nowMs)
-            let monthlyLimit = isPaid ? paidMonthlyBytes : trialMonthlyBytes
-            let storageLimit = isPaid ? paidStorageBytes : trialStorageBytes
+
+            // Persist server plan locally so UI (isPaidUser) stays in sync
+            if !usage.plan.isEmpty {
+                PreferencesService.shared.setUserPlan(usage.plan, expiresAt: usage.planExpiresAt ?? 0)
+            }
+
+            // Use server-provided limits (fall back to defaults)
+            let monthlyLimit = (usage.monthlyUploadLimit ?? 0) > 0 ? usage.monthlyUploadLimit! : (isPaid ? paidMonthlyBytes : freeMonthlyBytes)
+            let storageLimit = (usage.storageLimit ?? 0) > 0 ? usage.storageLimit! : (isPaid ? paidStorageBytes : freeStorageBytes)
             let currentMonthly = usage.monthlyUploadBytes ?? 0
             let currentStorage = usage.storageBytes ?? 0
 
@@ -168,14 +174,20 @@ class UsageTracker: ObservableObject {
             let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
             let isPaid = isPaidPlan(plan: usage.plan, planExpiresAt: usage.planExpiresAt, nowMs: nowMs)
 
+            // Persist server plan locally so UI (isPaidUser) stays in sync
+            if !usage.plan.isEmpty {
+                PreferencesService.shared.setUserPlan(usage.plan, expiresAt: usage.planExpiresAt ?? 0)
+            }
+
             let trialStartMs = usage.trialStartedAt ?? nowMs
             let trialElapsedMs = nowMs - trialStartMs
             let trialElapsedDays = Int(trialElapsedMs / (24 * 60 * 60 * 1000))
             let trialDaysRemaining = max(0, trialDays - trialElapsedDays)
             let isTrialExpired = !isPaid && trialElapsedDays > trialDays
 
-            let monthlyLimit = isPaid ? paidMonthlyBytes : trialMonthlyBytes
-            let storageLimit = isPaid ? paidStorageBytes : trialStorageBytes
+            // Use server-provided limits
+            let monthlyLimit = (usage.monthlyUploadLimit ?? 0) > 0 ? usage.monthlyUploadLimit! : (isPaid ? paidMonthlyBytes : freeMonthlyBytes)
+            let storageLimit = (usage.storageLimit ?? 0) > 0 ? usage.storageLimit! : (isPaid ? paidStorageBytes : freeStorageBytes)
 
             let stats = UsageStats(
                 monthlyUploadBytes: usage.monthlyUploadBytes ?? 0,
@@ -184,7 +196,8 @@ class UsageTracker: ObservableObject {
                 storageLimitBytes: storageLimit,
                 isPaid: isPaid,
                 isTrialExpired: isTrialExpired,
-                trialDaysRemaining: trialDaysRemaining
+                trialDaysRemaining: trialDaysRemaining,
+                monthlyResetDate: usage.monthlyResetDate
             )
 
             await MainActor.run {
@@ -199,8 +212,8 @@ class UsageTracker: ObservableObject {
             let planExpiresAt: Int64? = prefs.planExpiresAt
             let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
             let isPaid = isPaidPlan(plan: plan, planExpiresAt: planExpiresAt, nowMs: nowMs)
-            let monthlyLimit = isPaid ? paidMonthlyBytes : trialMonthlyBytes
-            let storageLimit = isPaid ? paidStorageBytes : trialStorageBytes
+            let monthlyLimit = isPaid ? paidMonthlyBytes : freeMonthlyBytes
+            let storageLimit = isPaid ? paidStorageBytes : freeStorageBytes
 
             let stats = UsageStats(
                 monthlyUploadBytes: 0,
@@ -209,7 +222,8 @@ class UsageTracker: ObservableObject {
                 storageLimitBytes: storageLimit,
                 isPaid: isPaid,
                 isTrialExpired: false,
-                trialDaysRemaining: trialDays
+                trialDaysRemaining: trialDays,
+                monthlyResetDate: nil
             )
 
             await MainActor.run {

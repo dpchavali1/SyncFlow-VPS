@@ -1,25 +1,28 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { useRouter } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import Header from '@/components/Header'
 import {
   ensureWebE2EEKeyBackup,
   ensureWebE2EEKeyPublished,
   getUsageSummary,
-  requestWebE2EEKeySync,
   UsageSummary,
   waitForAuth,
-  waitForWebE2EEKeySyncResponse,
 } from '@/lib/firebase'
 import vpsService from '@/lib/vps'
 import {
+  clearAllE2EEKeys,
+  deriveSafetyNumber,
   hasEncryptedKeyPair,
   hasLegacyKeyPair,
+  importSyncGroupKeypair,
   isKeyPairUnlocked,
   lockKeyPair,
   setPassphraseAndEncrypt,
   unlockKeyPairWithPassphrase,
+  getOrCreateKeyPair,
+  getPublicKeyX963Base64,
 } from '@/lib/e2ee'
 import { useAppStore } from '@/lib/store'
 import { NotificationSyncSettings } from '@/components/notification-sync-settings'
@@ -49,13 +52,14 @@ type TabType = 'notifications' | 'usage' | 'account'
 
 export default function SettingsPage() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const { userId, setUserId } = useAppStore()
   const [usage, setUsage] = useState<UsageSummary | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<TabType>('notifications')
-  const [keySyncStatus, setKeySyncStatus] = useState<string | null>(null)
-  const [keySyncLoading, setKeySyncLoading] = useState(false)
+  const [subscriptionBanner, setSubscriptionBanner] = useState<string | null>(null)
+  const [syncingPlan, setSyncingPlan] = useState(false)
   const [keyProtectionStatus, setKeyProtectionStatus] = useState<string | null>(null)
   const [keyProtectionLoading, setKeyProtectionLoading] = useState(false)
   const [passphrase, setPassphrase] = useState('')
@@ -66,6 +70,12 @@ export default function SettingsPage() {
     unlocked: false,
     legacy: false,
   })
+  const [repairLoading, setRepairLoading] = useState(false)
+  const [repairStatus, setRepairStatus] = useState<string | null>(null)
+  const [safetyNumber, setSafetyNumber] = useState<string | null>(null)
+  const [restorePassphrase, setRestorePassphrase] = useState('')
+  const [restoreLoading, setRestoreLoading] = useState(false)
+  const [restoreStatus, setRestoreStatus] = useState<string | null>(null)
 
   const loadUsage = useCallback(async (currentUserId: string) => {
     setIsLoading(true)
@@ -99,6 +109,9 @@ export default function SettingsPage() {
                         true // Default to VPS mode
 
       if (isVPSMode) {
+        // Wait for tokens to be restored from IndexedDB before making API calls
+        await vpsService.ensureTokensRestored()
+
         // VPS mode: load usage from VPS API
         try {
           const data = await vpsService.getUsage()
@@ -106,22 +119,21 @@ export default function SettingsPage() {
             const u = data.usage
             const plan = u.plan || 'free'
             const isPaid = plan !== 'free'
-            const planLabels: Record<string, string> = { free: 'Free', monthly: 'Monthly', yearly: 'Yearly', lifetime: 'Lifetime' }
-            const MONTHLY_LIMIT = isPaid ? 5 * 1024 * 1024 * 1024 : 500 * 1024 * 1024
-            const STORAGE_LIMIT = isPaid ? 10 * 1024 * 1024 * 1024 : 1 * 1024 * 1024 * 1024
+            const planLabels: Record<string, string> = { free: 'Free', monthly: 'Monthly', yearly: 'Yearly', '3year': '3-Year', lifetime: 'Lifetime' }
 
             setUsage({
               planLabel: planLabels[plan] || plan,
               planExpiresAt: u.planExpiresAt || null,
               trialDaysRemaining: isPaid ? null : (u.trialStartedAt ? Math.max(0, 30 - Math.floor((Date.now() - u.trialStartedAt) / 86400000)) : 30),
               monthlyUsedBytes: u.monthlyUploadBytes || 0,
-              monthlyLimitBytes: MONTHLY_LIMIT,
+              monthlyLimitBytes: u.monthlyUploadLimit || 500 * 1024 * 1024,
               storageUsedBytes: u.storageBytes || 0,
-              storageLimitBytes: STORAGE_LIMIT,
+              storageLimitBytes: u.storageLimit || 100 * 1024 * 1024,
               mmsBytes: u.monthlyMmsBytes || 0,
               fileBytes: u.monthlyFileBytes || 0,
               photoBytes: u.monthlyPhotoBytes || 0,
               lastUpdatedAt: u.lastUpdatedAt || null,
+              monthlyResetDate: u.monthlyResetDate || null,
               isPaid,
             })
           }
@@ -174,7 +186,58 @@ export default function SettingsPage() {
 
   useEffect(() => {
     refreshKeyProtection()
+    deriveSafetyNumber().then(setSafetyNumber).catch(() => {})
   }, [refreshKeyProtection])
+
+  useEffect(() => {
+    const sub = searchParams.get('subscription')
+    if (sub === 'success') {
+      setSubscriptionBanner('Payment successful! Syncing your subscription...')
+      // Clear query param from URL without navigation
+      window.history.replaceState({}, '', '/settings')
+      // Sync subscription from Stripe into DB, then reload usage
+      ;(async () => {
+        try {
+          await vpsService.ensureTokensRestored()
+          const result = await vpsService.syncSubscription()
+          if (result?.synced) {
+            setSubscriptionBanner(`Payment successful! Your ${result.plan} plan is now active.`)
+          } else {
+            setSubscriptionBanner(result?.message || 'Payment successful! Your subscription is now active.')
+          }
+        } catch (err) {
+          console.error('Subscription sync error:', err)
+          setSubscriptionBanner('Payment received. Click "Refresh" to update your plan.')
+        }
+        // Reload usage to reflect the new plan
+        try {
+          const data = await vpsService.getUsage()
+          if (data?.usage) {
+            const u = data.usage
+            const plan = u.plan || 'free'
+            const isPaid = plan !== 'free'
+            const planLabels: Record<string, string> = { free: 'Free', monthly: 'Monthly', yearly: 'Yearly', lifetime: 'Lifetime', '3year': '3-Year', pro_monthly: 'Pro Monthly', pro_yearly: 'Pro Yearly' }
+            setUsage({
+              planLabel: planLabels[plan] || plan,
+              planExpiresAt: u.planExpiresAt || null,
+              trialDaysRemaining: isPaid ? null : (u.trialStartedAt ? Math.max(0, 30 - Math.floor((Date.now() - u.trialStartedAt) / 86400000)) : 30),
+              monthlyUsedBytes: u.monthlyUploadBytes || 0,
+              monthlyLimitBytes: u.monthlyUploadLimit || 500 * 1024 * 1024,
+              storageUsedBytes: u.storageBytes || 0,
+              storageLimitBytes: u.storageLimit || 100 * 1024 * 1024,
+              mmsBytes: u.monthlyMmsBytes || 0,
+              fileBytes: u.monthlyFileBytes || 0,
+              photoBytes: u.monthlyPhotoBytes || 0,
+              lastUpdatedAt: u.lastUpdatedAt || null,
+              monthlyResetDate: u.monthlyResetDate || null,
+              isPaid,
+            })
+            setActiveTab('usage')
+          }
+        } catch {}
+      })()
+    }
+  }, [searchParams])
 
   const handleEnableKeyProtection = async () => {
     setKeyProtectionStatus(null)
@@ -233,18 +296,51 @@ export default function SettingsPage() {
     setKeyProtectionStatus('Keys locked.')
   }
 
-  const handleKeySync = async () => {
+  const handleRepairEncryption = async () => {
     if (!userId) return
-    setKeySyncLoading(true)
-    setKeySyncStatus(null)
+    if (!confirm('This will clear encryption keys and re-sync all messages from your Android phone. Your phone must be online. Continue?')) return
+    setRepairLoading(true)
+    setRepairStatus(null)
     try {
-      await requestWebE2EEKeySync(userId)
-      await waitForWebE2EEKeySyncResponse(userId)
-      setKeySyncStatus('Keys synced successfully. Messages will decrypt when you return to Messages.')
+      // Step 1: Clear server keys + trigger Android re-sync
+      await vpsService.repairEncryption()
+
+      // Step 2: Clear all local E2EE state (memory + IndexedDB)
+      await clearAllE2EEKeys()
+
+      // Step 3: Generate fresh device keypair and publish public key
+      await getOrCreateKeyPair()
+      const publicKey = await getPublicKeyX963Base64()
+      if (publicKey) {
+        await vpsService.publishE2EEPublicKey(publicKey)
+      }
+
+      // Step 4: Request key sync from Android device
+      const devicesResp = await vpsService.getDevices()
+      const androidDevice = devicesResp.devices.find((d: any) => d.deviceType === 'android')
+      if (androidDevice) {
+        await vpsService.requestE2EEKeySync(androidDevice.id)
+      }
+
+      // Step 5: Wait for Android to push sync group keys
+      const encryptedKey = await vpsService.waitForDeviceE2eeKey(45000, 2000)
+      if (encryptedKey) {
+        const { decryptDataKey } = await import('@/lib/e2ee')
+        const payloadBytes = await decryptDataKey(encryptedKey)
+        if (payloadBytes) {
+          const payload = JSON.parse(new TextDecoder().decode(payloadBytes))
+          if (payload?.privateKeyPKCS8 && payload?.publicKeyX963) {
+            await importSyncGroupKeypair(payload.privateKeyPKCS8, payload.publicKeyX963)
+          }
+        }
+        setRepairStatus('Encryption repaired. Return to Messages to see decrypted messages.')
+      } else {
+        setRepairStatus('Key sync timed out. Make sure your Android phone is online and try again.')
+      }
     } catch (err: any) {
-      setKeySyncStatus(err?.message || 'Key sync failed')
+      setRepairStatus(err?.message || 'Repair failed')
     } finally {
-      setKeySyncLoading(false)
+      setRepairLoading(false)
     }
   }
 
@@ -276,6 +372,18 @@ export default function SettingsPage() {
           <div className="mb-6">
             <h2 className="text-2xl font-semibold text-gray-900 dark:text-white">Settings</h2>
           </div>
+
+          {subscriptionBanner && (
+            <div className="mb-6 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 text-green-700 dark:text-green-300 px-4 py-3 rounded-lg flex items-center justify-between">
+              <span>{subscriptionBanner}</span>
+              <button
+                onClick={() => setSubscriptionBanner(null)}
+                className="text-green-500 hover:text-green-700 dark:hover:text-green-200"
+              >
+                &times;
+              </button>
+            </div>
+          )}
 
           {isLoading && (
             <div className="flex items-center justify-center py-10">
@@ -391,6 +499,53 @@ export default function SettingsPage() {
                             Renews on {formatDate(usage.planExpiresAt)}
                           </div>
                         )}
+                        {!usage.isPaid && (
+                          <button
+                            onClick={async () => {
+                              setSyncingPlan(true)
+                              try {
+                                await vpsService.ensureTokensRestored()
+                                const result = await vpsService.syncSubscription()
+                                if (result?.synced) {
+                                  setSubscriptionBanner(`Plan synced: ${result.plan} is now active!`)
+                                } else {
+                                  setSubscriptionBanner(result?.message || 'No completed checkout found. Complete payment first.')
+                                }
+                                // Reload usage
+                                const data = await vpsService.getUsage()
+                                if (data?.usage) {
+                                  const u = data.usage
+                                  const plan = u.plan || 'free'
+                                  const isPaid = plan !== 'free'
+                                  const planLabels: Record<string, string> = { free: 'Free', monthly: 'Monthly', yearly: 'Yearly', lifetime: 'Lifetime', '3year': '3-Year', pro_monthly: 'Pro Monthly', pro_yearly: 'Pro Yearly' }
+                                  setUsage({
+                                    planLabel: planLabels[plan] || plan,
+                                    planExpiresAt: u.planExpiresAt || null,
+                                    trialDaysRemaining: isPaid ? null : (u.trialStartedAt ? Math.max(0, 30 - Math.floor((Date.now() - u.trialStartedAt) / 86400000)) : 30),
+                                    monthlyUsedBytes: u.monthlyUploadBytes || 0,
+                                    monthlyLimitBytes: u.monthlyUploadLimit || 500 * 1024 * 1024,
+                                    storageUsedBytes: u.storageBytes || 0,
+                                    storageLimitBytes: u.storageLimit || 100 * 1024 * 1024,
+                                    mmsBytes: u.monthlyMmsBytes || 0,
+                                    fileBytes: u.monthlyFileBytes || 0,
+                                    photoBytes: u.monthlyPhotoBytes || 0,
+                                    lastUpdatedAt: u.lastUpdatedAt || null,
+                                    monthlyResetDate: u.monthlyResetDate || null,
+                                    isPaid,
+                                  })
+                                }
+                              } catch (err: any) {
+                                setSubscriptionBanner(`Sync failed: ${err?.message || 'Unknown error'}`)
+                              } finally {
+                                setSyncingPlan(false)
+                              }
+                            }}
+                            disabled={syncingPlan}
+                            className="mt-2 px-3 py-1.5 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
+                          >
+                            {syncingPlan ? 'Syncing...' : 'Refresh Plan'}
+                          </button>
+                        )}
                       </div>
 
                       <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6">
@@ -411,6 +566,11 @@ export default function SettingsPage() {
                             }}
                           />
                         </div>
+                        {usage.monthlyResetDate && (
+                          <div className="text-xs text-gray-400 dark:text-gray-500 mt-2">
+                            Resets on {new Date(usage.monthlyResetDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                          </div>
+                        )}
                       </div>
 
                       <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6 md:col-span-2">
@@ -475,24 +635,86 @@ export default function SettingsPage() {
                         </div>
                       </div>
                     </div>
+
+                    {safetyNumber && (
+                      <div className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                        <div className="text-sm text-gray-500 dark:text-gray-400 mb-2">Safety Number</div>
+                        <div className="font-mono text-sm text-gray-900 dark:text-gray-100 tracking-wider leading-relaxed">
+                          {safetyNumber}
+                        </div>
+                        <div className="text-xs text-gray-400 dark:text-gray-500 mt-2">
+                          Compare this number with your other devices to verify encryption keys match.
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
 
                 <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6">
-                  <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">End-to-end encryption</h3>
+                  <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Repair encryption</h3>
                   <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
-                    If messages show “sync keys to decrypt”, request a key sync from your phone.
+                    If messages are still encrypted after reinstalling your apps, this clears stale keys and re-syncs everything from your phone.
                   </p>
                   <button
-                    onClick={handleKeySync}
-                    disabled={keySyncLoading}
-                    className="inline-flex items-center justify-center px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                    onClick={handleRepairEncryption}
+                    disabled={repairLoading}
+                    className="inline-flex items-center justify-center px-4 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
                   >
-                    {keySyncLoading ? 'Syncing…' : 'Sync Keys'}
+                    {repairLoading ? 'Repairing...' : 'Repair Encryption'}
                   </button>
-                  {keySyncStatus && (
+                  {repairStatus && (
                     <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">
-                      {keySyncStatus}
+                      {repairStatus}
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6">
+                  <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Restore from backup</h3>
+                  <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
+                    If you backed up your encryption keys on Android, enter your backup passphrase to restore them.
+                  </p>
+                  <div className="space-y-3">
+                    <input
+                      type="password"
+                      value={restorePassphrase}
+                      onChange={(e) => setRestorePassphrase(e.target.value)}
+                      placeholder="Backup passphrase (min 8 chars)"
+                      className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
+                    />
+                    <button
+                      onClick={async () => {
+                        if (restorePassphrase.length < 8) {
+                          setRestoreStatus('Passphrase must be at least 8 characters.')
+                          return
+                        }
+                        setRestoreLoading(true)
+                        setRestoreStatus(null)
+                        try {
+                          const { backups } = await vpsService.getKeyBackups()
+                          if (!backups || backups.length === 0) {
+                            setRestoreStatus('No backups found. Create a backup from your Android device first.')
+                            return
+                          }
+                          const { restoreFromBackup } = await import('@/lib/e2ee')
+                          await restoreFromBackup(restorePassphrase, backups)
+                          setRestoreStatus('Keys restored successfully. Messages will decrypt when you return to Messages.')
+                          setRestorePassphrase('')
+                        } catch (err: any) {
+                          setRestoreStatus(err?.message || 'Restore failed. Check your passphrase.')
+                        } finally {
+                          setRestoreLoading(false)
+                        }
+                      }}
+                      disabled={restoreLoading || !restorePassphrase}
+                      className="inline-flex items-center justify-center px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                    >
+                      {restoreLoading ? 'Restoring...' : 'Restore Keys'}
+                    </button>
+                  </div>
+                  {restoreStatus && (
+                    <div className="mt-3 text-sm text-gray-600 dark:text-gray-300">
+                      {restoreStatus}
                     </div>
                   )}
                 </div>

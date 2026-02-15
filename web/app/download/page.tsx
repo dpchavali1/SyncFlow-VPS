@@ -1,20 +1,35 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import Link from 'next/link'
+import { trackDownloadClick } from '@/components/AnalyticsTracker'
 
 export default function DownloadPage() {
-  const [copied, setCopied] = useState(false)
+  const [isPaired, setIsPaired] = useState(false)
+
+  useEffect(() => {
+    setIsPaired(!!localStorage.getItem('syncflow_user_id'))
+  }, [])
 
   const version = '1.0.0'
-  const fileSize = '45 MB'
-  const sha256 = 'Will be generated after build'
-  const minMacOS = 'macOS 13.0 or later'
+  const downloadBase = 'https://api.sfweb.app/downloads'
+  const macFileSize = '18 MB'
+  const apkFileSize = '115 MB'
+  const macSha256 = 'd8ffa52d8d27499a2df505368b86f127452441c563b4a91cd41754fe5a779957'
+  const apkSha256 = 'b88fabe54951b482de74995659be24f01c9f40b0a163e02dfc0fcc5baf7d809e'
+  const minMacOS = 'macOS 14.0 or later'
+  const [copiedMac, setCopiedMac] = useState(false)
+  const [copiedApk, setCopiedApk] = useState(false)
 
-  const copyChecksum = () => {
-    navigator.clipboard.writeText(sha256)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 2000)
+  const copyChecksum = (hash: string, platform: 'mac' | 'apk') => {
+    navigator.clipboard.writeText(hash)
+    if (platform === 'mac') {
+      setCopiedMac(true)
+      setTimeout(() => setCopiedMac(false), 2000)
+    } else {
+      setCopiedApk(true)
+      setTimeout(() => setCopiedApk(false), 2000)
+    }
   }
 
   return (
@@ -26,6 +41,9 @@ export default function DownloadPage() {
             SyncFlow
           </Link>
           <nav className="flex gap-6">
+            {isPaired && (
+              <Link href="/messages" className="text-blue-600 dark:text-blue-400 hover:text-blue-700 font-medium">Messages</Link>
+            )}
             <Link href="/privacy" className="text-slate-600 dark:text-slate-300 hover:text-blue-600">Privacy</Link>
             <Link href="/terms" className="text-slate-600 dark:text-slate-300 hover:text-blue-600">Terms</Link>
           </nav>
@@ -61,14 +79,15 @@ export default function DownloadPage() {
                     {minMacOS}
                   </p>
                   <p className="text-sm text-slate-600 dark:text-slate-300">
-                    Apple Silicon & Intel • {fileSize}
+                    Apple Silicon & Intel • {macFileSize}
                   </p>
                 </div>
               </div>
 
               {/* Download Button */}
               <a
-                href={`/downloads/SyncFlow-${version}.dmg`}
+                href={`${downloadBase}/SyncFlow-${version}.dmg`}
+                onClick={() => trackDownloadClick('macos')}
                 className="flex items-center justify-center gap-2 w-full px-6 py-3 bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all duration-200"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -82,13 +101,13 @@ export default function DownloadPage() {
                 <p className="text-xs text-slate-500 dark:text-slate-400 mb-1">SHA-256:</p>
                 <div className="flex items-center gap-2">
                   <code className="text-xs font-mono text-slate-700 dark:text-slate-300 flex-1 truncate">
-                    {sha256}
+                    {macSha256}
                   </code>
                   <button
-                    onClick={copyChecksum}
+                    onClick={() => copyChecksum(macSha256, 'mac')}
                     className="text-xs px-2 py-1 bg-white dark:bg-slate-700 rounded hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
                   >
-                    {copied ? '✓' : 'Copy'}
+                    {copiedMac ? '✓' : 'Copy'}
                   </button>
                 </div>
               </div>
@@ -99,13 +118,13 @@ export default function DownloadPage() {
                   <svg className="w-4 h-4 text-green-500" fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
                   </svg>
-                  Notarized
+                  Code Signed
                 </div>
                 <div className="flex items-center gap-1 text-xs text-slate-600 dark:text-slate-400">
                   <svg className="w-4 h-4 text-green-500" fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
                   </svg>
-                  Code Signed
+                  Universal Binary
                 </div>
               </div>
             </div>
@@ -127,14 +146,15 @@ export default function DownloadPage() {
                     Android 8.0 or later
                   </p>
                   <p className="text-sm text-slate-600 dark:text-slate-300">
-                    All devices • {fileSize}
+                    All devices • {apkFileSize}
                   </p>
                 </div>
               </div>
 
               {/* Download Button */}
               <a
-                href={`/downloads/SyncFlow-${version}.apk`}
+                href={`${downloadBase}/SyncFlow-${version}.apk`}
+                onClick={() => trackDownloadClick('android')}
                 className="flex items-center justify-center gap-2 w-full px-6 py-3 bg-gradient-to-r from-green-600 to-teal-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all duration-200"
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -148,13 +168,13 @@ export default function DownloadPage() {
                 <p className="text-xs text-slate-500 dark:text-slate-400 mb-1">SHA-256:</p>
                 <div className="flex items-center gap-2">
                   <code className="text-xs font-mono text-slate-700 dark:text-slate-300 flex-1 truncate">
-                    {sha256}
+                    {apkSha256}
                   </code>
                   <button
-                    onClick={copyChecksum}
+                    onClick={() => copyChecksum(apkSha256, 'apk')}
                     className="text-xs px-2 py-1 bg-white dark:bg-slate-700 rounded hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
                   >
-                    {copied ? '✓' : 'Copy'}
+                    {copiedApk ? '✓' : 'Copy'}
                   </button>
                 </div>
               </div>
@@ -332,19 +352,19 @@ export default function DownloadPage() {
                   <svg className="w-5 h-5 text-green-500 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                   </svg>
-                  <span>macOS 13.0 (Ventura) or later</span>
+                  <span>macOS 14.0 (Sonoma) or later</span>
                 </li>
                 <li className="flex items-start gap-2">
                   <svg className="w-5 h-5 text-green-500 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                   </svg>
-                  <span>Apple Silicon (M1/M2/M3) or Intel processor</span>
+                  <span>Apple Silicon (M1/M2/M3/M4) or Intel processor</span>
                 </li>
                 <li className="flex items-start gap-2">
                   <svg className="w-5 h-5 text-green-500 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                   </svg>
-                  <span>200 MB free disk space</span>
+                  <span>50 MB free disk space</span>
                 </li>
                 <li className="flex items-start gap-2">
                   <svg className="w-5 h-5 text-green-500 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
@@ -356,7 +376,7 @@ export default function DownloadPage() {
             </div>
 
             <div>
-              <h3 className="font-semibold mb-3 text-purple-600 dark:text-purple-400">Android Phone</h3>
+              <h3 className="font-semibold mb-3 text-green-600 dark:text-green-400">Android Phone</h3>
               <ul className="space-y-2 text-slate-600 dark:text-slate-300">
                 <li className="flex items-start gap-2">
                   <svg className="w-5 h-5 text-green-500 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
@@ -368,13 +388,13 @@ export default function DownloadPage() {
                   <svg className="w-5 h-5 text-green-500 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                   </svg>
-                  <span>SyncFlow Android app installed</span>
+                  <span>150 MB free storage</span>
                 </li>
                 <li className="flex items-start gap-2">
                   <svg className="w-5 h-5 text-green-500 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
                     <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                   </svg>
-                  <span>Same Wi-Fi network for pairing</span>
+                  <span>Internet connection</span>
                 </li>
               </ul>
             </div>
@@ -389,7 +409,7 @@ export default function DownloadPage() {
             <div>
               <h3 className="font-semibold mb-2 dark:text-white">Is SyncFlow safe to use?</h3>
               <p className="text-slate-600 dark:text-slate-300">
-                Yes! SyncFlow is code-signed and notarized by Apple, which means it has been scanned for malware and verified by Apple. All data is encrypted end-to-end.
+                Yes! SyncFlow is code-signed by a verified Apple developer. All data is encrypted end-to-end between your devices.
               </p>
             </div>
 
@@ -403,7 +423,8 @@ export default function DownloadPage() {
             <div>
               <h3 className="font-semibold mb-2 dark:text-white">How do I uninstall SyncFlow?</h3>
               <p className="text-slate-600 dark:text-slate-300">
-                Simply drag the SyncFlow app from your Applications folder to the Trash, then empty the Trash.
+                <strong>Mac:</strong> Drag the SyncFlow app from your Applications folder to the Trash, then empty the Trash.
+                <br /><strong>Android:</strong> Long-press the SyncFlow icon and select "Uninstall", or go to Settings → Apps → SyncFlow → Uninstall.
               </p>
             </div>
 
