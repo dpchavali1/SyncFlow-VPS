@@ -16,9 +16,11 @@ import com.phoneintegration.app.R
 import com.phoneintegration.app.SmsRepository
 import com.phoneintegration.app.e2ee.SignalProtocolManager
 import com.phoneintegration.app.vps.VPSClient
+import com.phoneintegration.app.vps.VPSSyncService
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.catch
 import okhttp3.OkHttpClient
+import java.util.Collections
 import okhttp3.Request
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -58,6 +60,9 @@ class OutgoingMessageService : Service() {
     private var idleTimeoutJob: Job? = null
     private var lastActivityTime = System.currentTimeMillis()
     private lateinit var vpsClient: VPSClient
+
+    // Dedup: prevent duplicate SMS sends when both WebSocket and polling deliver the same message
+    private val processedMessageIds: MutableSet<String> = Collections.synchronizedSet(mutableSetOf())
 
     override fun onCreate() {
         super.onCreate()
@@ -116,165 +121,200 @@ class OutgoingMessageService : Service() {
 
     private fun startListening() {
         listeningJob = serviceScope.launch {
-            try {
-                Log.d(TAG, "Starting to listen for outgoing messages...")
-                val syncService = DesktopSyncService(applicationContext)
-                val smsRepository = SmsRepository(applicationContext)
+            val syncService = DesktopSyncService(applicationContext)
+            val smsRepository = SmsRepository(applicationContext)
 
-                // Listen for outgoing messages
-                syncService.listenForOutgoingMessages()
-                    .catch { e ->
-                        Log.e(TAG, "Error in message flow", e)
-                    }
-                    .collect { messageData ->
-                        try {
-                            // Mark activity to keep service alive while processing
-                            markActivity()
-
-                            val messageId = messageData["_messageId"] as? String
-                            val address = messageData["address"] as? String
-                            val body = messageData["body"] as? String ?: ""
-                            val isMms = messageData["isMms"] as? Boolean ?: false
-                            @Suppress("UNCHECKED_CAST")
-                            val attachments = messageData["attachments"] as? List<Map<String, Any?>>
-
-                            if (address != null && messageId != null) {
-                                Log.d(TAG, "[AndroidReceive] Received message from VPS - id: $messageId, address: $address, isMms: $isMms, body length: ${body.length}, attachments: ${attachments?.size ?: 0}")
-
-                                // Update status to 'sending' so web knows we're processing
-                                try {
-                                    vpsClient.updateOutgoingStatus(messageId, "sending")
-                                } catch (e: Exception) {
-                                    Log.w(TAG, "Failed to update status to sending", e)
-                                }
-
-                                val sendSuccess: Boolean
-
-                                if (isMms && !attachments.isNullOrEmpty()) {
-                                    Log.d(TAG, "[AndroidSend] Processing MMS to address: \"$address\" (normalized: \"${PhoneNumberUtils.normalizeForConversation(address)}\"), body length: ${body?.length ?: 0}, attachments: ${attachments?.size ?: 0}")
-
-                                    for (i in attachments?.indices ?: emptyList()) {
-                                        val attachment = attachments!![i]
-                                        val filename = attachment["fileName"] as? String ?: "unknown"
-                                        val contentType = attachment["contentType"] as? String ?: "unknown"
-                                        val inlineData = attachment["inlineData"] as? String
-                                        val url = attachment["url"] as? String
-                                        val dataSize = inlineData?.let { Base64.decode(it, Base64.DEFAULT).size } ?: 0
-                                        Log.d(TAG, "[AndroidSend] Attachment $i: $filename, $contentType, size: $dataSize, hasUrl: ${!url.isNullOrEmpty()}")
-                                    }
-
-                                    val sendStartTime = System.currentTimeMillis()
-                                    sendSuccess = sendMmsWithAttachments(address, body, attachments)
-                                    val sendDuration = System.currentTimeMillis() - sendStartTime
-
-                                    Log.d(TAG, "[AndroidSend] MMS send result: $sendSuccess (took ${sendDuration}ms)")
-                                } else if (body.isNotEmpty()) {
-                                    // Handle regular SMS — pass outgoingId for delivery tracking
-                                    updateNotification("Sending SMS to $address...")
-                                    sendSuccess = smsRepository.sendSms(address, body, messageId)
-                                } else {
-                                    Log.w(TAG, "Empty message body and no attachments")
-                                    sendSuccess = false
-                                }
-
-                                if (sendSuccess) {
-                                    Log.d(TAG, "Message sent successfully to $address")
-
-                                    // Update status to sent via VPS API
-                                    try {
-                                        vpsClient.updateOutgoingStatus(messageId, "sent")
-                                        Log.d(TAG, "Outgoing message marked as sent via VPS")
-                                    } catch (e: Exception) {
-                                        Log.e(TAG, "Error updating outgoing message status", e)
-                                    }
-
-                                    // Wait for the message to be written to SMS provider
-                                    delay(1000)
-
-                                    // Get the actual sent message from SMS/MMS provider and sync it
-                                    try {
-                                        val latestMessage = if (isMms && !attachments.isNullOrEmpty()) {
-                                            // For MMS, wait a bit longer as MMS takes more time to be recorded
-                                            delay(1500)
-                                            smsRepository.getLatestMmsMessage(address)
-                                        } else {
-                                            smsRepository.getLatestMessage(address)
-                                        }
-
-                                        if (latestMessage != null) {
-                                            // For SMS, verify the body matches
-                                            val bodyMatches = if (latestMessage.isMms) true else latestMessage.body == body
-                                            if (bodyMatches) {
-                                                // Sync the real message from provider (has correct ID)
-                                                syncService.syncMessage(latestMessage)
-                                                Log.d(TAG, "Sent message synced with provider ID: ${latestMessage.id} (isMms=${latestMessage.isMms})")
-
-                                                // Store outgoingId → syncedMessageId mapping for delivery callback
-                                                storeDeliveryMapping(messageId, latestMessage.id.toString())
-                                            } else {
-                                                // Body doesn't match, use fallback
-                                                if (isMms && !attachments.isNullOrEmpty()) {
-                                                    syncService.writeSentMmsMessage(messageId, address, body, attachments)
-                                                } else {
-                                                    syncService.writeSentMessage(messageId, address, body)
-                                                }
-                                                Log.d(TAG, "Sent message written with desktop ID (body mismatch fallback)")
-                                            }
-                                        } else {
-                                            // Fallback: write with desktop message ID
-                                            if (isMms && !attachments.isNullOrEmpty()) {
-                                                syncService.writeSentMmsMessage(messageId, address, body, attachments)
-                                            } else {
-                                                syncService.writeSentMessage(messageId, address, body)
-                                            }
-                                            Log.d(TAG, "Sent message written with desktop ID (no provider message found)")
-                                        }
-                                    } catch (e: Exception) {
-                                        Log.e(TAG, "Error syncing sent message", e)
-                                        // Fallback: write with desktop message ID
-                                        try {
-                                            if (isMms && !attachments.isNullOrEmpty()) {
-                                                syncService.writeSentMmsMessage(messageId, address, body, attachments)
-                                            } else {
-                                                syncService.writeSentMessage(messageId, address, body)
-                                            }
-                                        } catch (e2: Exception) {
-                                            Log.e(TAG, "Error writing fallback sent message", e2)
-                                        }
-                                    }
-                                } else {
-                                    Log.e(TAG, "Failed to send message to $address")
-                                    // Update status to 'failed' so web knows
-                                    try {
-                                        vpsClient.updateOutgoingStatus(messageId, "failed", "Failed to send message")
-                                    } catch (e: Exception) {
-                                        Log.e(TAG, "Failed to update status to failed", e)
-                                    }
-                                }
-
-                                updateNotification("Listening for messages from desktop")
-                            } else {
-                                Log.w(TAG, "Invalid message data: address=$address, id=$messageId")
-                            }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Error sending message", e)
-                            // Try to update status to failed
-                            try {
-                                val msgId = messageData["_messageId"] as? String
-                                if (msgId != null) {
-                                    vpsClient.updateOutgoingStatus(msgId, "failed", e.message ?: "Unknown error")
-                                }
-                            } catch (updateError: Exception) {
-                                Log.e(TAG, "Failed to update status to failed after exception", updateError)
-                            }
-                            updateNotification("Error sending: ${e.message}")
-                            delay(3000)
-                            updateNotification("Listening for messages from desktop")
+            // Source 1: WebSocket — instant delivery when VPSSyncService is connected
+            launch {
+                try {
+                    Log.d(TAG, "Starting WebSocket source for outgoing messages...")
+                    VPSSyncService.getInstance(applicationContext).outgoingMessages
+                        .collect { message ->
+                            val messageData = mapOf<String, Any?>(
+                                "_messageId" to message.id,
+                                "address" to message.address,
+                                "body" to message.body,
+                                "isMms" to message.isMms,
+                                "attachments" to message.attachments,
+                                "simSubscriptionId" to message.simSubscriptionId
+                            )
+                            processOutgoingMessage(syncService, smsRepository, messageData, "WebSocket")
                         }
-                    }
-            } catch (e: Exception) {
-                Log.e(TAG, "Fatal error in listening loop", e)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Fatal error in WebSocket outgoing listener", e)
+                }
             }
+
+            // Source 2: Polling fallback — catches anything WebSocket missed
+            launch {
+                try {
+                    Log.d(TAG, "Starting polling source for outgoing messages...")
+                    syncService.listenForOutgoingMessages()
+                        .catch { e -> Log.e(TAG, "Error in polling message flow", e) }
+                        .collect { messageData ->
+                            processOutgoingMessage(syncService, smsRepository, messageData, "Poll")
+                        }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Fatal error in polling outgoing listener", e)
+                }
+            }
+        }
+    }
+
+    /**
+     * Process a single outgoing message from either WebSocket or polling source.
+     * Deduplicates by message ID to prevent duplicate SMS sends.
+     */
+    private suspend fun processOutgoingMessage(
+        syncService: DesktopSyncService,
+        smsRepository: SmsRepository,
+        messageData: Map<String, Any?>,
+        source: String
+    ) {
+        try {
+            markActivity()
+
+            val messageId = messageData["_messageId"] as? String ?: return
+            val address = messageData["address"] as? String ?: return
+            val body = messageData["body"] as? String ?: ""
+            val isMms = messageData["isMms"] as? Boolean ?: false
+            @Suppress("UNCHECKED_CAST")
+            val attachments = messageData["attachments"] as? List<Map<String, Any?>>
+
+            // Dedup: skip if already processed by the other source
+            if (!processedMessageIds.add(messageId)) {
+                Log.d(TAG, "[$source] Skipping duplicate message: $messageId")
+                return
+            }
+
+            Log.d(TAG, "[$source][AndroidReceive] Received message - id: $messageId, address: $address, isMms: $isMms, body length: ${body.length}, attachments: ${attachments?.size ?: 0}")
+
+            // Update status to 'sending' so web knows we're processing
+            try {
+                vpsClient.updateOutgoingStatus(messageId, "sending")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to update status to sending", e)
+            }
+
+            val sendSuccess: Boolean
+
+            if (isMms && !attachments.isNullOrEmpty()) {
+                Log.d(TAG, "[AndroidSend] Processing MMS to address: \"$address\" (normalized: \"${PhoneNumberUtils.normalizeForConversation(address)}\"), body length: ${body.length}, attachments: ${attachments.size}")
+
+                for (i in attachments.indices) {
+                    val attachment = attachments[i]
+                    val filename = attachment["fileName"] as? String ?: "unknown"
+                    val contentType = attachment["contentType"] as? String ?: "unknown"
+                    val inlineData = attachment["inlineData"] as? String
+                    val url = attachment["url"] as? String
+                    val dataSize = inlineData?.let { Base64.decode(it, Base64.DEFAULT).size } ?: 0
+                    Log.d(TAG, "[AndroidSend] Attachment $i: $filename, $contentType, size: $dataSize, hasUrl: ${!url.isNullOrEmpty()}")
+                }
+
+                val sendStartTime = System.currentTimeMillis()
+                sendSuccess = sendMmsWithAttachments(address, body, attachments)
+                val sendDuration = System.currentTimeMillis() - sendStartTime
+
+                Log.d(TAG, "[AndroidSend] MMS send result: $sendSuccess (took ${sendDuration}ms)")
+            } else if (body.isNotEmpty()) {
+                // Handle regular SMS — pass outgoingId for delivery tracking
+                updateNotification("Sending SMS to $address...")
+                sendSuccess = smsRepository.sendSms(address, body, messageId)
+            } else {
+                Log.w(TAG, "Empty message body and no attachments")
+                sendSuccess = false
+            }
+
+            if (sendSuccess) {
+                Log.d(TAG, "Message sent successfully to $address")
+
+                // Update status to sent via VPS API
+                try {
+                    vpsClient.updateOutgoingStatus(messageId, "sent")
+                    Log.d(TAG, "Outgoing message marked as sent via VPS")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error updating outgoing message status", e)
+                }
+
+                // Wait for the message to be written to SMS provider
+                delay(1000)
+
+                // Get the actual sent message from SMS/MMS provider and sync it
+                try {
+                    val latestMessage = if (isMms && !attachments.isNullOrEmpty()) {
+                        // For MMS, wait a bit longer as MMS takes more time to be recorded
+                        delay(1500)
+                        smsRepository.getLatestMmsMessage(address)
+                    } else {
+                        smsRepository.getLatestMessage(address)
+                    }
+
+                    if (latestMessage != null) {
+                        // For SMS, verify the body matches
+                        val bodyMatches = if (latestMessage.isMms) true else latestMessage.body == body
+                        if (bodyMatches) {
+                            // Sync the real message from provider (has correct ID)
+                            syncService.syncMessage(latestMessage)
+                            Log.d(TAG, "Sent message synced with provider ID: ${latestMessage.id} (isMms=${latestMessage.isMms})")
+
+                            // Store outgoingId → syncedMessageId mapping for delivery callback
+                            storeDeliveryMapping(messageId, latestMessage.id.toString())
+                        } else {
+                            // Body doesn't match, use fallback
+                            if (isMms && !attachments.isNullOrEmpty()) {
+                                syncService.writeSentMmsMessage(messageId, address, body, attachments)
+                            } else {
+                                syncService.writeSentMessage(messageId, address, body)
+                            }
+                            Log.d(TAG, "Sent message written with desktop ID (body mismatch fallback)")
+                        }
+                    } else {
+                        // Fallback: write with desktop message ID
+                        if (isMms && !attachments.isNullOrEmpty()) {
+                            syncService.writeSentMmsMessage(messageId, address, body, attachments)
+                        } else {
+                            syncService.writeSentMessage(messageId, address, body)
+                        }
+                        Log.d(TAG, "Sent message written with desktop ID (no provider message found)")
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error syncing sent message", e)
+                    // Fallback: write with desktop message ID
+                    try {
+                        if (isMms && !attachments.isNullOrEmpty()) {
+                            syncService.writeSentMmsMessage(messageId, address, body, attachments)
+                        } else {
+                            syncService.writeSentMessage(messageId, address, body)
+                        }
+                    } catch (e2: Exception) {
+                        Log.e(TAG, "Error writing fallback sent message", e2)
+                    }
+                }
+            } else {
+                Log.e(TAG, "Failed to send message to $address")
+                // Update status to 'failed' so web knows
+                try {
+                    vpsClient.updateOutgoingStatus(messageId, "failed", "Failed to send message")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to update status to failed", e)
+                }
+            }
+
+            updateNotification("Listening for messages from desktop")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error sending message", e)
+            // Try to update status to failed
+            try {
+                val msgId = messageData["_messageId"] as? String
+                if (msgId != null) {
+                    vpsClient.updateOutgoingStatus(msgId, "failed", e.message ?: "Unknown error")
+                }
+            } catch (updateError: Exception) {
+                Log.e(TAG, "Failed to update status to failed after exception", updateError)
+            }
+            updateNotification("Error sending: ${e.message}")
+            delay(3000)
+            updateNotification("Listening for messages from desktop")
         }
     }
 

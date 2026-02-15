@@ -1,6 +1,7 @@
 import * as admin from 'firebase-admin';
 import { config } from '../config';
 import { query } from './database';
+import { broadcastToUser } from './websocket';
 
 let fcmInitialized = false;
 
@@ -31,6 +32,7 @@ export async function sendOutgoingMessageNotification(
   excludeDeviceId?: string | null
 ): Promise<void> {
   if (!fcmInitialized) {
+    console.warn('[FCM] Not initialized — cannot push outgoing message:', messageId);
     return;
   }
 
@@ -44,6 +46,7 @@ export async function sendOutgoingMessageNotification(
   );
 
   if (tokens.length === 0) {
+    console.warn('[FCM] No Android FCM tokens for user:', userId);
     return;
   }
 
@@ -172,5 +175,41 @@ export async function sendCallNotification(
         console.error(`[FCM] Failed to send to token ${token.substring(0, 8)}...:`, error);
       }
     }
+  }
+}
+
+/**
+ * Retry stale pending outgoing messages that haven't been picked up.
+ * Re-broadcasts via WebSocket and re-sends FCM push.
+ * Called on a 2-minute interval from index.ts.
+ */
+export async function retryStaleOutgoingMessages(): Promise<void> {
+  try {
+    const stale = await query<{ id: string; user_id: string }>(
+      `SELECT id, user_id FROM user_outgoing_messages
+       WHERE status = 'pending'
+         AND created_at < NOW() - INTERVAL '2 minutes'
+         AND created_at > NOW() - INTERVAL '1 hour'
+       LIMIT 10`
+    );
+
+    if (stale.length === 0) return;
+
+    console.log(`[RetryStale] Found ${stale.length} stale pending outgoing messages`);
+
+    for (const msg of stale) {
+      // Re-broadcast via WebSocket
+      broadcastToUser(msg.user_id, 'messages', {
+        type: 'outgoing_message_retry',
+        data: { id: msg.id },
+      });
+
+      // Re-send FCM push
+      sendOutgoingMessageNotification(msg.user_id, msg.id).catch(err => {
+        console.error('[RetryStale] FCM re-push failed:', err);
+      });
+    }
+  } catch (error) {
+    console.error('[RetryStale] Error retrying stale messages:', error);
   }
 }

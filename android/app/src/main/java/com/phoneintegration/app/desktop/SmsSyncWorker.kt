@@ -325,7 +325,7 @@ class OutgoingMessageWorker(
         /**
          * Schedule periodic polling for outgoing messages from desktop.
          *
-         * Registers a 30-minute periodic work request. The relatively short interval
+         * Registers a 15-minute periodic work request (WorkManager minimum). The interval
          * compared to [SmsSyncWorker] is because:
          * 1. Users expect quick delivery when sending from desktop
          * 2. IntelligentSyncManager handles real-time, this is backup
@@ -333,7 +333,7 @@ class OutgoingMessageWorker(
          *
          * ## WorkManager Configuration
          *
-         * - **Interval:** 30 minutes
+         * - **Interval:** 15 minutes (WorkManager minimum)
          * - **Initial Delay:** 0 seconds (runs immediately on schedule)
          * - **Constraints:** Requires network connectivity
          * - **Policy:** KEEP - preserves existing schedule
@@ -348,7 +348,7 @@ class OutgoingMessageWorker(
             // IntelligentSyncManager handles real-time outgoing messages via listeners
             // This worker serves as backup and for bulk operations
             val workRequest = PeriodicWorkRequestBuilder<OutgoingMessageWorker>(
-                repeatInterval = 30, // Less frequent since IntelligentSyncManager handles real-time
+                repeatInterval = 15, // WorkManager minimum — last-resort safety net
                 repeatIntervalTimeUnit = TimeUnit.MINUTES
             )
                 .setConstraints(constraints)

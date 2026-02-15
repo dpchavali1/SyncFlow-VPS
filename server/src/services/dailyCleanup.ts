@@ -16,6 +16,7 @@
 
 import { query, queryOne, transaction } from './database';
 import { sendCleanupReportEmail } from './email';
+import { broadcastToUser } from './websocket';
 
 // Run cleanup at 3 AM UTC daily
 const CLEANUP_HOUR_UTC = 3;
@@ -40,7 +41,7 @@ async function runAutoCleanup(): Promise<Record<string, number>> {
 
   const cleanups: Array<{ name: string; sql: string }> = [
     { name: 'expiredPairings', sql: `DELETE FROM pairing_requests WHERE expires_at < NOW() OR (status != 'pending' AND created_at < NOW() - INTERVAL '1 day') RETURNING *` },
-    { name: 'oldOutgoingMessages', sql: `DELETE FROM user_outgoing_messages WHERE status != 'pending' AND created_at < NOW() - INTERVAL '7 days' RETURNING *` },
+    { name: 'oldOutgoingMessages', sql: `DELETE FROM user_outgoing_messages WHERE status IN ('sent', 'delivered', 'failed') AND created_at < NOW() - INTERVAL '7 days' RETURNING *` },
     { name: 'oldSpamMessages', sql: `DELETE FROM user_spam_messages WHERE created_at < NOW() - INTERVAL '30 days' RETURNING *` },
     { name: 'oldReadReceipts', sql: `DELETE FROM user_read_receipts WHERE read_at < NOW() - INTERVAL '30 days' RETURNING *` },
     { name: 'oldTypingIndicators', sql: `DELETE FROM user_typing_indicators WHERE created_at < NOW() - INTERVAL '1 hour' RETURNING *` },
@@ -53,6 +54,26 @@ async function runAutoCleanup(): Promise<Record<string, number>> {
     { name: 'orphanedPairingUsers', sql: `DELETE FROM users WHERE uid NOT IN (SELECT DISTINCT user_id FROM user_devices) AND uid NOT IN (SELECT DISTINCT user_id FROM user_messages) AND created_at < NOW() - INTERVAL '1 hour' RETURNING *` },
     { name: 'oldAnalyticsEvents', sql: `DELETE FROM analytics_events WHERE created_at < NOW() - INTERVAL '90 days' RETURNING *` },
   ];
+
+  // Auto-fail outgoing messages stuck in 'pending' for over 1 hour (Android unreachable)
+  try {
+    const timedOut = await query<{ id: string; user_id: string }>(
+      `UPDATE user_outgoing_messages
+       SET status = 'failed', error_message = 'Delivery timed out — Android device unreachable'
+       WHERE status = 'pending' AND created_at < NOW() - INTERVAL '1 hour'
+       RETURNING id, user_id`
+    );
+    results.timedOutOutgoingMessages = timedOut.length;
+    // Broadcast failure to Mac/Web so UI updates from clock icon to error icon
+    for (const msg of timedOut) {
+      broadcastToUser(msg.user_id, 'messages', {
+        type: 'outgoing_status_changed',
+        data: { id: msg.id, status: 'failed' },
+      });
+    }
+  } catch {
+    results.timedOutOutgoingMessages = 0;
+  }
 
   // Auto-reset monthly bandwidth counters for users whose last_reset is > 30 days ago
   try {

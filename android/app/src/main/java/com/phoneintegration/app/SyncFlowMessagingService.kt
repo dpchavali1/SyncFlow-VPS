@@ -64,6 +64,13 @@ class SyncFlowMessagingService : FirebaseMessagingService() {
             com.phoneintegration.app.desktop.OutgoingMessageService.start(this)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start OutgoingMessageService from FCM: ${e.message}", e)
+            // Fallback: use WorkManager for Android 12+ background execution limits
+            try {
+                com.phoneintegration.app.desktop.OutgoingMessageWorker.checkNow(this)
+                Log.i(TAG, "Fallback: triggered OutgoingMessageWorker.checkNow()")
+            } catch (e2: Exception) {
+                Log.e(TAG, "Failed to trigger WorkManager fallback: ${e2.message}", e2)
+            }
         }
     }
 

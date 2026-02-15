@@ -8,7 +8,7 @@ import { pool, checkDatabaseHealth } from './services/database';
 import { redis, checkRedisHealth } from './services/redis';
 import { createWebSocketServer } from './services/websocket';
 import { initLogger } from './services/logger';
-import { initializeFCM } from './services/push';
+import { initializeFCM, retryStaleOutgoingMessages } from './services/push';
 import { maintenanceMiddleware } from './middleware/maintenance';
 import { startDailyCleanup, stopDailyCleanup } from './services/dailyCleanup';
 
@@ -207,6 +207,9 @@ async function start() {
 
     // Start daily cleanup scheduler (3 AM UTC)
     startDailyCleanup();
+
+    // Retry stale pending outgoing messages every 2 minutes
+    setInterval(retryStaleOutgoingMessages, 2 * 60 * 1000);
 
     console.log(`\nSyncFlow API Server started in ${config.nodeEnv} mode`);
     console.log(`- HTTP + WS: http://localhost:${config.port}`);

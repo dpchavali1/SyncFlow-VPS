@@ -326,15 +326,30 @@ router.post('/send', async (req: Request, res: Response) => {
     const userId = req.userId!;
     const messageId = `out_${Date.now()}_${Math.random().toString(36).substring(7)}`;
 
+    const timestamp = Date.now();
     await query(
       `INSERT INTO user_outgoing_messages
        (id, user_id, address, body, timestamp, status, sim_subscription_id, is_mms, attachments)
        VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8)`,
-      [messageId, userId, body.address, body.body, Date.now(), body.simSubscriptionId,
+      [messageId, userId, body.address, body.body, timestamp, body.simSubscriptionId,
        body.isMms, body.attachments ? JSON.stringify(body.attachments) : null]
     );
 
-    // Send FCM push to wake Android device for immediate delivery
+    // Broadcast via WebSocket for instant delivery when Android app is alive
+    broadcastToUser(userId, 'messages', {
+      type: 'outgoing_message',
+      data: {
+        id: messageId,
+        address: body.address,
+        body: body.body,
+        timestamp,
+        simSubscriptionId: body.simSubscriptionId,
+        isMms: body.isMms,
+        attachments: body.attachments,
+      },
+    });
+
+    // Send FCM push to wake Android device if app is killed
     sendOutgoingMessageNotification(userId, messageId, req.deviceId ?? null).catch(err => {
       console.error('[Messages] FCM push for outgoing message failed:', err);
     });
@@ -359,12 +374,19 @@ router.get('/outgoing', async (req: Request, res: Response) => {
   try {
     const userId = req.userId!;
 
+    // Atomically claim pending messages by setting status to 'sending'.
+    // FOR UPDATE SKIP LOCKED prevents duplicate SMS if WebSocket and polling race.
     const messages = await query(
-      `SELECT id, address, body, timestamp, status, sim_subscription_id, is_mms, attachments
-       FROM user_outgoing_messages
-       WHERE user_id = $1 AND status = 'pending'
-       ORDER BY timestamp ASC
-       LIMIT 50`,
+      `UPDATE user_outgoing_messages
+       SET status = 'sending'
+       WHERE id IN (
+         SELECT id FROM user_outgoing_messages
+         WHERE user_id = $1 AND status = 'pending'
+         ORDER BY timestamp ASC
+         LIMIT 50
+         FOR UPDATE SKIP LOCKED
+       )
+       RETURNING id, address, body, timestamp, sim_subscription_id, is_mms, attachments`,
       [userId]
     );
 
