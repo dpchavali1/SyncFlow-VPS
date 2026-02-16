@@ -1,0 +1,52 @@
+# Gitleaks config — extends built-in rules + adds project-specific blocks
+[extend]
+
+# ==================== Path-based blocks ====================
+
+# Block local.properties (contains keystore passwords, API keys)
+[[rules]]
+id = "android-local-properties"
+description = "Android local.properties should never be committed"
+path = '''local\.properties$'''
+
+# Block .env files from being committed
+[[rules]]
+id = "dotenv-file"
+description = ".env files should never be committed"
+path = '''(^|/)\.env$'''
+
+# ==================== Content-based blocks ====================
+
+# Block redis-cli commands with inline passwords
+[[rules]]
+id = "redis-cli-password"
+description = "Redis CLI with inline password"
+regex = '''redis-cli\s+-a\s+\S+'''
+
+# Block PostgreSQL connection strings with embedded passwords
+[[rules]]
+id = "postgres-uri-password"
+description = "PostgreSQL URI with embedded password"
+regex = '''postgres(ql)?://\w+:[^@\s]+@\S+'''
+
+# Block DATABASE_URL / REDIS_URL with real passwords
+[[rules]]
+id = "database-url-secret"
+description = "Database URL with embedded credentials"
+regex = '''(DATABASE_URL|REDIS_URL)\s*=\s*\S+://\w+:\S+@'''
+
+# ==================== Allowlist ====================
+
+[allowlist]
+paths = [
+    '''node_modules/''',
+    '''\.next/''',
+    '''\.gradle/''',
+    '''\.env\.example$''',
+    '''package-lock\.json$''',
+]
+regexes = [
+    '''your_.*_here''',
+    '''\*\*\*REMOVED\*\*\*''',
+    '''PASSWORD@localhost''',
+]
