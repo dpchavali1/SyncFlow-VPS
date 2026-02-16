@@ -17,14 +17,21 @@ class DealsRepository(private val context: Context) {
     private val cloud = CloudDealsService()
     private val local = LocalDealsLoader(context)
     private val cache = DealCache(context)
-    // TODO: Add user preferences for personalization
 
-    // Multiple deal sources for more variety
-    private val dealSources = listOf(
-        "https://raw.githubusercontent.com/dpchavali1/syncflow-deals/main/deals.json",
-        "https://raw.githubusercontent.com/dpchavali1/syncflow-deals/main/deals2.json",
-        "https://raw.githubusercontent.com/dpchavali1/syncflow-deals/main/deals3.json"
-    )
+    private val dealSources: List<String>
+        get() {
+            val baseUrl = "https://raw.githubusercontent.com/dpchavali1/syncflow-deals/main"
+            return if (isIndianUser()) {
+                listOf("$baseUrl/deals-in.json")
+            } else {
+                listOf("$baseUrl/deals.json", "$baseUrl/deals2.json", "$baseUrl/deals3.json")
+            }
+        }
+
+    private fun isIndianUser(): Boolean {
+        val phone = com.phoneintegration.app.ui.components.getRegisteredPhoneNumber(context)
+        return phone?.startsWith("+91") == true
+    }
 
     // ---------------------------------------------------------
     // LOAD DEALS (Multiple Sources + Cache + Personalization)
@@ -88,17 +95,17 @@ class DealsRepository(private val context: Context) {
                     cleaned
                 } catch (e: Exception) {
                     // If URL is malformed, try to construct a proper Amazon URL
-                    if (cleaned.contains("amazon.com") || cleaned.contains("amzn.to")) {
-                        // Extract ASIN if possible
+                    val amazonDomain = if (isIndianUser()) "amazon.in" else "amazon.com"
+                    if (cleaned.contains("amazon.com") || cleaned.contains("amazon.in") || cleaned.contains("amzn.to")) {
                         val asinPattern = Regex("(?:dp|gp/product)/([A-Z0-9]{10})")
                         val asinMatch = asinPattern.find(cleaned)
                         if (asinMatch != null) {
-                            "https://www.amazon.com/dp/${asinMatch.groupValues[1]}"
+                            "https://www.$amazonDomain/dp/${asinMatch.groupValues[1]}"
                         } else {
-                            "https://www.amazon.com"
+                            "https://www.$amazonDomain"
                         }
                     } else {
-                        "https://www.amazon.com"
+                        "https://www.$amazonDomain"
                     }
                 }
             }
@@ -137,7 +144,7 @@ class DealsRepository(private val context: Context) {
     // ---------------------------------------------------------
     suspend fun refreshDeals(): Boolean = withContext(Dispatchers.IO) {
         try {
-            val fresh = cloud.loadFromUrl("https://raw.githubusercontent.com/dpchavali1/syncflow-deals/main/deals.json")
+            val fresh = cloud.loadFromUrl(dealSources.first())
             if (fresh.isNotEmpty()) {
                 cache.saveDeals(fresh)
                 return@withContext true

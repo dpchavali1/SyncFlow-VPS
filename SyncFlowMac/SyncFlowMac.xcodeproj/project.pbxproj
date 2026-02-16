@@ -6,6 +6,12 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		8CCD5EC62F4270360047F47B /* PhoneNumberKit in Frameworks */ = {isa = PBXBuildFile; productRef = 8CCD5EC52F4270360047F47B /* PhoneNumberKit */; };
+		8CCD5ECA2F4270360047F47B /* PhoneNumberKit-Static in Frameworks */ = {isa = PBXBuildFile; productRef = 8CCD5EC92F4270360047F47B /* PhoneNumberKit-Static */; };
+		A1B2C3D400000001 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = A1B2C3D400000002 /* WebRTC */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		8C6B81232ED6585400307672 /* SyncFlowMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SyncFlowMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -13,23 +19,19 @@
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		8C6B81252ED6585400307672 /* SyncFlowMac */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-			);
 			path = SyncFlowMac;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
-
-/* Begin PBXBuildFile section */
-		A1B2C3D400000001 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = A1B2C3D400000002 /* WebRTC */; };
-/* End PBXBuildFile section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		8C6B81202ED6585400307672 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				8CCD5ECA2F4270360047F47B /* PhoneNumberKit-Static in Frameworks */,
 				A1B2C3D400000001 /* WebRTC in Frameworks */,
+				8CCD5EC62F4270360047F47B /* PhoneNumberKit in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -73,6 +75,8 @@
 			name = SyncFlowMac;
 			packageProductDependencies = (
 				A1B2C3D400000002 /* WebRTC */,
+				8CCD5EC52F4270360047F47B /* PhoneNumberKit */,
+				8CCD5EC92F4270360047F47B /* PhoneNumberKit-Static */,
 			);
 			productName = SyncFlowMac;
 			productReference = 8C6B81232ED6585400307672 /* SyncFlowMac.app */;
@@ -102,10 +106,11 @@
 			);
 			mainGroup = 8C6B811A2ED6585400307672;
 			minimizedProjectReferenceProxies = 1;
-			preferredProjectObjectVersion = 77;
 			packageReferences = (
 				A1B2C3D400000003 /* XCRemoteSwiftPackageReference "WebRTC" */,
+				8CCD5EC42F4270360047F47B /* XCRemoteSwiftPackageReference "PhoneNumberKit" */,
 			);
+			preferredProjectObjectVersion = 77;
 			productRefGroup = 8C6B81242ED6585400307672 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -124,7 +129,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
-
 
 /* Begin PBXSourcesBuildPhase section */
 		8C6B811F2ED6585400307672 /* Sources */ = {
@@ -345,6 +349,14 @@
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
+		8CCD5EC42F4270360047F47B /* XCRemoteSwiftPackageReference "PhoneNumberKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/marmelroy/PhoneNumberKit";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 4.2.5;
+			};
+		};
 		A1B2C3D400000003 /* XCRemoteSwiftPackageReference "WebRTC" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/stasel/WebRTC.git";
@@ -356,6 +368,16 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
+		8CCD5EC52F4270360047F47B /* PhoneNumberKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8CCD5EC42F4270360047F47B /* XCRemoteSwiftPackageReference "PhoneNumberKit" */;
+			productName = PhoneNumberKit;
+		};
+		8CCD5EC92F4270360047F47B /* PhoneNumberKit-Static */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 8CCD5EC42F4270360047F47B /* XCRemoteSwiftPackageReference "PhoneNumberKit" */;
+			productName = "PhoneNumberKit-Static";
+		};
 		A1B2C3D400000002 /* WebRTC */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = A1B2C3D400000003 /* XCRemoteSwiftPackageReference "WebRTC" */;

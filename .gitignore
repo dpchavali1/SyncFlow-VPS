@@ -45,5 +45,10 @@ backups/
 # PM2
 .pm2/
 
+# Android
+android/local.properties
+android/.gradle/
+*.xcuserstate
+
 # Claude Code local settings
 .claude/settings.local.json

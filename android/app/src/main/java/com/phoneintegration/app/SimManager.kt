@@ -255,21 +255,30 @@ class SimManager(private val context: Context) {
     }
 
     /**
-     * Register phone numbers for call lookup
+     * Register phone numbers for call lookup.
+     * Only registers primary SIM (slot 0) to avoid last-write-wins on dual-SIM devices.
+     * Skips if user already has a registered number (manual or auto).
      */
     private suspend fun registerPhoneNumbersForCalling(
         sims: List<SimInfo>,
         vpsClient: com.phoneintegration.app.vps.VPSClient
     ) {
-        for (sim in sims) {
-            val phoneNumber = sim.phoneNumber
-            if (!phoneNumber.isNullOrEmpty() && phoneNumber != "Unknown") {
-                try {
-                    vpsClient.registerPhoneNumber(phoneNumber)
-                    Log.d(TAG, "Registered phone $phoneNumber via VPS")
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to register phone: ${e.message}")
-                }
+        // Don't overwrite if user already registered a number (manual or auto)
+        if (com.phoneintegration.app.ui.components.isPhoneNumberRegistered(context)) {
+            Log.d(TAG, "Phone already registered, skipping SIM sync registration")
+            return
+        }
+        // Only register primary SIM (slot 0) to avoid last-write-wins on dual-SIM
+        val primarySim = sims.minByOrNull { it.slotIndex }
+        val phoneNumber = primarySim?.phoneNumber
+        if (!phoneNumber.isNullOrEmpty() && phoneNumber != "Unknown") {
+            try {
+                vpsClient.registerPhoneNumber(phoneNumber)
+                val normalized = com.phoneintegration.app.PhoneNumberUtils.toE164(phoneNumber)
+                com.phoneintegration.app.ui.components.saveRegistrationState(context, normalized)
+                Log.d(TAG, "Registered primary SIM phone $phoneNumber via VPS")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to register phone: ${e.message}")
             }
         }
     }

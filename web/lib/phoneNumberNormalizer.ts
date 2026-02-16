@@ -1,7 +1,26 @@
 /**
  * Consistent phone number normalization across all platforms
  * Ensures contacts sync correctly between Android, macOS, and Web
+ *
+ * Uses google-libphonenumber for proper international support.
  */
+import {
+  PhoneNumberUtil,
+  PhoneNumberFormat,
+} from 'google-libphonenumber'
+
+const phoneUtil = PhoneNumberUtil.getInstance()
+
+// Default region derived from browser locale (e.g. "en-US" → "US", "hi-IN" → "IN")
+function getDefaultRegion(): string {
+  if (typeof navigator !== 'undefined' && navigator.language) {
+    const parts = navigator.language.split('-')
+    if (parts.length >= 2) {
+      return parts[parts.length - 1].toUpperCase()
+    }
+  }
+  return 'US'
+}
 
 // ==================== Conversation-level normalization ====================
 
@@ -16,7 +35,7 @@ const MAX_CACHE_SIZE = 1000
  * Normalize a phone number for conversation grouping / comparison.
  *
  * - Emails and short codes (< 6 chars): lowercased as-is
- * - Phone numbers: stripped to digits, last 10 digits used (handles country codes)
+ * - Phone numbers: normalized to E.164 via libphonenumber (canonical key)
  *
  * Results are cached in an LRU map for performance.
  */
@@ -28,8 +47,8 @@ export function normalizePhoneForConversation(address: string): string {
   if (address.includes('@') || address.length < 6) {
     result = address.toLowerCase()
   } else {
-    const digitsOnly = address.replace(/[^0-9]/g, '')
-    result = digitsOnly.length >= 10 ? digitsOnly.slice(-10) : digitsOnly
+    // Use E.164 as canonical conversation key
+    result = PhoneNumberNormalizer.toE164(address)
   }
 
   // Maintain cache size with LRU eviction
@@ -45,56 +64,49 @@ export function normalizePhoneForConversation(address: string): string {
 
 export class PhoneNumberNormalizer {
   /**
-   * Normalize phone number to standard format for comparison
-   * Handles: +1-234-567-8900, (234) 567-8900, 234-567-8900, 2345678900, etc.
+   * Normalize phone number to E.164 format for comparison.
+   * Returns E.164 string (e.g. "+12345678900") or stripped digits for unparseable input.
    */
   static normalize(phoneNumber: string | null | undefined): string {
     if (!phoneNumber || phoneNumber.trim() === '') {
       return ''
     }
 
-    // Remove all non-digit characters
-    const digitsOnly = phoneNumber.replace(/[^0-9+]/g, '')
-
-    // Remove leading + if present
-    const withoutPlus = digitsOnly.replace(/\+/g, '')
-
-    // If starts with 1 (US country code), remove it to get 10 digits
-    let normalized = withoutPlus
-    if (withoutPlus.startsWith('1') && withoutPlus.length > 10) {
-      normalized = withoutPlus.substring(1)
-    }
-
-    return normalized
+    return this.toE164(phoneNumber)
   }
 
   /**
-   * Format phone number for display
-   * US: (234) 567-8900
-   * International: keep as-is
+   * Format phone number for display.
+   * Same-region numbers: NATIONAL format (e.g. "(234) 567-8900" for US)
+   * Different-region numbers: INTERNATIONAL format (e.g. "+91 98765 43210")
    */
   static formatForDisplay(phoneNumber: string | null | undefined): string {
     if (!phoneNumber || phoneNumber === '') {
       return ''
     }
 
-    const normalized = this.normalize(phoneNumber)
+    const defaultRegion = getDefaultRegion()
 
-    // US format (10 digits)
-    if (normalized.length === 10) {
-      const areaCode = normalized.substring(0, 3)
-      const prefix = normalized.substring(3, 6)
-      const lineNumber = normalized.substring(6)
-      return `(${areaCode}) ${prefix}-${lineNumber}`
-    } else {
-      // International or non-standard
-      return normalized
+    try {
+      const parsed = phoneUtil.parse(phoneNumber, defaultRegion)
+      if (phoneUtil.isValidNumber(parsed)) {
+        const numberRegion = phoneUtil.getRegionCodeForNumber(parsed)
+        if (numberRegion === defaultRegion) {
+          return phoneUtil.format(parsed, PhoneNumberFormat.NATIONAL)
+        }
+        return phoneUtil.format(parsed, PhoneNumberFormat.INTERNATIONAL)
+      }
+    } catch {
+      // Fall through
     }
+
+    // Fallback: return as-is
+    return phoneNumber
   }
 
   /**
    * Create deduplication key for contacts
-   * Uses normalized phone number only (not hashCode which changes)
+   * Uses E.164 phone number (not hashCode which changes)
    */
   static getDeduplicationKey(phoneNumber: string | null | undefined, displayName?: string | null): string {
     const normalized = this.normalize(phoneNumber)
@@ -113,11 +125,8 @@ export class PhoneNumberNormalizer {
 
   /**
    * Convert phone number to E.164 format for server communication.
-   * Rules:
-   * - 10 digits → +1XXXXXXXXXX (US)
-   * - 11 digits starting with 1 → +1XXXXXXXXXX (US)
-   * - Already starts with + → keep as-is
-   * - Short codes (<=6 digits), emails, alphanumeric sender IDs → unchanged
+   * Uses libphonenumber with browser locale as default region.
+   * Falls back to legacy heuristics if libphonenumber can't parse.
    */
   static toE164(phoneNumber: string | null | undefined): string {
     if (!phoneNumber || phoneNumber.trim() === '') return phoneNumber ?? ''
@@ -139,13 +148,24 @@ export class PhoneNumberNormalizer {
     // Short codes (<=6 digits)
     if (digitsOnly.length <= 6) return digitsOnly
 
-    // Already has '+' prefix → keep as-is
+    // Try libphonenumber parsing
+    const defaultRegion = getDefaultRegion()
+    try {
+      const parsed = phoneUtil.parse(stripped, defaultRegion)
+      if (phoneUtil.isValidNumber(parsed)) {
+        return phoneUtil.format(parsed, PhoneNumberFormat.E164)
+      }
+    } catch {
+      // Fall through to legacy behavior
+    }
+
+    // Legacy fallback: already has '+' prefix → keep as-is
     if (stripped.startsWith('+')) return stripped
 
-    // 10 digits → US number
+    // Legacy fallback: 10 digits → US number
     if (digitsOnly.length === 10) return `+1${digitsOnly}`
 
-    // 11 digits starting with '1' → US number
+    // Legacy fallback: 11 digits starting with '1' → US number
     if (digitsOnly.length === 11 && digitsOnly.startsWith('1')) return `+${digitsOnly}`
 
     return digitsOnly

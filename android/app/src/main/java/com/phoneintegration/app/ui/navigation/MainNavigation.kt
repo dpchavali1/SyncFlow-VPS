@@ -43,6 +43,7 @@ import java.net.URLEncoder
 import java.net.URLDecoder
 import com.phoneintegration.app.ui.components.PhoneNumberRegistrationDialog
 import com.phoneintegration.app.ui.components.isPhoneNumberRegistered
+import com.phoneintegration.app.ui.components.restorePhoneRegistrationFromVPS
 
 
 @Composable
@@ -67,27 +68,41 @@ fun MainNavigation(
     // Phone number registration dialog state
     var showPhoneRegistrationDialog by remember { mutableStateOf(false) }
 
-    // Check if phone number is registered on first launch
+    // Auto-register phone number from SIM, or show mandatory dialog
     LaunchedEffect(Unit) {
         // Small delay to let the UI render first
         kotlinx.coroutines.delay(2000)
-        // Check if user is authenticated and phone not registered
         val vpsClient = com.phoneintegration.app.vps.VPSClient.getInstance(context)
-        val userId = vpsClient.userId
-        if (userId != null && !isPhoneNumberRegistered(context)) {
-            showPhoneRegistrationDialog = true
+        if (vpsClient.userId != null) {
+            // Restore from server first (covers reinstall / cleared prefs)
+            if (!isPhoneNumberRegistered(context)) {
+                withContext(Dispatchers.IO) {
+                    restorePhoneRegistrationFromVPS(context)
+                }
+            }
+            // Then check if we still need to register
+            if (!isPhoneNumberRegistered(context)) {
+                val autoRegistered = withContext(Dispatchers.IO) {
+                    vpsClient.autoRegisterPhoneNumbers()
+                }
+                if (autoRegistered == null) {
+                    // SIM number unavailable — show mandatory dialog
+                    showPhoneRegistrationDialog = true
+                }
+            }
         }
     }
 
-    // Show phone number registration dialog
+    // Show mandatory phone number registration dialog (no skip)
     if (showPhoneRegistrationDialog) {
         PhoneNumberRegistrationDialog(
+            mandatory = true,
             onDismiss = {
-                showPhoneRegistrationDialog = false
+                // mandatory=true blocks dismiss, but keep for interface
             },
             onRegistered = {
                 showPhoneRegistrationDialog = false
-                Toast.makeText(context, "Phone number registered for video calling", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "Phone number registered", Toast.LENGTH_SHORT).show()
             }
         )
     }

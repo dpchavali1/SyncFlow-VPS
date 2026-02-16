@@ -1247,7 +1247,7 @@ public class VPSService: NSObject, ObservableObject {
             let isDefault: Bool?
         }
         let response: SimsResponse = try await get("/api/devices/sims")
-        return response.sims.map { sim in
+        let simInfos = response.sims.map { sim in
             SimInfo(
                 subscriptionId: sim.subscriptionId ?? 0,
                 slotIndex: 0,
@@ -1258,6 +1258,11 @@ public class VPSService: NSObject, ObservableObject {
                 isActive: true
             )
         }
+        // Store primary phone number for region-based features (e.g. deals)
+        if let primaryPhone = simInfos.first?.phoneNumber {
+            UserDefaults.standard.set(primaryPhone, forKey: "registered_phone_number")
+        }
+        return simInfos
     }
 
     func getPairedDevices(userId: String) async throws -> [SyncFlowDevice] {

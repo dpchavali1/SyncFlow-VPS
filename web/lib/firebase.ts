@@ -76,35 +76,16 @@ import {
   decodeUtf8,
   bytesToBase64,
 } from './e2ee'
-import { PhoneNumberNormalizer } from './phoneNumberNormalizer'
+import { PhoneNumberNormalizer, normalizePhoneForConversation } from './phoneNumberNormalizer'
 import { cacheManager, callWithDedup } from './cache'
 import { incrementalSyncManager } from './incrementalSync'
 
 /**
- * Normalizes a phone number for consistent comparison across formats
- * Handles international prefixes and various formatting styles
- *
- * @param address - Phone number or sender address to normalize
- * @returns Normalized phone number (last 10 digits) or lowercase address for non-phone formats
- *
- * @example
- * normalizePhoneNumber("+1 (555) 123-4567") // Returns "5551234567"
- * normalizePhoneNumber("support@company.com") // Returns "support@company.com"
+ * Normalizes a phone number for consistent comparison across formats.
+ * Delegates to normalizePhoneForConversation which uses E.164 via libphonenumber.
  */
 function normalizePhoneNumber(address: string): string {
-  // Skip non-phone addresses (email, short codes, etc.)
-  if (address.includes('@') || address.length < 6) {
-    return address.toLowerCase()
-  }
-
-  // Remove all non-digit characters
-  const digitsOnly = address.replace(/[^0-9]/g, '')
-
-  // For comparison, use last 10 digits (handles country code differences)
-  if (digitsOnly.length >= 10) {
-    return digitsOnly.slice(-10)
-  }
-  return digitsOnly
+  return normalizePhoneForConversation(address)
 }
 
 /**

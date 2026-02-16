@@ -1109,30 +1109,41 @@ class VPSClient private constructor(
     }
 
     /**
-     * Auto-register phone numbers from SIM cards for call lookup.
-     * Safe to call multiple times — the server uses ON CONFLICT DO UPDATE.
+     * Auto-register phone number from primary SIM (slot 0) for call lookup.
+     * Returns the registered E.164 phone number, or null if unavailable.
+     * Skips if user already has a manually registered number (respects user choice).
      */
-    suspend fun autoRegisterPhoneNumbers() {
+    suspend fun autoRegisterPhoneNumbers(): String? {
         try {
+            // Don't overwrite if user already registered a number manually
+            if (com.phoneintegration.app.ui.components.isPhoneNumberRegistered(context)) {
+                val existing = com.phoneintegration.app.ui.components.getRegisteredPhoneNumber(context)
+                Log.d(TAG, "Phone already registered ($existing), skipping auto-register")
+                return existing
+            }
+
             val simManager = SimManager(context)
             val sims = simManager.getActiveSims()
-            for (sim in sims) {
-                val phone = sim.phoneNumber
-                if (!phone.isNullOrEmpty() && phone != "Unknown") {
-                    try {
-                        registerPhoneNumber(phone)
-                        Log.d(TAG, "Auto-registered phone $phone for call lookup")
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Failed to auto-register phone $phone: ${e.message}")
-                    }
+            // Use first SIM (slot 0) only
+            val primarySim = sims.minByOrNull { it.slotIndex }
+            val phone = primarySim?.phoneNumber
+            if (!phone.isNullOrEmpty() && phone != "Unknown") {
+                val result = registerPhoneNumber(phone)
+                if (result.success) {
+                    val normalized = com.phoneintegration.app.PhoneNumberUtils.toE164(phone)
+                    com.phoneintegration.app.ui.components.saveRegistrationState(context, normalized)
+                    Log.d(TAG, "Auto-registered phone $normalized for call lookup")
+                    return normalized
+                } else {
+                    Log.w(TAG, "Failed to auto-register phone $phone: ${result.error}")
                 }
-            }
-            if (sims.isEmpty() || sims.all { it.phoneNumber.isNullOrEmpty() || it.phoneNumber == "Unknown" }) {
-                Log.w(TAG, "No phone numbers available from SIM to auto-register")
+            } else {
+                Log.w(TAG, "No phone number available from SIM to auto-register")
             }
         } catch (e: Exception) {
             Log.w(TAG, "Auto phone registration failed: ${e.message}")
         }
+        return null
     }
 
     /**

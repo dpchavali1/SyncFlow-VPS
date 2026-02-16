@@ -225,6 +225,11 @@ dependencies {
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
 
     // ──────────────────────────────────────────────
+    // PHONE NUMBER PARSING - for international support
+    // ──────────────────────────────────────────────
+    implementation("com.googlecode.libphonenumber:libphonenumber:8.13.50")
+
+    // ──────────────────────────────────────────────
     // MMS SENDING - Klinker library for reliable MMS
     // ──────────────────────────────────────────────
     implementation("com.github.klinker41:android-smsmms:5.2.5")

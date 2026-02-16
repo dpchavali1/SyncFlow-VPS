@@ -1,31 +1,51 @@
 package com.phoneintegration.app
 
+import com.google.i18n.phonenumbers.NumberParseException
+import com.google.i18n.phonenumbers.PhoneNumberUtil
+import com.google.i18n.phonenumbers.PhoneNumberUtil.PhoneNumberFormat
 import java.util.Locale
 
 object PhoneNumberUtils {
 
+    private val phoneUtil: PhoneNumberUtil = PhoneNumberUtil.getInstance()
+
+    /** Device locale region code (e.g. "IN" for India, "US" for United States) */
+    private fun defaultRegion(): String = Locale.getDefault().country.ifEmpty { "US" }
+
     /**
      * Normalizes a phone number by removing all non-digit characters
-     * and handling country codes
+     * and converting to a canonical form for comparison.
+     * Uses libphonenumber with device locale for correct country inference.
      */
     fun normalizePhoneNumber(phoneNumber: String): String {
-        // Remove all non-digit characters
-        val digitsOnly = phoneNumber.replace(Regex("[^0-9]"), "")
+        if (phoneNumber.isBlank()) return phoneNumber
 
-        // Handle US country code (+1)
-        // If number starts with 1 and is 11 digits, remove the 1
+        val stripped = phoneNumber.replace(Regex("[^0-9+]"), "")
+        val digitsOnly = stripped.replace("+", "")
+        if (digitsOnly.isEmpty()) return phoneNumber
+
+        // Try libphonenumber
+        try {
+            val parsed = phoneUtil.parse(stripped, defaultRegion())
+            if (phoneUtil.isValidNumber(parsed)) {
+                // Return digits without '+' for backward compat with normalize callers
+                return phoneUtil.format(parsed, PhoneNumberFormat.E164).removePrefix("+")
+            }
+        } catch (_: NumberParseException) {
+            // Fall through
+        }
+
+        // Legacy: US country code handling
         return if (digitsOnly.length == 11 && digitsOnly.startsWith("1")) {
-            digitsOnly.substring(1) // Remove leading 1
-        } else if (digitsOnly.length == 10) {
-            digitsOnly // Already 10 digits
+            digitsOnly.substring(1)
         } else {
-            digitsOnly // Keep as is for other formats
+            digitsOnly
         }
     }
 
     /**
      * Normalizes a phone number for conversation grouping.
-     * Uses last 10 digits to merge numbers with country code differences.
+     * Uses E.164 as the canonical key instead of "last 10 digits".
      * Keeps alphanumeric sender IDs (like "JM-HDFCEL-S") as-is.
      */
     fun normalizeForConversation(address: String): String {
@@ -36,35 +56,23 @@ object PhoneNumberUtils {
             return address.lowercase(Locale.getDefault())
         }
 
-        // Check if this is an alphanumeric sender ID (like "JM-HDFCEL-S", "AD-AMAZON", etc.)
-        // These typically have letters and are used by businesses for SMS
-        val hasLetters = address.any { it.isLetter() }
-
-        // If address has ANY letters, it's an alphanumeric sender ID
-        // Keep it exactly as-is (uppercase for case-insensitive matching)
-        // Only merge conversations if the sender ID is EXACTLY the same
-        if (hasLetters) {
+        // Alphanumeric sender IDs — keep as-is
+        if (address.any { it.isLetter() }) {
             return address.uppercase(Locale.getDefault())
         }
 
-        val digitsOnly = address.replace(Regex("[^0-9]"), "")
+        val stripped = address.replace(Regex("[^0-9+]"), "")
+        val digitsOnly = stripped.replace("+", "")
 
         // Short codes (typically 5-6 digits) - keep as-is
-        if (address.length <= 6 && digitsOnly.length == address.length) {
-            return digitsOnly
-        }
+        if (digitsOnly.length <= 6) return digitsOnly
 
-        // Regular phone numbers - normalize by taking last 10 digits
-        return if (digitsOnly.length >= 10) {
-            digitsOnly.takeLast(10)
-        } else {
-            digitsOnly
-        }
+        // Use E.164 as canonical conversation key
+        return toE164(address)
     }
 
     /**
      * Alias for normalizePhoneNumber (for compatibility)
-     * This fixes the crash where code was calling normalizeNumber instead of normalizePhoneNumber
      */
     fun normalizeNumber(phoneNumber: String): String {
         return normalizePhoneNumber(phoneNumber)
@@ -72,11 +80,7 @@ object PhoneNumberUtils {
 
     /**
      * Converts a phone number to E.164 format for server communication.
-     * Rules:
-     * - 10 digits → +1XXXXXXXXXX (US)
-     * - 11 digits starting with 1 → +1XXXXXXXXXX (US)
-     * - Already starts with + → keep as-is
-     * - Short codes (<=6 digits), emails, alphanumeric sender IDs → unchanged
+     * Uses libphonenumber with device locale as default region.
      */
     fun toE164(phoneNumber: String): String {
         if (phoneNumber.isBlank()) return phoneNumber
@@ -96,13 +100,23 @@ object PhoneNumberUtils {
         // Short codes (<=6 digits)
         if (digitsOnly.length <= 6) return digitsOnly
 
-        // Already has '+' prefix → keep as-is
+        // Try libphonenumber parsing
+        try {
+            val parsed = phoneUtil.parse(stripped, defaultRegion())
+            if (phoneUtil.isValidNumber(parsed)) {
+                return phoneUtil.format(parsed, PhoneNumberFormat.E164)
+            }
+        } catch (_: NumberParseException) {
+            // Fall through
+        }
+
+        // Legacy fallback: already has '+' prefix → keep as-is
         if (stripped.startsWith("+")) return stripped
 
-        // 10 digits → US number
+        // Legacy fallback: 10 digits → US number
         if (digitsOnly.length == 10) return "+1$digitsOnly"
 
-        // 11 digits starting with '1' → US number
+        // Legacy fallback: 11 digits starting with '1' → US number
         if (digitsOnly.length == 11 && digitsOnly.startsWith("1")) return "+$digitsOnly"
 
         return digitsOnly
@@ -112,42 +126,59 @@ object PhoneNumberUtils {
      * Checks if two phone numbers are the same
      */
     fun areNumbersEqual(number1: String, number2: String): Boolean {
-        return normalizePhoneNumber(number1) == normalizePhoneNumber(number2)
+        return toE164(number1) == toE164(number2)
     }
 
     /**
-     * Formats a phone number for display
-     * Keeps the original format but ensures consistency
+     * Formats a phone number for display using libphonenumber.
+     * Same-region: NATIONAL format. Different-region: INTERNATIONAL format.
      */
     fun formatForDisplay(phoneNumber: String): String {
-        val normalized = normalizePhoneNumber(phoneNumber)
+        if (phoneNumber.isBlank()) return phoneNumber
 
-        // Format US numbers as (XXX) XXX-XXXX
-        return if (normalized.length == 10) {
-            "(${normalized.substring(0, 3)}) ${normalized.substring(3, 6)}-${normalized.substring(6)}"
-        } else {
-            phoneNumber // Keep original format for non-US numbers
+        val region = defaultRegion()
+        try {
+            val parsed = phoneUtil.parse(phoneNumber, region)
+            if (phoneUtil.isValidNumber(parsed)) {
+                val numberRegion = phoneUtil.getRegionCodeForNumber(parsed)
+                return if (numberRegion == region) {
+                    phoneUtil.format(parsed, PhoneNumberFormat.NATIONAL)
+                } else {
+                    phoneUtil.format(parsed, PhoneNumberFormat.INTERNATIONAL)
+                }
+            }
+        } catch (_: NumberParseException) {
+            // Fall through
         }
+
+        return phoneNumber
     }
 
     /**
-     * Formats a phone number with country code support
-     * This matches the signature of Android's PhoneNumberUtils.formatNumber
+     * Formats a phone number with country code support using libphonenumber.
      */
     fun formatNumber(phoneNumber: String, defaultCountry: String): String? {
         return try {
-            // Use Android's built-in formatter
-            android.telephony.PhoneNumberUtils.formatNumber(phoneNumber, defaultCountry)
-        } catch (e: Exception) {
-            // Fallback to our custom formatter
+            val parsed = phoneUtil.parse(phoneNumber, defaultCountry)
+            if (phoneUtil.isValidNumber(parsed)) {
+                val numberRegion = phoneUtil.getRegionCodeForNumber(parsed)
+                if (numberRegion == defaultCountry) {
+                    phoneUtil.format(parsed, PhoneNumberFormat.NATIONAL)
+                } else {
+                    phoneUtil.format(parsed, PhoneNumberFormat.INTERNATIONAL)
+                }
+            } else {
+                formatForDisplay(phoneNumber)
+            }
+        } catch (_: NumberParseException) {
             formatForDisplay(phoneNumber)
         }
     }
 
     /**
-     * Overload without country parameter
+     * Overload without country parameter — uses device locale
      */
     fun formatNumber(phoneNumber: String): String {
-        return formatNumber(phoneNumber, Locale.getDefault().country) ?: phoneNumber
+        return formatNumber(phoneNumber, defaultRegion()) ?: phoneNumber
     }
 }

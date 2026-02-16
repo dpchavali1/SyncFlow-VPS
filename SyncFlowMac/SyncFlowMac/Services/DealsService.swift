@@ -16,11 +16,27 @@ class DealsService: ObservableObject {
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var error: String?
 
-    private let dealsURLs = [
-        "https://raw.githubusercontent.com/dpchavali1/syncflow-deals/main/deals.json",
-        "https://raw.githubusercontent.com/dpchavali1/syncflow-deals/main/deals2.json",
-        "https://raw.githubusercontent.com/dpchavali1/syncflow-deals/main/deals3.json"
-    ]
+    private var dealsURLs: [String] {
+        let baseURL = "https://raw.githubusercontent.com/dpchavali1/syncflow-deals/main"
+        if isIndianUser {
+            return ["\(baseURL)/deals-in.json"]
+        } else {
+            return ["\(baseURL)/deals.json", "\(baseURL)/deals2.json", "\(baseURL)/deals3.json"]
+        }
+    }
+
+    private var isIndianUser: Bool {
+        // Check phone number stored from Android SIM registration
+        if let phone = UserDefaults.standard.string(forKey: "registered_phone_number"),
+           phone.hasPrefix("+91") {
+            return true
+        }
+        // Fall back to device region
+        if let region = Locale.current.region?.identifier {
+            return region == "IN"
+        }
+        return false
+    }
 
     private let cacheKey = "cached_deals"
     private let cacheTimestampKey = "cached_deals_timestamp"

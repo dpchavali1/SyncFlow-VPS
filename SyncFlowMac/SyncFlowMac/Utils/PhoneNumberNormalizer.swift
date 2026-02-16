@@ -1,73 +1,68 @@
 import Foundation
+import PhoneNumberKit
 
 /**
  * Consistent phone number normalization across all platforms
  * Ensures contacts sync correctly between Android, macOS, and Web
+ *
+ * Uses PhoneNumberKit (Swift wrapper around libphonenumber) for proper international support.
  */
 class PhoneNumberNormalizer {
 
     static let shared = PhoneNumberNormalizer()
 
+    private let phoneNumberKit = PhoneNumberUtility()
+
+    private var defaultRegion: String {
+        if #available(macOS 13, *) {
+            return Locale.current.region?.identifier ?? "US"
+        } else {
+            return Locale.current.regionCode ?? "US"
+        }
+    }
+
     /**
-     * Normalize phone number to standard format for comparison
-     * Handles: +1-234-567-8900, (234) 567-8900, 234-567-8900, 2345678900, etc.
+     * Normalize phone number to E.164 format for comparison.
      */
     func normalize(_ phoneNumber: String?) -> String {
         guard let phoneNumber = phoneNumber, !phoneNumber.trimmingCharacters(in: .whitespaces).isEmpty else {
             return ""
         }
 
-        // Remove all non-digit characters
-        let digitsOnly = phoneNumber.replacingOccurrences(
-            of: "[^0-9+]",
-            with: "",
-            options: .regularExpression
-        )
-
-        // Remove leading + if present
-        let withoutPlus = digitsOnly.replacingOccurrences(of: "+", with: "")
-
-        // If starts with 1 (US country code), remove it to get 10 digits
-        let normalized: String
-        if withoutPlus.hasPrefix("1") && withoutPlus.count > 10 {
-            normalized = String(withoutPlus.dropFirst())
-        } else {
-            normalized = withoutPlus
-        }
-
-        return normalized
+        return toE164(phoneNumber)
     }
 
     /**
-     * Format phone number for display
-     * US: (234) 567-8900
-     * International: keep as-is
+     * Format phone number for display using PhoneNumberKit.
+     * Same-region: NATIONAL format. Different-region: INTERNATIONAL format.
      */
     func formatForDisplay(_ phoneNumber: String?) -> String {
         guard let phoneNumber = phoneNumber, !phoneNumber.isEmpty else { return "" }
 
-        let normalized = normalize(phoneNumber)
+        let region = defaultRegion
 
-        // US format (10 digits)
-        if normalized.count == 10 {
-            let areaCode = String(normalized.prefix(3))
-            let prefix = String(normalized.dropFirst(3).prefix(3))
-            let lineNumber = String(normalized.suffix(4))
-            return "(\(areaCode)) \(prefix)-\(lineNumber)"
-        } else {
-            // International or non-standard
-            return normalized
+        do {
+            let parsed = try phoneNumberKit.parse(phoneNumber, withRegion: region)
+            let numberRegion = phoneNumberKit.getRegionCode(of: parsed)
+            if numberRegion == region {
+                return phoneNumberKit.format(parsed, toType: .national)
+            }
+            return phoneNumberKit.format(parsed, toType: .international)
+        } catch {
+            // Fall through
         }
+
+        return phoneNumber
     }
 
     /**
      * Create deduplication key for contacts
-     * Uses normalized phone number only (not hashCode which changes)
+     * Uses E.164 phone number (not hashCode which changes)
      */
     func getDeduplicationKey(phoneNumber: String?, displayName: String? = nil) -> String {
         let normalized = normalize(phoneNumber)
 
-        if !normalized.isEmpty {
+        if !normalized.isEmpty && normalized.hasPrefix("+") {
             return "phone_\(normalized)"
         } else if let displayName = displayName, !displayName.isEmpty {
             let cleanName = displayName.lowercased()
@@ -80,11 +75,8 @@ class PhoneNumberNormalizer {
 
     /**
      * Convert phone number to E.164 format for server communication.
-     * Rules:
-     * - 10 digits → +1XXXXXXXXXX (US)
-     * - 11 digits starting with 1 → +1XXXXXXXXXX (US)
-     * - Already starts with + → keep as-is
-     * - Short codes (<=6 digits), emails, alphanumeric sender IDs → unchanged
+     * Uses PhoneNumberKit with device locale as default region.
+     * Falls back to legacy heuristics if PhoneNumberKit can't parse.
      */
     func toE164(_ phoneNumber: String?) -> String {
         guard let phoneNumber = phoneNumber, !phoneNumber.trimmingCharacters(in: .whitespaces).isEmpty else {
@@ -108,13 +100,21 @@ class PhoneNumberNormalizer {
         // Short codes (<=6 digits)
         if digitsOnly.count <= 6 { return digitsOnly }
 
-        // Already has '+' prefix → keep as-is
+        // Try PhoneNumberKit parsing
+        do {
+            let parsed = try phoneNumberKit.parse(stripped, withRegion: defaultRegion)
+            return phoneNumberKit.format(parsed, toType: .e164)
+        } catch {
+            // Fall through to legacy behavior
+        }
+
+        // Legacy fallback: already has '+' prefix → keep as-is
         if stripped.hasPrefix("+") { return stripped }
 
-        // 10 digits → US number
+        // Legacy fallback: 10 digits → US number
         if digitsOnly.count == 10 { return "+1\(digitsOnly)" }
 
-        // 11 digits starting with '1' → US number
+        // Legacy fallback: 11 digits starting with '1' → US number
         if digitsOnly.count == 11 && digitsOnly.hasPrefix("1") { return "+\(digitsOnly)" }
 
         return digitsOnly

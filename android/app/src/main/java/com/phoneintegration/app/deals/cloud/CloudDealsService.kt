@@ -54,17 +54,17 @@ class CloudDealsService {
                     withProtocol
                 } catch (e: Exception) {
                     // If URL is malformed, try to construct a proper Amazon URL
-                    if (cleaned.contains("amazon.com") || cleaned.contains("amzn.to")) {
-                        // Extract ASIN if possible
+                    val amazonDomain = if (cleaned.contains("amazon.in")) "amazon.in" else "amazon.com"
+                    if (cleaned.contains("amazon.com") || cleaned.contains("amazon.in") || cleaned.contains("amzn.to")) {
                         val asinPattern = Regex("(?:dp|gp/product)/([A-Z0-9]{10})")
                         val asinMatch = asinPattern.find(cleaned)
                         if (asinMatch != null) {
-                            "https://www.amazon.com/dp/${asinMatch.groupValues[1]}"
+                            "https://www.$amazonDomain/dp/${asinMatch.groupValues[1]}"
                         } else {
-                            "https://www.amazon.com"
+                            "https://www.$amazonDomain"
                         }
                     } else {
-                        "https://www.amazon.com"
+                        "https://www.$amazonDomain"
                     }
                 }
             }

@@ -304,19 +304,24 @@ router.post('/register', async (req: Request, res: Response) => {
       await client.query('LOCK TABLE user_phone_registry IN EXCLUSIVE MODE');
 
       // Remove any existing registration for this phone number (from any user).
-      await client.query(
-        `DELETE FROM user_phone_registry WHERE phone_number = $1 AND user_id <> $2`,
+      // Log when stealing a phone from another user for admin visibility.
+      const deleteResult = await client.query(
+        `DELETE FROM user_phone_registry WHERE phone_number = $1 AND user_id <> $2 RETURNING user_id`,
         [normalizedPhone, userId]
       );
+      if (deleteResult.rows.length > 0) {
+        console.warn(`⚠️ Phone ${normalizedPhone} was taken from user ${deleteResult.rows[0].user_id} by user ${userId}`);
+      }
 
-      // Insert or update the user's registration.
+      // Insert or update the user's registration with device_id audit trail.
       await client.query(
-        `INSERT INTO user_phone_registry (user_id, phone_number, registered_at)
-         VALUES ($1, $2, $3)
+        `INSERT INTO user_phone_registry (user_id, phone_number, registered_at, device_id)
+         VALUES ($1, $2, $3, $4)
          ON CONFLICT (user_id) DO UPDATE SET
            phone_number = EXCLUDED.phone_number,
-           registered_at = EXCLUDED.registered_at`,
-        [userId, normalizedPhone, Date.now()]
+           registered_at = EXCLUDED.registered_at,
+           device_id = EXCLUDED.device_id`,
+        [userId, normalizedPhone, Date.now(), req.deviceId || null]
       );
 
       // Also update the users table phone column for admin visibility
@@ -376,7 +381,7 @@ router.get('/lookup/:phoneNumber', async (req: Request, res: Response) => {
 
     // Security: verify the caller has this number in their contacts to prevent enumeration
     const isInContacts = await queryOne(
-      `SELECT 1 FROM user_contacts WHERE user_id = $1 AND (phone = $2 OR phone LIKE '%' || RIGHT($2, 10) || '%')`,
+      `SELECT 1 FROM user_contacts WHERE user_id = $1 AND phone_numbers @> to_jsonb($2::text)`,
       [userId, normalizedPhone]
     );
 

@@ -46,6 +46,7 @@
 
     <!-- Phone features - Optional, request for calling -->
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
     <uses-permission android:name="android.permission.CALL_PHONE" />
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
@@ -233,6 +234,16 @@
             <intent-filter>
                 <action android:name="com.phoneintegration.app.ACTION_ANSWER_CALL" />
                 <action android:name="com.phoneintegration.app.ACTION_DECLINE_CALL" />
+            </intent-filter>
+        </receiver>
+
+        <!-- SIM Change Receiver - auto re-register phone number on SIM swap -->
+        <receiver
+            android:name=".SimChangeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.telephony.action.SIM_CARD_STATE_CHANGED" />
+                <action android:name="android.intent.action.SIM_STATE_CHANGED" />
             </intent-filter>
         </receiver>
 

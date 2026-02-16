@@ -403,7 +403,9 @@ class MainActivity : ComponentActivity() {
         Manifest.permission.RECEIVE_SMS,        // Receive new messages
         Manifest.permission.READ_CONTACTS,      // Show contact names
         Manifest.permission.READ_CALL_LOG,      // Sync call history
-        Manifest.permission.POST_NOTIFICATIONS  // Show sync notifications
+        Manifest.permission.POST_NOTIFICATIONS, // Show sync notifications
+        Manifest.permission.READ_PHONE_STATE,   // Read SIM phone number
+        Manifest.permission.READ_PHONE_NUMBERS  // Read SIM phone number (Android 13+)
     )
 
     /**
