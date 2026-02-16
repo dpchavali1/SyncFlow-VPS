@@ -1109,13 +1109,14 @@ class VPSClient private constructor(
     }
 
     /**
-     * Auto-register phone number from primary SIM (slot 0) for call lookup.
-     * Returns the registered E.164 phone number, or null if unavailable.
-     * Skips if user already has a manually registered number (respects user choice).
+     * Auto-register phone number from SIM for call lookup.
+     * Returns the registered E.164 phone number, or null if unavailable/ambiguous.
+     * Skips if user already has a registered number (respects user choice).
+     * On dual-SIM devices, returns null to force the manual dialog (user must choose).
      */
     suspend fun autoRegisterPhoneNumbers(): String? {
         try {
-            // Don't overwrite if user already registered a number manually
+            // Don't overwrite if user already registered a number
             if (com.phoneintegration.app.ui.components.isPhoneNumberRegistered(context)) {
                 val existing = com.phoneintegration.app.ui.components.getRegisteredPhoneNumber(context)
                 Log.d(TAG, "Phone already registered ($existing), skipping auto-register")
@@ -1124,9 +1125,15 @@ class VPSClient private constructor(
 
             val simManager = SimManager(context)
             val sims = simManager.getActiveSims()
-            // Use first SIM (slot 0) only
-            val primarySim = sims.minByOrNull { it.slotIndex }
-            val phone = primarySim?.phoneNumber
+
+            // Dual-SIM: don't auto-pick — return null to show dialog so user can choose
+            if (sims.size > 1) {
+                Log.d(TAG, "Multiple SIMs detected (${sims.size}), skipping auto-register — user must choose")
+                return null
+            }
+
+            // Single SIM: auto-register
+            val phone = sims.firstOrNull()?.phoneNumber
             if (!phone.isNullOrEmpty() && phone != "Unknown") {
                 val result = registerPhoneNumber(phone)
                 if (result.success) {

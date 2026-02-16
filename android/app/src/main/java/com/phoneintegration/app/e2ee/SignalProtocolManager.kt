@@ -378,32 +378,13 @@ class SignalProtocolManager(private val context: Context) {
         return prefs.getBoolean(KEY_INITIALIZED, false)
     }
 
-    @SuppressLint("MissingPermission")
+    /**
+     * Phone registration removed from E2EE init — it caused silent overwrites on dual-SIM devices.
+     * Phone registration is now handled exclusively by MainNavigation (dialog or restore from VPS).
+     */
     private fun registerUser() {
-        val uid = vpsClient.userId ?: return
-        // Don't overwrite if user already registered a number (manual or auto)
-        if (com.phoneintegration.app.ui.components.isPhoneNumberRegistered(context)) {
-            Log.d(TAG, "Phone already registered, skipping E2EE registerUser")
-            return
-        }
-        try {
-            val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
-            val phoneNumber = telephonyManager.line1Number
-            if (!phoneNumber.isNullOrEmpty()) {
-                runBlocking {
-                    try {
-                        vpsClient.registerPhoneNumber(phoneNumber)
-                        val normalized = com.phoneintegration.app.PhoneNumberUtils.toE164(phoneNumber)
-                        com.phoneintegration.app.ui.components.saveRegistrationState(context, normalized)
-                        Log.d(TAG, "Phone number registered via VPS")
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error registering phone number via VPS", e)
-                    }
-                }
-            }
-        } catch (e: SecurityException) {
-            Log.w(TAG, "Could not get phone number - permission not granted")
-        }
+        // No-op: phone registration moved to MainNavigation flow
+        Log.d(TAG, "registerUser() called — phone registration handled by MainNavigation, skipping")
     }
 
     private fun publishPublicKeyToVps(publicKeysetJson: String) {
