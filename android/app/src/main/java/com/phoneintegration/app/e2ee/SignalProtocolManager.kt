@@ -381,6 +381,11 @@ class SignalProtocolManager(private val context: Context) {
     @SuppressLint("MissingPermission")
     private fun registerUser() {
         val uid = vpsClient.userId ?: return
+        // Don't overwrite if user already registered a number (manual or auto)
+        if (com.phoneintegration.app.ui.components.isPhoneNumberRegistered(context)) {
+            Log.d(TAG, "Phone already registered, skipping E2EE registerUser")
+            return
+        }
         try {
             val telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
             val phoneNumber = telephonyManager.line1Number
@@ -388,6 +393,8 @@ class SignalProtocolManager(private val context: Context) {
                 runBlocking {
                     try {
                         vpsClient.registerPhoneNumber(phoneNumber)
+                        val normalized = com.phoneintegration.app.PhoneNumberUtils.toE164(phoneNumber)
+                        com.phoneintegration.app.ui.components.saveRegistrationState(context, normalized)
                         Log.d(TAG, "Phone number registered via VPS")
                     } catch (e: Exception) {
                         Log.e(TAG, "Error registering phone number via VPS", e)
