@@ -57,7 +57,7 @@
  * | Suspicious URL               | +0.35        |
  * | Promotional sender prefix    | +0.30        |
  * | Spam keyword (each, max 4)   | +0.15        |
- * | Saved contact                | -0.15        |
+ * | Saved contact                | EXEMPT (never spam) |
  *
  * ## Usage
  *

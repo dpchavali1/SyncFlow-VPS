@@ -147,7 +147,9 @@ class SmsReceiver : BroadcastReceiver() {
                     val isSpamFilterEnabled = preferencesManager.spamFilterEnabled.value
                     val spamThreshold = preferencesManager.getSpamThreshold()
 
-                    val isFromContact = contactName != null && contactName != sender
+                    // Use dedicated PhoneLookup-based check — more reliable than contactName != null
+                    // because PhoneLookup handles all number format variations automatically
+                    val isFromContact = contactHelper?.isContact(sender) ?: false
 
                     // Use both basic and advanced spam checking
                     val spamResult = if (isSpamFilterEnabled) {
