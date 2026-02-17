@@ -58,7 +58,6 @@ import com.phoneintegration.app.e2ee.SignalProtocolManager
 import com.phoneintegration.app.desktop.NotificationMirrorService
 import com.phoneintegration.app.desktop.PhotoSyncService
 import com.phoneintegration.app.SmsRepository
-import com.phoneintegration.app.CallMonitorService
 import com.phoneintegration.app.vps.VPSClient
 import com.phoneintegration.app.vps.VPSSyncService
 import com.phoneintegration.app.ui.components.getRegisteredPhoneNumber
@@ -706,9 +705,8 @@ fun DesktopIntegrationScreen(
                                     successMessage = "Successfully paired with ${tokenData.name}!"
                                     showSuccessDialog = true
 
-                                    // Start CallMonitorService for phone call sync
-                                    android.util.Log.d("DesktopIntegrationScreen", "Starting CallMonitorService for VPS phone call sync")
-                                    CallMonitorService.start(context)
+                                    // CallMonitorService is on-demand — FCM will start it when calls come in
+                                    // Sync call history and SIM info as one-time operations here
 
                                     // Trigger initial VPS data sync, THEN start IntelligentSyncManager
                                     // (starting ISM first causes concurrent duplicate MMS uploads)
@@ -723,7 +721,19 @@ fun DesktopIntegrationScreen(
                                             android.util.Log.d("DesktopIntegrationScreen", "Syncing ${messages.size} messages to VPS")
                                             vpsSyncService.syncMessages(messages)
 
-                                            // Contacts and call history sync handled by VPSSyncService
+                                            // Sync call history and SIM info (one-time, not via persistent service)
+                                            try {
+                                                val callSyncService = com.phoneintegration.app.desktop.CallHistorySyncService(context)
+                                                callSyncService.syncCallHistoryForUser()
+                                            } catch (e: Exception) {
+                                                android.util.Log.w("DesktopIntegrationScreen", "Call history sync failed: ${e.message}")
+                                            }
+                                            try {
+                                                val simManager = com.phoneintegration.app.SimManager(context)
+                                                simManager.syncSimsToVps(vpsSyncService)
+                                            } catch (e: Exception) {
+                                                android.util.Log.w("DesktopIntegrationScreen", "SIM sync failed: ${e.message}")
+                                            }
                                             android.util.Log.d("DesktopIntegrationScreen", "Initial VPS data sync completed")
                                         } catch (e: Exception) {
                                             android.util.Log.e("DesktopIntegrationScreen", "Error syncing VPS data", e)
@@ -864,9 +874,7 @@ fun DesktopIntegrationScreen(
                                         showSuccessDialog = true
                                         android.util.Log.d("DesktopIntegrationScreen", "SUCCESS DIALOG STATE SET: showSuccessDialog=$showSuccessDialog, successMessage=$successMessage")
 
-                                        // Start CallMonitorService to sync phone calls to Mac
-                                        android.util.Log.d("DesktopIntegrationScreen", "Starting CallMonitorService for phone call sync")
-                                        CallMonitorService.start(context)
+                                        // CallMonitorService is on-demand — FCM will start it when calls come in
 
                                         // Start IntelligentSyncManager for ongoing sync
                                         try {
@@ -928,8 +936,7 @@ fun DesktopIntegrationScreen(
                                         }
                                         successMessage = "Successfully paired with desktop device!"
                                         showSuccessDialog = true
-                                        // Start CallMonitorService for phone call sync
-                                        CallMonitorService.start(context)
+                                        // CallMonitorService is on-demand — FCM will start it when calls come in
                                         // Use NonCancellable so navigation away doesn't kill the sync
                                         scope.launch(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {
                                             // Ensure full sync on new pairing

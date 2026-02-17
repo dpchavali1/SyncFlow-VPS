@@ -46,6 +46,8 @@ class CallMonitorService : Service() {
         private const val TAG = "CallMonitorService"
         private const val NOTIFICATION_ID = 2001
         private const val CHANNEL_ID = "call_monitor_channel"
+        // Auto-stop after this period if no active call (on-demand service, not persistent)
+        private const val IDLE_TIMEOUT_MS = 30_000L // 30 seconds
 
         fun start(context: Context) {
             val intent = Intent(context, CallMonitorService::class.java)
@@ -63,6 +65,7 @@ class CallMonitorService : Service() {
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var idleTimeoutJob: Job? = null
     private lateinit var telephonyManager: TelephonyManager
     private lateinit var telecomManager: TelecomManager
     private lateinit var vpsSyncService: VPSSyncService
@@ -181,22 +184,49 @@ class CallMonitorService : Service() {
         registerCallStateListener()
         listenForCallCommands()
         listenForCallRequests()
-        syncCallHistory()
-        syncSimInformation()
+        // Call history and SIM sync are done at pairing time, not here
+        startIdleTimeout()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (BuildConfig.DEBUG) Log.d(TAG, "CallMonitorService started")
         // Poll for pending call requests on each start (handles FCM wake-up + missed WebSocket events)
         pollPendingCallRequests()
-        return START_STICKY
+        // Reset idle timeout — a new start command means something needs us
+        resetIdleTimeout()
+        return START_NOT_STICKY // Don't auto-restart — FCM will wake us when needed
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    /**
+     * Start idle timeout — auto-stops service if no active call within IDLE_TIMEOUT_MS.
+     * Called on startup and reset on each onStartCommand.
+     */
+    private fun startIdleTimeout() {
+        idleTimeoutJob?.cancel()
+        idleTimeoutJob = serviceScope.launch {
+            delay(IDLE_TIMEOUT_MS)
+            if (currentCallId == null) {
+                Log.d(TAG, "Idle timeout reached, no active call — stopping service")
+                stopSelf()
+            }
+        }
+    }
+
+    private fun resetIdleTimeout() {
+        startIdleTimeout()
+    }
+
+    private fun cancelIdleTimeout() {
+        idleTimeoutJob?.cancel()
+        idleTimeoutJob = null
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         if (BuildConfig.DEBUG) Log.d(TAG, "CallMonitorService destroyed")
+        idleTimeoutJob?.cancel()
         try {
             unregisterReceiver(incomingCallReceiver)
         } catch (e: Exception) {
@@ -397,6 +427,7 @@ class CallMonitorService : Service() {
     }
 
     private fun onIncomingCall(phoneNumber: String) {
+        cancelIdleTimeout() // Active call — don't auto-stop
         serviceScope.launch(NonCancellable) {
             try {
                 val storedCallId = getStoredCallId()

@@ -241,14 +241,15 @@ class IntelligentSyncManager private constructor(private val context: Context) {
                 } catch (e: Exception) {
                     Log.e(TAG, "Error polling messages", e)
                 }
-                delay(5000) // Poll every 5 seconds
+                delay(30_000) // Poll every 30 seconds (WebSocket is the primary real-time channel)
             }
         }
         Log.i(TAG, "✅ Message polling started")
     }
 
     /**
-     * Start call polling to check for call commands
+     * Start call polling to check for call commands.
+     * This is a fallback — WebSocket and FCM handle real-time call delivery.
      */
     private fun startCallPolling() {
         callPollingJob?.cancel()
@@ -264,7 +265,7 @@ class IntelligentSyncManager private constructor(private val context: Context) {
                 } catch (e: Exception) {
                     Log.e(TAG, "Error polling call commands", e)
                 }
-                delay(2000) // Poll every 2 seconds for calls (time-sensitive)
+                delay(30_000) // Poll every 30 seconds (FCM handles real-time call delivery)
             }
         }
         Log.i(TAG, "✅ Call polling started")
@@ -314,7 +315,7 @@ class IntelligentSyncManager private constructor(private val context: Context) {
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ Error polling E2EE key requests", e)
                 }
-                delay(5000) // Poll every 5 seconds
+                delay(60_000) // Poll every 60 seconds (WebSocket handles real-time key requests)
             }
         }
         Log.i(TAG, "✅ E2EE key request polling ACTIVE")
