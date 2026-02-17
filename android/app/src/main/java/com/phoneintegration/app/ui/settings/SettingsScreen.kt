@@ -48,7 +48,14 @@ import com.phoneintegration.app.BuildConfig
 import com.phoneintegration.app.MainActivity
 import com.phoneintegration.app.data.PreferencesManager
 import com.phoneintegration.app.desktop.DesktopSyncService
+import com.phoneintegration.app.ui.components.PhoneNumberRegistrationDialog
+import com.phoneintegration.app.ui.components.getRegisteredPhoneNumber
+import com.phoneintegration.app.ui.components.isPhoneNumberRegistered
 import com.phoneintegration.app.utils.DefaultSmsHelper
+import com.phoneintegration.app.vps.VPSClient
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 // =============================================================================
 // region MAIN SETTINGS SCREEN
@@ -112,10 +119,15 @@ fun SettingsScreen(
     var showWebAccessDialog by remember { mutableStateOf(false) }
     var showAboutDialog by remember { mutableStateOf(false) }
     var isPaired by remember { mutableStateOf(false) }
+    var showPhoneRegistrationDialog by remember { mutableStateOf(false) }
+    var showChangePhoneConfirm by remember { mutableStateOf(false) }
+    var registeredPhone by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
         isDefaultSmsApp = DefaultSmsHelper.isDefaultSmsApp(context)
         isPaired = DesktopSyncService.hasPairedDevices(context)
+        registeredPhone = getRegisteredPhoneNumber(context)
     }
 
     // Web Access Instructions Dialog
@@ -302,6 +314,51 @@ fun SettingsScreen(
                 }
             }
         }
+    }
+
+    // Change Phone Number Confirmation
+    if (showChangePhoneConfirm) {
+        AlertDialog(
+            onDismissRequest = { showChangePhoneConfirm = false },
+            title = { Text("Change Phone Number") },
+            text = {
+                Text("Current number: ${registeredPhone}\n\nDo you want to change your registered phone number? This will unregister the current number and let you pick a new SIM.")
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showChangePhoneConfirm = false
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                val vpsClient = VPSClient.getInstance(context)
+                                vpsClient.unregisterPhoneNumber(context)
+                            }
+                            registeredPhone = null
+                            showPhoneRegistrationDialog = true
+                        }
+                    }
+                ) {
+                    Text("Change")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showChangePhoneConfirm = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Phone Number Registration Dialog
+    if (showPhoneRegistrationDialog) {
+        PhoneNumberRegistrationDialog(
+            mandatory = false,
+            onDismiss = { showPhoneRegistrationDialog = false },
+            onRegistered = {
+                showPhoneRegistrationDialog = false
+                registeredPhone = getRegisteredPhoneNumber(context)
+            }
+        )
     }
 
     Scaffold(
@@ -511,12 +568,25 @@ fun SettingsScreen(
                 onClick = onNavigateToSupport
             )
 
-            // Only show Account section if user has paired (has an account)
+            Divider(Modifier.padding(vertical = 8.dp))
+
+            SettingsSection("Account")
+
+            SettingsItem(
+                icon = Icons.Filled.Phone,
+                title = "Phone Number",
+                subtitle = registeredPhone ?: "Not registered",
+                onClick = {
+                    if (registeredPhone != null) {
+                        showChangePhoneConfirm = true
+                    } else {
+                        showPhoneRegistrationDialog = true
+                    }
+                }
+            )
+
+            // Only show Delete Account if user has paired (has an account)
             if (isPaired) {
-                Divider(Modifier.padding(vertical = 8.dp))
-
-                SettingsSection("Account")
-
                 SettingsItem(
                     icon = Icons.Filled.DeleteForever,
                     title = "Delete Account",

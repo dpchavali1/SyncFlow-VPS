@@ -15,8 +15,8 @@ export default function DownloadPage() {
   const downloadBase = 'https://api.sfweb.app/downloads'
   const macFileSize = '19 MB'
   const apkFileSize = '116 MB'
-  const macSha256 = '01fcf755889a208821c9dc76dd84fe4ffd4dd2e96f674fe36f75cd0446a24cf2'
-  const apkSha256 = '3fb9245e74e3912b55351d14ba390bc406dec7dcdcf74c9ea8e42de379747117'
+  const macSha256 = 'f6aabf6a00845cfad95f6e6a23e3c480b76e673ad41357527cb26e05c76d7e34'
+  const apkSha256 = '9982779c9bebc32256e983cc600845652be2fa5c48b33a5ec735a0fde4574719'
   const minMacOS = 'macOS 14.0 or later'
   const [copiedMac, setCopiedMac] = useState(false)
   const [copiedApk, setCopiedApk] = useState(false)

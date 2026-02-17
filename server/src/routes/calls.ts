@@ -348,6 +348,30 @@ router.post('/register', async (req: Request, res: Response) => {
   }
 });
 
+// DELETE /calls/register - Unregister phone number
+router.delete('/register', async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId!;
+
+    await query(
+      `DELETE FROM user_phone_registry WHERE user_id = $1`,
+      [userId]
+    );
+
+    // Also clear from users table
+    await query(
+      `UPDATE users SET phone = NULL WHERE uid = $1`,
+      [userId]
+    );
+
+    console.log(`Phone number unregistered for user: ${userId}`);
+    res.json({ success: true, message: 'Phone number unregistered' });
+  } catch (error) {
+    console.error('Unregister phone error:', error);
+    res.status(500).json({ error: 'Failed to unregister phone number' });
+  }
+});
+
 // GET /calls/my-phone - Get current user's registered phone number
 router.get('/my-phone', async (req: Request, res: Response) => {
   try {

@@ -1109,6 +1109,21 @@ class VPSClient private constructor(
     }
 
     /**
+     * Unregister phone number from server and clear local state.
+     */
+    suspend fun unregisterPhoneNumber(context: Context): Boolean = withContext(Dispatchers.IO) {
+        try {
+            delete("/api/calls/register")
+            com.phoneintegration.app.ui.components.clearPhoneRegistration(context)
+            Log.d(TAG, "Phone number unregistered")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Error unregistering phone: ${e.message}")
+            false
+        }
+    }
+
+    /**
      * Auto-register phone number from SIM for call lookup.
      * Returns the registered E.164 phone number, or null if unavailable/ambiguous.
      * Skips if user already has a registered number (respects user choice).

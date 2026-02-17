@@ -117,15 +117,56 @@ class SimManager(private val context: Context) {
     }
 
     /**
-     * Get phone number for a subscription
+     * Get phone number for a subscription.
+     * Tries multiple methods — eSIMs often don't populate SubscriptionInfo.number,
+     * so on Android 13+ we also try SubscriptionManager.getPhoneNumber().
      */
     private fun getPhoneNumber(subscription: SubscriptionInfo): String? {
         return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
+            // Method 1: SubscriptionInfo.number (works for most physical SIMs)
+            val fromInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP_MR1) {
                 subscription.number?.takeIf { it.isNotBlank() }
             } else {
                 null
             }
+            if (fromInfo != null) return fromInfo
+
+            // Method 2: SubscriptionManager.getPhoneNumber() — Android 13+ (API 33)
+            // More reliable for eSIMs where SubscriptionInfo.number is empty
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                try {
+                    val fromManager = subscriptionManager?.getPhoneNumber(subscription.subscriptionId)
+                    if (!fromManager.isNullOrBlank()) {
+                        Log.d(TAG, "Got eSIM number via SubscriptionManager.getPhoneNumber()")
+                        return fromManager
+                    }
+                } catch (e: SecurityException) {
+                    Log.w(TAG, "SecurityException on getPhoneNumber(${subscription.subscriptionId})", e)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error on getPhoneNumber(${subscription.subscriptionId})", e)
+                }
+            }
+
+            // Method 3: TelephonyManager for specific subscription
+            try {
+                val subTelephony = telephonyManager.createForSubscriptionId(subscription.subscriptionId)
+                val line1 = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    subTelephony.getLine1Number()
+                } else {
+                    @Suppress("DEPRECATION")
+                    subTelephony.line1Number
+                }
+                if (!line1.isNullOrBlank()) {
+                    Log.d(TAG, "Got number via TelephonyManager for sub ${subscription.subscriptionId}")
+                    return line1
+                }
+            } catch (e: SecurityException) {
+                Log.w(TAG, "SecurityException on TelephonyManager for sub ${subscription.subscriptionId}", e)
+            } catch (e: Exception) {
+                Log.w(TAG, "Error on TelephonyManager for sub ${subscription.subscriptionId}", e)
+            }
+
+            null
         } catch (e: Exception) {
             Log.w(TAG, "Error getting phone number for subscription ${subscription.subscriptionId}", e)
             null
