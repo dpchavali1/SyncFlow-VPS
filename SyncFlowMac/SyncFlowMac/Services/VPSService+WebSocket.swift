@@ -62,19 +62,16 @@ extension VPSService {
         webSocketTask = task
         task.resume()
 
-        isConnected = true
         reconnectAttempts = 0
         #if DEBUG
-        print("[VPS] WebSocket connected")
+        print("[VPS] WebSocket connecting...")
         #endif
 
         // Start receiving messages (pass task reference to ignore stale callbacks)
+        // Subscriptions happen when server sends the "connected" confirmation
+        // in handleWebSocketMessage — NOT here, because task.resume() is async
+        // and the handshake may not be complete yet.
         receiveWebSocketMessage(for: task)
-
-        // Subscribe to user's data
-        if let userId = userId {
-            subscribeToUser(userId)
-        }
 
         // Start periodic plan refresh (every 30 minutes)
         startPlanRefreshTimer()
@@ -144,6 +141,16 @@ extension VPSService {
         }
 
         switch type {
+        case "connected":
+            // Server confirmed WebSocket auth — now safe to subscribe to channels
+            #if DEBUG
+            print("[VPS] WebSocket connected and authenticated")
+            #endif
+            isConnected = true
+            if let userId = userId {
+                subscribeToUser(userId)
+            }
+
         case "message_added":
             if let messageData = json["data"] as? [String: Any],
                let jsonData = try? JSONSerialization.data(withJSONObject: messageData),
