@@ -730,7 +730,11 @@ fun DesktopIntegrationScreen(
                                             }
                                             try {
                                                 val simManager = com.phoneintegration.app.SimManager(context)
-                                                simManager.syncSimsToVps(vpsSyncService)
+                                                val sims = simManager.getActiveSims()
+                                                val simsData = sims.map { it.toMap() }
+                                                val vpsClient = com.phoneintegration.app.vps.VPSClient.getInstance(context)
+                                                vpsClient.storeSharedData("sims", simsData)
+                                                android.util.Log.d("DesktopIntegrationScreen", "Synced ${sims.size} SIM(s)")
                                             } catch (e: Exception) {
                                                 android.util.Log.w("DesktopIntegrationScreen", "SIM sync failed: ${e.message}")
                                             }
