@@ -1176,9 +1176,9 @@ class MessageStore: ObservableObject {
             else if !readReceiptsLoaded {
                 updatedMessage.isRead = true
             }
-            // Default to read (Message struct default)
+            // Preserve the message's original isRead status (unread if not matched above)
             else {
-                updatedMessage.isRead = true
+                updatedMessage.isRead = message.isRead
             }
 
             return updatedMessage

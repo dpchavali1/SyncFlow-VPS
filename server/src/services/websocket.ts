@@ -5,8 +5,7 @@
  *   - Clients authenticate via a JWT token passed as a query parameter on connect.
  *   - Each client subscribes to one or more channels (messages, contacts, calls, etc.).
  *   - The server maintains an in-memory map of userId -> Set<WebSocket> for routing.
- *   - A PostgreSQL LISTEN/NOTIFY listener (via a dedicated pool connection) forwards
- *     database-level trigger notifications to the appropriate user's WebSocket clients.
+ *   - Route handlers call broadcastToUser() to push updates to connected clients.
  *   - WebRTC signaling is also relayed here for SyncFlow calls between devices.
  *   - A 30-second heartbeat (ping/pong) detects and cleans up dead connections.
  */
@@ -15,7 +14,6 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage, Server as HttpServer } from 'http';
 import { verifyToken, TokenPayload } from './auth';
 import { pool } from './database';
-import { PoolClient } from 'pg';
 
 interface AuthenticatedWebSocket extends WebSocket {
   userId?: string;
@@ -43,9 +41,6 @@ interface BroadcastMessage {
 // Store active connections by userId
 const userConnections = new Map<string, Set<AuthenticatedWebSocket>>();
 
-// PostgreSQL LISTEN clients
-const listenClients: PoolClient[] = [];
-
 export function createWebSocketServer(server: HttpServer): WebSocketServer {
   const wss = new WebSocketServer({ server });
 
@@ -66,8 +61,6 @@ export function createWebSocketServer(server: HttpServer): WebSocketServer {
 
   wss.on('close', () => {
     clearInterval(heartbeatInterval);
-    // Clean up PostgreSQL listeners
-    listenClients.forEach((client) => client.release());
   });
 
   wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
@@ -143,9 +136,6 @@ export function createWebSocketServer(server: HttpServer): WebSocketServer {
       console.error(`WebSocket error for user=${client.userId}:`, error.message);
     });
   });
-
-  // Set up PostgreSQL listeners for real-time updates
-  setupDatabaseListeners();
 
   return wss;
 }
@@ -247,80 +237,6 @@ async function handleWebRTCSignal(client: AuthenticatedWebSocket, message: Subsc
 
   // Also broadcast to same-user's other devices
   broadcastToAllDevicesExcept(client.userId, client.deviceId || '', 'calls', signalMessage);
-}
-
-// PostgreSQL LISTEN/NOTIFY integration.
-// DB triggers (defined in schema.sql) fire NOTIFY on INSERT/UPDATE/DELETE for
-// user-scoped tables. The channel name encodes the table and user, e.g.
-// "user_messages_<userId>". This function holds a dedicated pool connection
-// that receives those notifications and fans them out to WebSocket clients.
-async function setupDatabaseListeners(): Promise<void> {
-  const tables = [
-    'user_messages',
-    'user_contacts',
-    'user_call_history',
-    'user_devices',
-    'user_outgoing_messages',
-  ];
-
-  try {
-    const client = await pool.connect();
-    listenClients.push(client);
-
-    client.on('notification', (msg) => {
-      if (msg.payload) {
-        handleDatabaseNotification(msg.channel, msg.payload);
-      }
-    });
-
-    client.on('error', (err) => {
-      console.error('PostgreSQL listener error:', err);
-    });
-
-    console.log('PostgreSQL listeners set up');
-  } catch (error) {
-    console.error('Failed to set up database listeners:', error);
-  }
-}
-
-function handleDatabaseNotification(channel: string, payload: string): void {
-  try {
-    const data = JSON.parse(payload);
-    const userId = channel.split('_').pop(); // Extract userId from channel name
-
-    if (!userId) return;
-
-    // Determine message type based on channel and action
-    let messageType: string;
-    let broadcastChannel: string;
-
-    if (channel.startsWith('user_messages_')) {
-      broadcastChannel = 'messages';
-      messageType = `message_${data.action.toLowerCase()}`;
-    } else if (channel.startsWith('user_contacts_')) {
-      broadcastChannel = 'contacts';
-      messageType = `contact_${data.action.toLowerCase()}`;
-    } else if (channel.startsWith('user_call_history_')) {
-      broadcastChannel = 'calls';
-      messageType = 'call_added';
-    } else if (channel.startsWith('user_devices_')) {
-      broadcastChannel = 'devices';
-      messageType = data.action === 'DELETE' ? 'device_removed' : 'device_added';
-    } else if (channel.startsWith('user_outgoing_messages_')) {
-      broadcastChannel = 'outgoing';
-      messageType = 'outgoing_message';
-    } else {
-      return;
-    }
-
-    // Broadcast to all connected clients for this user
-    broadcastToUser(userId, broadcastChannel, {
-      type: messageType,
-      data: data,
-    });
-  } catch (error) {
-    console.error('Error handling database notification:', error);
-  }
 }
 
 // Broadcast message to all connections for a user

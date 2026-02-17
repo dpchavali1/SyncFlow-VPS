@@ -125,6 +125,8 @@ class SmsReceiver : BroadcastReceiver() {
             }
 
             // Check if contact is blocked or conversation is muted before showing notification
+            // Use goAsync() to keep the BroadcastReceiver alive while the coroutine runs.
+            val notifPendingResult = goAsync()
             CoroutineScope(Dispatchers.IO).launch {
                 var threadId: Long? = null
                 try {
@@ -246,6 +248,8 @@ class SmsReceiver : BroadcastReceiver() {
                     } catch (notifError: Exception) {
                         SecureLogger.e("SMS_RECEIVER", "Error showing fallback notification", notifError)
                     }
+                } finally {
+                    notifPendingResult.finish()
                 }
             }
 
@@ -310,6 +314,7 @@ class SmsReceiver : BroadcastReceiver() {
                     SecureLogger.e("SMS_RECEIVER", "Error scheduling SMS sync", e)
                 }
 
+                val desktopPendingResult = goAsync()
                 CoroutineScope(Dispatchers.IO).launch {
                     try {
                         val smsRepository = SmsRepository(context)
@@ -320,6 +325,8 @@ class SmsReceiver : BroadcastReceiver() {
                         }
                     } catch (e: Exception) {
                         SecureLogger.e("SMS_RECEIVER", "Error syncing message to Firebase", e)
+                    } finally {
+                        desktopPendingResult.finish()
                     }
                 }
             }

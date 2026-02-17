@@ -62,7 +62,7 @@ class VPSSyncService(context: Context) {
     }
 
     // Cache address → threadId lookups to avoid repeated content provider queries
-    private val addressThreadIdCache = mutableMapOf<String, Long?>()
+    private val addressThreadIdCache = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
     // HTTP client for R2 uploads
     private val httpClient = OkHttpClient.Builder()
@@ -477,12 +477,12 @@ class VPSSyncService(context: Context) {
         // user has already viewed them in SyncFlow. Check our local overrides.
         var isRead = message.isRead
         if (!isRead && localReadThreads.isNotEmpty()) {
-            val threadId = addressThreadIdCache.getOrPut(message.address) {
-                try {
-                    Telephony.Threads.getOrCreateThreadId(appContext, setOf(message.address))
-                } catch (e: Exception) {
-                    null
+            val threadId = addressThreadIdCache[message.address] ?: try {
+                Telephony.Threads.getOrCreateThreadId(appContext, setOf(message.address))?.also {
+                    addressThreadIdCache[message.address] = it
                 }
+            } catch (e: Exception) {
+                null
             }
             if (threadId != null) {
                 val readAt = localReadThreads[threadId]

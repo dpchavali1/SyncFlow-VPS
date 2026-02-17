@@ -598,7 +598,7 @@ public class VPSService: NSObject, ObservableObject {
     private var subscriptions: Set<String> = []
     private var reconnectTimer: Timer?
     private var reconnectAttempts = 0
-    private let maxReconnectAttempts = 5
+    private let maxReconnectAttempts = 100
     private var pendingReconnectWork: DispatchWorkItem?
 
     // Plan refresh timer (checks subscription expiry every 30 minutes)
@@ -760,6 +760,9 @@ public class VPSService: NSObject, ObservableObject {
         }
 
         if httpResponse.statusCode == 401 && !skipAuth {
+            guard retryCount < 1 else {
+                throw VPSError.httpError(401, "Unauthorized after token refresh")
+            }
             // Try to refresh token
             try await refreshAccessToken()
             return try await self.request(method, path, body: body, skipAuth: false, retryCount: retryCount + 1)

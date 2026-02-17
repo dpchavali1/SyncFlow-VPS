@@ -490,7 +490,7 @@ class VPSClient private constructor(
     private var webSocket: WebSocket? = null
     private var wsListener: VPSWebSocketListener? = null
     var webrtcSignalListener: WebRTCSignalListener? = null
-    private val subscriptions = mutableSetOf<String>()
+    private val subscriptions = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
     private var reconnectAttempts = 0
     private val maxReconnectAttempts = 20
     private var heartbeatJob: kotlinx.coroutines.Job? = null
@@ -2338,6 +2338,7 @@ class VPSClient private constructor(
         }
     }
 
+    @Synchronized
     private fun refreshAccessTokenBlocking(): Boolean {
         val token = refreshToken ?: return false
         val jsonBody = gson.toJson(mapOf("refreshToken" to token))

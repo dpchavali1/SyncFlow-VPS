@@ -15,7 +15,10 @@ import com.google.crypto.tink.TinkJsonProtoKeysetFormat
 import com.google.crypto.tink.hybrid.HybridConfig
 import com.google.crypto.tink.hybrid.HybridKeyTemplates
 import com.phoneintegration.app.vps.VPSClient
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.nio.charset.StandardCharsets
 import java.security.AlgorithmParameters
 import java.security.KeyFactory
@@ -78,6 +81,7 @@ class SignalProtocolManager(private val context: Context) {
 
     private val vpsClient = VPSClient.getInstance(context)
     private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     private var privateKeysetHandle: KeysetHandle? = null
     private var encryptionPrimitive: HybridDecrypt? = null
@@ -406,7 +410,7 @@ class SignalProtocolManager(private val context: Context) {
             "timestamp" to System.currentTimeMillis()
         )
 
-        runBlocking {
+        scope.launch {
             try {
                 vpsClient.publishE2eePublicKey(keyData)
                 Log.d(TAG, "Public key published to VPS")
@@ -418,7 +422,7 @@ class SignalProtocolManager(private val context: Context) {
 
     private fun publishDevicePublicKey() {
         val uid = vpsClient.userId ?: return
-        val deviceId = getDeviceId() ?: return
+        val deviceId = vpsClient.deviceId ?: return
         val publicKeyX963 = prefs.getString(KEY_ECDH_PUBLIC, null) ?: return
 
         val keyData = mapOf(
@@ -429,7 +433,7 @@ class SignalProtocolManager(private val context: Context) {
             "timestamp" to System.currentTimeMillis()
         )
 
-        runBlocking {
+        scope.launch {
             try {
                 vpsClient.publishDeviceE2eeKey(deviceId, keyData)
                 Log.d(TAG, "Device public key published to VPS")
@@ -1046,7 +1050,7 @@ class SignalProtocolManager(private val context: Context) {
 
         // Clear from VPS
         if (vpsClient.userId != null) {
-            runBlocking {
+            scope.launch {
                 try {
                     vpsClient.clearE2eeKeys()
                     Log.d(TAG, "E2EE keys cleared from VPS")
