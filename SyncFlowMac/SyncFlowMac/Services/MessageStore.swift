@@ -60,6 +60,18 @@
 //  - NotificationService: System notification delivery
 //  - BatteryAwareServiceManager: Power-optimized processing
 //
+//  ============================================================================
+//  FILE ORGANIZATION (Extensions)
+//  ============================================================================
+//  This class is split across multiple files for maintainability:
+//  - MessageStore.swift              — Core state, properties, init, helpers
+//  - MessageStore+VPSSync.swift      — VPS listening, polling, message sync
+//  - MessageStore+ReadStatus.swift   — Read status management
+//  - MessageStore+SendMessage.swift  — Send SMS/MMS functionality
+//  - MessageStore+ConversationActions.swift — Pin, archive, block actions
+//  - MessageStore+Search.swift       — Search functionality
+//  - MessageStore+Spam.swift         — Spam detection and management
+//  - MessageStore+Contacts.swift     — Contact resolution helpers
 
 import Foundation
 // VPS backend only
@@ -151,40 +163,55 @@ class MessageStore: ObservableObject {
 
     /// Timer for polling spam messages from VPS.
     // spamPollingTimer removed — spam sync is now real-time via WebSocket
-    private var spamListenerUserId: String?
+    var spamListenerUserId: String?
 
-    // MARK: - Private State
+    // MARK: - Internal State (accessed by extensions)
 
     /// Currently authenticated user ID.
-    private var currentUserId: String?
+    var currentUserId: String?
+
+    /// Flag indicating if read receipts have loaded at least once.
+    /// Used to determine initial read state for synced messages.
+    var readReceiptsLoaded = false
+
+    /// Combine cancellables for reactive subscriptions.
+    var cancellables = Set<AnyCancellable>()
+
+    /// Prevents auto-repair from firing more than once per session.
+    var hasAttemptedAutoRepair = false
+
+    /// After repair, poll for re-encrypted messages from Android.
+    var repairPollTask: Task<Void, Never>?
+
+    /// VPS-specific cancellables
+    var vpsCancellables = Set<AnyCancellable>()
+
+    /// Polling fallback task — runs only when WebSocket is disconnected
+    var pollFallbackTask: Task<Void, Never>?
+
+    /// Tracks the newest message date for incremental polling
+    var lastPolledMessageDate: Double = 0
+
+    /// Serial queue for thread-safe access to pending outgoing messages.
+    let pendingOutgoingQueue = DispatchQueue(label: "MessageStore.pendingOutgoingQueue")
+
+    /// Messages sent from Mac but not yet confirmed by Android.
+    /// Used for optimistic UI updates while waiting for sync.
+    var pendingOutgoingMessages: [String: Message] = [:]
+
+    /// Notification service for system alerts.
+    let notificationService = NotificationService.shared
+
+    /// User preferences service for pinned/archived/blocked state.
+    let preferences = PreferencesService.shared
+
+    // MARK: - Private State
 
     /// Tracks message IDs from last update to detect new messages.
     private var lastMessageIds: Set<String> = []
 
     /// Hash of message data to avoid redundant processing.
     private var lastMessageHash: Int = 0
-
-    /// Flag indicating if read receipts have loaded at least once.
-    /// Used to determine initial read state for synced messages.
-    private var readReceiptsLoaded = false
-
-    /// Combine cancellables for reactive subscriptions.
-    private var cancellables = Set<AnyCancellable>()
-
-    /// Prevents auto-repair from firing more than once per session.
-    private var hasAttemptedAutoRepair = false
-
-    /// After repair, poll for re-encrypted messages from Android.
-    private var repairPollTask: Task<Void, Never>?
-
-    /// VPS-specific cancellables
-    private var vpsCancellables = Set<AnyCancellable>()
-
-    /// Polling fallback task — runs only when WebSocket is disconnected
-    private var pollFallbackTask: Task<Void, Never>?
-
-    /// Tracks the newest message date for incremental polling
-    private var lastPolledMessageDate: Double = 0
 
     /// Check if VPS mode is enabled
     private var isVPSMode: Bool {
@@ -230,7 +257,7 @@ class MessageStore: ObservableObject {
     // MARK: - Pagination State
 
     /// Timestamp (seconds) of the oldest loaded message for pagination.
-    private var loadedTimeRangeStart: TimeInterval?
+    var loadedTimeRangeStart: TimeInterval?
 
     /// Number of days of history to load on initial sync (6 months).
     private var initialLoadDays: Int = 180
@@ -241,71 +268,14 @@ class MessageStore: ObservableObject {
     // MARK: - Contacts State
 
     /// User ID for contacts listener.
-    private var contactsListenerUserId: String?
+    var contactsListenerUserId: String?
 
     /// Cached contacts from last sync.
-    private var latestContacts: [Contact] = []
+    var latestContacts: [Contact] = []
 
     /// Lookup table: normalized phone number -> contact display name.
     /// Used for fast contact name resolution in conversation building.
-    private var contactNameLookup: [String: String] = [:]
-
-    // MARK: - Pending Outgoing Messages
-
-    /// Serial queue for thread-safe access to pending outgoing messages.
-    private let pendingOutgoingQueue = DispatchQueue(label: "MessageStore.pendingOutgoingQueue")
-
-    /// Messages sent from Mac but not yet confirmed by Android.
-    /// Used for optimistic UI updates while waiting for sync.
-    private var pendingOutgoingMessages: [String: Message] = [:]
-
-    // MARK: - Service Dependencies
-
-    /// Notification service for system alerts.
-    private let notificationService = NotificationService.shared
-
-    /// User preferences service for pinned/archived/blocked state.
-    private let preferences = PreferencesService.shared
-
-    // MARK: - Phone Number Normalization
-
-    /// Normalizes a phone number for consistent comparison across formats.
-    ///
-    /// Phone numbers can appear in many formats:
-    /// - `+1 (555) 123-4567`
-    /// - `15551234567`
-    /// - `555-123-4567`
-    ///
-    /// This method extracts the last 10 digits to create a normalized key
-    /// that matches across all these variations.
-    ///
-    /// - Parameter address: The phone number or address to normalize
-    /// - Returns: Normalized string (last 10 digits or lowercase original for non-phone)
-    ///
-    /// - Note: Non-phone addresses (email, short codes) are returned lowercase as-is.
-    private func normalizePhoneNumber(_ address: String) -> String {
-        // Skip non-phone addresses (email, short codes, etc.)
-        if address.contains("@") || address.count < 6 {
-            return address.lowercased()
-        }
-
-        // Remove all non-digit characters
-        let digitsOnly = address.filter { $0.isNumber }
-
-        // For comparison, use last 10 digits (handles country code differences)
-        // e.g., +1-555-123-4567 and 555-123-4567 both become "5551234567"
-        if digitsOnly.count >= 10 {
-            return String(digitsOnly.suffix(10))
-        }
-        return digitsOnly
-    }
-
-    private func isAddressPinned(_ address: String, pinnedSet: Set<String>) -> Bool {
-        if pinnedSet.contains(address) { return true }
-        let normalized = normalizePhoneNumber(address)
-        if pinnedSet.contains(normalized) { return true }
-        return pinnedSet.contains { normalizePhoneNumber($0) == normalized }
-    }
+    var contactNameLookup: [String: String] = [:]
 
     // MARK: - Initialization
 
@@ -320,6 +290,8 @@ class MessageStore: ObservableObject {
         setupNotificationHandlers()
         setupPerformanceOptimizations()
     }
+
+    // MARK: - Setup
 
     /// Configures power and memory management optimizations.
     ///
@@ -439,7 +411,7 @@ class MessageStore: ObservableObject {
     }
 
     /// Fetch messages from VPS, decrypt, update UI, and return stats.
-    private func fetchAndDecryptMessages() async -> (encrypted: Int, failed: Int)? {
+    func fetchAndDecryptMessages() async -> (encrypted: Int, failed: Int)? {
         do {
             let response = try await VPSService.shared.getMessages(limit: 500)
             let fetchedMessages = response.messages.map { self.convertVPSMessage($0) }
@@ -470,13 +442,13 @@ class MessageStore: ObservableObject {
 
     /// Poll for re-encrypted messages after repair. Android may take 30-60s to
     /// re-sync all messages. We check every 5 seconds for up to 90 seconds.
-    private func startRepairPolling() {
+    func startRepairPolling() {
         repairPollTask?.cancel()
         repairPollTask = Task {
             #if DEBUG
             print("[MessageStore VPS] Starting repair poll — waiting for Android to re-sync messages")
             #endif
-            for attempt in 1...18 { // 18 × 5s = 90s max
+            for attempt in 1...18 { // 18 x 5s = 90s max
                 try? await Task.sleep(nanoseconds: 5_000_000_000) // 5 seconds
                 if Task.isCancelled { return }
 
@@ -526,7 +498,7 @@ class MessageStore: ObservableObject {
             .store(in: &cancellables)
     }
 
-    // MARK: - Start Listening
+    // MARK: - Start/Stop Listening
 
     /// Starts real-time synchronization for a user's messaging data.
     ///
@@ -573,472 +545,9 @@ class MessageStore: ObservableObject {
         startListeningVPS(userId: userId)
     }
 
-    // MARK: - VPS Mode Support
-
-    /// Starts listening for messages using VPS backend.
-    /// This method:
-    /// 1. Fetches initial messages from VPS REST API
-    /// 2. Subscribes to WebSocket events for real-time updates
-    private func startListeningVPS(userId: String) {
-        // Cancel any existing VPS subscriptions
-        vpsCancellables.removeAll()
-
-        // Subscribe to VPS WebSocket events for real-time updates
-        VPSService.shared.messageAdded
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] vpsMessage in
-                guard let self = self else { return }
-                let message = self.convertVPSMessage(vpsMessage)
-
-                // Skip if message already exists (by ID)
-                guard !self.messages.contains(where: { $0.id == message.id }) else { return }
-
-                // Skip sent messages that match an existing message by content
-                // (prevents duplicates from Android sync echoing back a message
-                // the Mac already has under a different ID)
-                if message.type == 2 {
-                    let normalizedAddr = self.normalizePhoneNumber(message.address)
-                    let trimmedBody = message.body.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let maxDeltaMs = 60.0 * 1000.0 // 1 minute window
-                    let isDuplicate = self.messages.contains { existing in
-                        existing.type == 2 &&
-                        self.normalizePhoneNumber(existing.address) == normalizedAddr &&
-                        existing.body.trimmingCharacters(in: .whitespacesAndNewlines) == trimmedBody &&
-                        existing.isMms == message.isMms &&
-                        abs(existing.date - message.date) <= maxDeltaMs
-                    }
-                    if isDuplicate {
-                        // Replace pending version with confirmed version if present
-                        if let pendingIdx = self.messages.firstIndex(where: {
-                            $0.id.hasPrefix("pending_") &&
-                            $0.type == 2 &&
-                            self.normalizePhoneNumber($0.address) == normalizedAddr &&
-                            $0.body.trimmingCharacters(in: .whitespacesAndNewlines) == trimmedBody
-                        }) {
-                            let pendingId = self.messages[pendingIdx].id
-                            self.messages[pendingIdx] = message
-                            self.updateConversations(from: self.messages)
-                            self.pendingOutgoingQueue.sync {
-                                _ = self.pendingOutgoingMessages.removeValue(forKey: pendingId)
-                            }
-                        }
-                        return
-                    }
-                }
-
-                var currentMessages = self.messages
-                currentMessages.append(message)
-
-                let processedMessages = self.applyReadStatus(to: currentMessages)
-                let mergeResult = self.mergeMessagesWithPendingOutgoing(remoteMessages: processedMessages)
-                let newConversations = self.buildConversations(from: mergeResult.mergedMessages)
-
-                self.messages = mergeResult.mergedMessages
-                self.conversations = newConversations
-
-                // Notify for new incoming message
-                if message.isReceived {
-                    self.notificationService.showMessageNotification(
-                        from: message.address,
-                        contactName: message.contactName,
-                        body: message.body,
-                        messageId: message.id
-                    )
-                }
-
-                // Per-message logging removed to reduce log noise
-            }
-            .store(in: &vpsCancellables)
-
-        VPSService.shared.messageUpdated
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] vpsMessage in
-                guard let self = self else { return }
-                let message = self.convertVPSMessage(vpsMessage)
-
-                // Skip duplicate updates — avoid re-processing when nothing changed
-                // Compare by body + date + attachment count; deep attachment comparison
-                // fails because attachments are re-parsed from JSON each time
-                if let existing = self.messages.first(where: { $0.id == message.id }),
-                   existing.body == message.body,
-                   existing.date == message.date,
-                   existing.attachments?.count == message.attachments?.count {
-                    return
-                }
-
-                var currentMessages = self.messages
-                if let index = currentMessages.firstIndex(where: { $0.id == message.id }) {
-                    currentMessages[index] = message
-                } else {
-                    currentMessages.append(message)
-                }
-
-                let processedMessages = self.applyReadStatus(to: currentMessages)
-                let mergeResult = self.mergeMessagesWithPendingOutgoing(remoteMessages: processedMessages)
-                let newConversations = self.buildConversations(from: mergeResult.mergedMessages)
-
-                self.messages = mergeResult.mergedMessages
-                self.conversations = newConversations
-            }
-            .store(in: &vpsCancellables)
-
-        VPSService.shared.messageDeleted
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] messageId in
-                guard let self = self else { return }
-
-                var currentMessages = self.messages
-                currentMessages.removeAll { $0.id == messageId }
-
-                let processedMessages = self.applyReadStatus(to: currentMessages)
-                let mergeResult = self.mergeMessagesWithPendingOutgoing(remoteMessages: processedMessages)
-                let newConversations = self.buildConversations(from: mergeResult.mergedMessages)
-
-                self.messages = mergeResult.mergedMessages
-                self.conversations = newConversations
-
-                // Per-message logging removed to reduce log noise
-            }
-            .store(in: &vpsCancellables)
-
-        // Listen for delivery status changes (sent → delivered)
-        VPSService.shared.deliveryStatusChanged
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] (messageId, deliveryStatus) in
-                guard let self = self else { return }
-                if let index = self.messages.firstIndex(where: { $0.id == messageId }) {
-                    self.messages[index].deliveryStatus = deliveryStatus
-                }
-            }
-            .store(in: &vpsCancellables)
-
-        // Fetch initial messages from VPS
-        Task {
-            do {
-                let response = try await VPSService.shared.getMessages(limit: 500)
-
-                let fetchedMessages = response.messages.map { self.convertVPSMessage($0) }
-
-                #if DEBUG
-                // Log decryption summary (not per-message)
-                let encrypted = fetchedMessages.filter { $0.isEncrypted == true }
-                let failed = encrypted.filter { $0.e2eeFailed == true }
-                if !encrypted.isEmpty {
-                    print("[MessageStore VPS] Decryption: \(encrypted.count - failed.count)/\(encrypted.count) messages decrypted, \(failed.count) failed, e2eeInitialized=\(E2EEManager.shared.isInitialized)")
-                    if !failed.isEmpty, let first = failed.first {
-                        print("[MessageStore VPS] First failed msg: \(first.id), reason=\(first.e2eeFailureReason ?? "unknown")")
-                    }
-                }
-                #endif
-
-                await MainActor.run {
-                    let processedMessages = self.applyReadStatus(to: fetchedMessages)
-                    let mergeResult = self.mergeMessagesWithPendingOutgoing(remoteMessages: processedMessages)
-                    let newConversations = self.buildConversations(from: mergeResult.mergedMessages)
-
-                    self.messages = mergeResult.mergedMessages
-                    self.conversations = newConversations
-                    self.isLoading = false
-                    self.canLoadMore = response.hasMore
-
-                    #if DEBUG
-                    print("[MessageStore VPS] Loaded \(fetchedMessages.count) messages, \(newConversations.count) conversations")
-                    #endif
-                }
-            } catch {
-                #if DEBUG
-                print("[MessageStore VPS] Error loading messages: \(error.localizedDescription)")
-                #endif
-                await MainActor.run {
-                    self.error = error
-                    self.isLoading = false
-                }
-            }
-        }
-
-        // Start contacts sync for VPS mode
-        startListeningForContactsVPS(userId: userId)
-
-        // Load spam messages from VPS and listen for real-time updates via WebSocket
-        spamListenerUserId = userId
-        loadSpamMessagesFromVPS()
-        startSpamWebSocketListener()
-
-        // Start polling fallback — only fetches when WebSocket is disconnected
-        startPollingFallback()
-    }
-
-    /// Polling fallback that fetches new messages every 60 seconds when WebSocket is disconnected.
-    /// When WebSocket is connected, the poll is skipped (no battery/network cost).
-    private func startPollingFallback() {
-        pollFallbackTask?.cancel()
-        pollFallbackTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 60_000_000_000) // 60 seconds
-                guard !Task.isCancelled else { break }
-                guard let self = self else { break }
-
-                // Only poll when WebSocket is NOT connected
-                guard !VPSService.shared.isConnected else { continue }
-
-                #if DEBUG
-                print("[MessageStore] WebSocket disconnected — polling for new messages")
-                #endif
-
-                do {
-                    // Use the newest message date as the "after" parameter for incremental fetch
-                    let afterTimestamp = self.lastPolledMessageDate > 0
-                        ? self.lastPolledMessageDate
-                        : (self.messages.map { $0.date }.max() ?? 0)
-
-                    let response = try await VPSService.shared.getMessages(limit: 100, after: afterTimestamp)
-                    let newMessages = response.messages.map { self.convertVPSMessage($0) }
-
-                    if !newMessages.isEmpty {
-                        // Track the newest date for next poll
-                        if let newest = newMessages.map({ $0.date }).max() {
-                            self.lastPolledMessageDate = newest
-                        }
-
-                        await MainActor.run {
-                            var currentMessages = self.messages
-
-                            // Merge new messages, skip duplicates
-                            let existingIds = Set(currentMessages.map { $0.id })
-                            let unique = newMessages.filter { !existingIds.contains($0.id) }
-
-                            if !unique.isEmpty {
-                                currentMessages.append(contentsOf: unique)
-                                let processed = self.applyReadStatus(to: currentMessages)
-                                let mergeResult = self.mergeMessagesWithPendingOutgoing(remoteMessages: processed)
-                                let convos = self.buildConversations(from: mergeResult.mergedMessages)
-
-                                self.messages = mergeResult.mergedMessages
-                                self.conversations = convos
-
-                                #if DEBUG
-                                print("[MessageStore] Poll fallback: added \(unique.count) new messages")
-                                #endif
-
-                                // Notify for new incoming messages
-                                for msg in unique where msg.isReceived {
-                                    self.notificationService.showMessageNotification(
-                                        from: msg.address,
-                                        contactName: msg.contactName,
-                                        body: msg.body,
-                                        messageId: msg.id
-                                    )
-                                }
-                            }
-                        }
-                    }
-                } catch {
-                    #if DEBUG
-                    print("[MessageStore] Poll fallback error: \(error.localizedDescription)")
-                    #endif
-                }
-            }
-        }
-    }
-
-    /// Converts a VPSMessage to the local Message type
-    private func convertVPSMessage(_ vpsMessage: VPSMessage) -> Message {
-        // Convert MMS parts to MmsAttachment array if present
-        var attachments: [MmsAttachment]? = nil
-        if let parts = vpsMessage.mmsParts {
-            // MMS parts conversion
-            attachments = parts.compactMap { part -> MmsAttachment? in
-                let contentType = (part["contentType"] as? String)
-                    ?? (part["content_type"] as? String)
-                    ?? (part["mimeType"] as? String)
-                    ?? (part["mime_type"] as? String)
-                    ?? "application/octet-stream"
-
-                let normalizedContentType = contentType.lowercased()
-                let type: String
-                if normalizedContentType.hasPrefix("image/") {
-                    type = "image"
-                } else if normalizedContentType.hasPrefix("video/") {
-                    type = "video"
-                } else if normalizedContentType.hasPrefix("audio/") {
-                    type = "audio"
-                } else if normalizedContentType.contains("vcard") {
-                    type = "vcard"
-                } else {
-                    type = "file"
-                }
-
-                let fileName = (part["fileName"] as? String)
-                    ?? (part["file_name"] as? String)
-                    ?? (part["name"] as? String)
-
-                let url = (part["url"] as? String)
-                    ?? (part["downloadUrl"] as? String)
-                    ?? (part["download_url"] as? String)
-
-                let r2Key = (part["r2Key"] as? String)
-                    ?? (part["fileKey"] as? String)
-                    ?? (part["r2_key"] as? String)
-
-                let inlineData = (part["data"] as? String)
-                    ?? (part["inlineData"] as? String)
-                    ?? (part["inline_data"] as? String)
-
-                let encrypted: Bool?
-                if let flag = part["encrypted"] as? Bool {
-                    encrypted = flag
-                } else if let flag = part["encrypted"] as? NSNumber {
-                    encrypted = flag.boolValue
-                } else {
-                    encrypted = nil
-                }
-
-                let attachment = MmsAttachment(
-                    id: (part["id"] as? String) ?? (part["partId"] as? String) ?? UUID().uuidString,
-                    contentType: contentType,
-                    fileName: fileName,
-                    url: url,
-                    r2Key: r2Key,
-                    type: type,
-                    encrypted: encrypted,
-                    inlineData: inlineData,
-                    isInline: inlineData != nil
-                )
-                return attachment
-            }
-        }
-
-        var body = vpsMessage.body ?? ""
-        var decryptionFailed = false
-        var failureReason: String? = nil
-
-        if vpsMessage.encrypted == true {
-            if !E2EEManager.shared.isInitialized {
-                decryptionFailed = true
-                failureReason = "E2EE not initialized"
-                body = "[🔒 Encrypted message - E2EE keys not loaded]"
-            } else if let encryptedBody = vpsMessage.encryptedBody,
-               let encryptedNonce = vpsMessage.encryptedNonce,
-               let envelope = vpsMessage.keyMap?["syncGroup"] ?? vpsMessage.keyMap?[VPSService.shared.deviceId ?? ""] {
-                guard let ciphertextData = Data(base64Encoded: encryptedBody),
-                      let nonceData = Data(base64Encoded: encryptedNonce) else {
-                    let hasAttachments = !(attachments?.isEmpty ?? true)
-                    return Message(
-                        id: vpsMessage.id, address: vpsMessage.address,
-                        body: "[🔒 Encrypted message - invalid data]",
-                        date: Double(vpsMessage.date), type: vpsMessage.type,
-                        contactName: vpsMessage.contactName, isRead: vpsMessage.read,
-                        isMms: vpsMessage.isMms || hasAttachments, attachments: attachments,
-                        e2eeFailed: true, e2eeFailureReason: "Invalid base64",
-                        isEncrypted: vpsMessage.encrypted
-                    )
-                }
-                do {
-                    let dataKey = try E2EEManager.shared.decryptDataKey(from: envelope)
-                    body = try E2EEManager.shared.decryptMessageBody(
-                        dataKey: dataKey,
-                        ciphertextWithTag: ciphertextData,
-                        nonce: nonceData
-                    )
-                } catch {
-                    decryptionFailed = true
-                    failureReason = "Key mismatch: \(error.localizedDescription)"
-                    body = "[🔒 Encrypted message - sync keys to decrypt]"
-                }
-            } else {
-                decryptionFailed = true
-                let hasBody = vpsMessage.encryptedBody != nil
-                let hasNonce = vpsMessage.encryptedNonce != nil
-                let hasKeyMap = vpsMessage.keyMap != nil
-                failureReason = "Missing data: body=\(hasBody), nonce=\(hasNonce), keyMap=\(hasKeyMap)"
-                body = "[🔒 Encrypted message - missing encryption data]"
-            }
-        }
-
-        let hasAttachments = !(attachments?.isEmpty ?? true)
-
-
-        return Message(
-            id: vpsMessage.id,
-            address: vpsMessage.address,
-            body: body,
-            date: Double(vpsMessage.date),
-            type: vpsMessage.type,
-            contactName: vpsMessage.contactName,
-            isRead: vpsMessage.read,
-            isMms: vpsMessage.isMms || hasAttachments,
-            attachments: attachments,
-            e2eeFailed: decryptionFailed,
-            e2eeFailureReason: failureReason,
-            isEncrypted: vpsMessage.encrypted,
-            deliveryStatus: vpsMessage.deliveryStatus
-        )
-    }
-
-    /// Starts listening for contacts using VPS
-    private func startListeningForContactsVPS(userId: String) {
-        Task {
-            do {
-                let response = try await VPSService.shared.getContacts()
-                let contacts: [Contact] = response.contacts.compactMap { vpsContact -> Contact? in
-                    let primaryPhone = vpsContact.phoneNumbers?.first
-                    let primaryEmail = vpsContact.emails?.first
-                    let syncMetadata = Contact.SyncMetadata(
-                        lastUpdatedAt: Date().timeIntervalSince1970 * 1000,
-                        lastSyncedAt: Date().timeIntervalSince1970 * 1000,
-                        lastUpdatedBy: "vps",
-                        version: 1,
-                        pendingAndroidSync: false,
-                        desktopOnly: false
-                    )
-                    return Contact(
-                        id: vpsContact.id,
-                        displayName: vpsContact.displayName ?? "Unknown",
-                        phoneNumber: primaryPhone,
-                        normalizedNumber: primaryPhone?.filter { $0.isNumber },
-                        phoneType: "mobile",
-                        photoBase64: vpsContact.photoThumbnail,
-                        notes: nil,
-                        email: primaryEmail,
-                        sync: syncMetadata
-                    )
-                }
-
-                // Build lookup from ALL phone numbers per contact (not just the first).
-                // latestContacts only stores the primary phone, but the VPS response
-                // has the full phoneNumbers array. Index every number so conversations
-                // on any of a contact's numbers resolve to their name.
-                var lookup: [String: String] = [:]
-                for vpsContact in response.contacts {
-                    guard let name = vpsContact.displayName, !name.isEmpty else { continue }
-                    for phone in vpsContact.phoneNumbers ?? [] {
-                        let normalized = normalizePhoneNumber(phone)
-                        if !normalized.isEmpty {
-                            lookup[normalized] = name
-                        }
-                    }
-                }
-
-                await MainActor.run {
-                    self.latestContacts = contacts
-                    self.contactNameLookup = lookup
-
-                    // Rebuild conversations with contact names
-                    let newConversations = self.buildConversations(from: self.messages)
-                    self.conversations = newConversations
-
-                    #if DEBUG
-                    print("[MessageStore VPS] Loaded \(contacts.count) contacts, \(lookup.count) phone lookup entries")
-                    #endif
-                }
-            } catch {
-                #if DEBUG
-                print("[MessageStore VPS] Error loading contacts: \(error.localizedDescription)")
-                #endif
-            }
-        }
-    }
-
+    /// Stops all listeners and clears state.
+    ///
+    /// Call when:
     /// - User logs out
     /// - App is terminating
     /// - Switching to a different user
@@ -1083,146 +592,51 @@ class MessageStore: ObservableObject {
         #endif
     }
 
-    // MARK: - Load More Messages (Pagination)
+    // MARK: - Phone Number Normalization
 
-    /// Loads additional older messages for infinite scroll pagination.
+    /// Normalizes a phone number for consistent comparison across formats.
     ///
-    /// Loads messages from an additional time range (90 days by default)
-    /// before the oldest currently loaded message.
+    /// Phone numbers can appear in many formats:
+    /// - `+1 (555) 123-4567`
+    /// - `15551234567`
+    /// - `555-123-4567`
     ///
-    /// ## State Management
-    /// - Sets `isLoadingMore` to true during load
-    /// - Updates `canLoadMore` based on whether more messages exist
-    /// - Merges with existing messages (deduplicated)
-    func loadMoreMessages() {
-        guard !isLoadingMore, canLoadMore else { return }
-
-        isLoadingMore = true
-
-        // Use oldest message timestamp as cursor for VPS pagination
-        let oldestDate = messages.min(by: { $0.date < $1.date })?.date
-
-        Task {
-            do {
-                let response = try await VPSService.shared.getMessages(
-                    limit: 200,
-                    before: oldestDate.map { Int64($0) }
-                )
-
-                let olderMessages = response.messages.map { self.convertVPSMessage($0) }
-
-                await MainActor.run {
-                    let existingIds = Set(self.messages.map { $0.id })
-                    let newMessages = olderMessages.filter { !existingIds.contains($0.id) }
-
-                    var allMessages = self.messages + newMessages
-                    allMessages.sort { $0.date > $1.date }
-
-                    self.messages = self.applyReadStatus(to: allMessages)
-                    self.updateConversations(from: self.messages)
-                    self.canLoadMore = response.hasMore
-                    self.isLoadingMore = false
-
-                    #if DEBUG
-                    print("[MessageStore] Loaded \(newMessages.count) more messages via VPS pagination")
-                    #endif
-                }
-            } catch {
-                await MainActor.run {
-                    #if DEBUG
-                    print("[MessageStore] Error loading more messages: \(error)")
-                    #endif
-                    self.error = error
-                    self.isLoadingMore = false
-                }
-            }
-        }
-    }
-
-    // MARK: - Read Status
-
-    /// Applies read status to messages based on multiple sources.
+    /// This method extracts the last 10 digits to create a normalized key
+    /// that matches across all these variations.
     ///
-    /// Read status is determined by checking (in order):
-    /// 1. Sent messages (type == 2) are always read
-    /// 2. Local macOS read tracking (UserDefaults)
-    /// 3. Android read receipts synced via VPS
-    /// 4. Default to read if read receipts haven't loaded yet
+    /// - Parameter address: The phone number or address to normalize
+    /// - Returns: Normalized string (last 10 digits or lowercase original for non-phone)
     ///
-    /// - Parameter messages: Array of messages to update
-    /// - Returns: Messages with updated isRead property
-    private func applyReadStatus(to messages: [Message]) -> [Message] {
-        // Batch read all read message IDs once (O(1) lookups vs O(n) UserDefaults reads)
-        let readMessageIds = Set(UserDefaults.standard.stringArray(forKey: "readMessages") ?? [])
-        let readReceiptIds = Set(readReceipts.keys)
-
-        return messages.map { message in
-            var updatedMessage = message
-
-            // Sent messages (type == 2) are always considered read
-            if message.type == 2 {
-                updatedMessage.isRead = true
-            }
-            // Check local macOS read status (user marked as read on Mac)
-            else if readMessageIds.contains(message.id) {
-                updatedMessage.isRead = true
-            }
-            // Check if Android marked it as read (read receipt synced from phone)
-            else if readReceiptIds.contains(message.id) {
-                updatedMessage.isRead = true
-            }
-            // If read receipts haven't loaded yet, assume synced messages are read
-            // (prevents flash of unread badges on initial load)
-            else if !readReceiptsLoaded {
-                updatedMessage.isRead = true
-            }
-            // Preserve the message's original isRead status (unread if not matched above)
-            else {
-                updatedMessage.isRead = message.isRead
-            }
-
-            return updatedMessage
-        }
-    }
-
-    /// Total count of unread messages across all non-archived conversations.
-    /// Used for dock badge display.
-    var totalUnreadCount: Int {
-        return conversations.filter { !$0.isArchived }.reduce(0) { $0 + $1.unreadCount }
-    }
-
-    /// Marks all messages in a conversation as read.
-    ///
-    /// Updates both local state (UserDefaults) and syncs to VPS
-    /// so other devices know the messages have been read.
-    ///
-    /// - Parameter conversation: The conversation to mark as read
-    func markConversationAsRead(_ conversation: Conversation) {
-        // Get all messages for this conversation (using normalized address matching)
-        let conversationMessages = messages(for: conversation)
-        let unreadMessageIds = conversationMessages.filter { $0.isReceived && !$0.isRead }.map { $0.id }
-        preferences.markConversationAsRead(conversation.address, messageIds: unreadMessageIds)
-
-        if !unreadMessageIds.isEmpty {
-            Task {
-                for messageId in unreadMessageIds {
-                    try? await VPSService.shared.markMessageRead(messageId: messageId)
-                }
-            }
+    /// - Note: Non-phone addresses (email, short codes) are returned lowercase as-is.
+    func normalizePhoneNumber(_ address: String) -> String {
+        // Skip non-phone addresses (email, short codes, etc.)
+        if address.contains("@") || address.count < 6 {
+            return address.lowercased()
         }
 
-        // Refresh conversations
-        messages = applyReadStatus(to: messages)
-        updateConversations(from: messages)
-        notificationService.setBadgeCount(totalUnreadCount)
+        // Remove all non-digit characters
+        let digitsOnly = address.filter { $0.isNumber }
+
+        // For comparison, use last 10 digits (handles country code differences)
+        // e.g., +1-555-123-4567 and 555-123-4567 both become "5551234567"
+        if digitsOnly.count >= 10 {
+            return String(digitsOnly.suffix(10))
+        }
+        return digitsOnly
     }
 
-    // MARK: - Update Conversations
+    func isAddressPinned(_ address: String, pinnedSet: Set<String>) -> Bool {
+        if pinnedSet.contains(address) { return true }
+        let normalized = normalizePhoneNumber(address)
+        if pinnedSet.contains(normalized) { return true }
+        return pinnedSet.contains { normalizePhoneNumber($0) == normalized }
+    }
+
+    // MARK: - Conversation Building
 
     /// Builds conversation objects from a flat list of messages.
     ///
     /// This is the core algorithm for grouping messages into conversations.
-    /// It runs on background threads to avoid blocking the UI.
     ///
     /// ## Algorithm
     /// 1. Group messages by normalized phone number
@@ -1238,7 +652,7 @@ class MessageStore: ObservableObject {
     ///
     /// - Parameter messages: Flat array of all messages
     /// - Returns: Array of Conversation objects ready for display
-    private func buildConversations(from messages: [Message]) -> [Conversation] {
+    func buildConversations(from messages: [Message]) -> [Conversation] {
         // Batch read ALL preferences in ONE call (thread-safe, no main thread blocking)
         let (pinnedSet, archivedSet, blockedSet, avatarColors) = preferences.getAllPreferenceSets()
 
@@ -1327,7 +741,7 @@ class MessageStore: ObservableObject {
     }
 
     /// Update conversations on main thread (for actions like pin/archive)
-    private func updateConversations(from messages: [Message]) {
+    func updateConversations(from messages: [Message]) {
         // This is called from main thread, so do sync version without DispatchQueue.main.sync
         // Group by NORMALIZED address to merge duplicate contacts
         var conversationDict: [String: (primaryAddress: String, lastMessage: Message, messages: [Message], allAddresses: Set<String>)] = [:]
@@ -1411,127 +825,46 @@ class MessageStore: ObservableObject {
             .sorted { $0.date < $1.date }  // Oldest first for chat view
     }
 
-    // MARK: - Send Message
+    // MARK: - Message Pinning
 
-    /// Sends an SMS message through the paired Android device.
-    ///
-    /// Implements optimistic UI update:
-    /// 1. Creates a pending message with temporary ID
-    /// 2. Immediately adds to UI for instant feedback
-    /// 3. Sends to VPS for Android to deliver
-    /// 4. Matches with confirmed message when sync returns
-    /// 5. Removes pending message once confirmed
-    ///
-    /// - Parameters:
-    ///   - userId: The user ID
-    ///   - address: Recipient phone number
-    ///   - body: Message text content
-    /// - Throws: Error if send fails (rolls back optimistic update)
-    func sendMessage(userId: String, to address: String, body: String) async throws {
-        guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return
+    /// Pin or unpin a message
+    func togglePinMessage(_ message: Message) {
+        if pinnedMessages.contains(message.id) {
+            pinnedMessages.remove(message.id)
+        } else {
+            pinnedMessages.insert(message.id)
         }
+        savePinnedMessages()
+    }
 
-        let pendingMessage = createPendingOutgoingMessage(to: address, body: body)
+    /// Check if a message is pinned
+    func isMessagePinned(_ message: Message) -> Bool {
+        return pinnedMessages.contains(message.id)
+    }
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.messages.append(pendingMessage)
-            self.updateConversations(from: self.messages)
-        }
+    /// Get all pinned messages for a conversation
+    func pinnedMessages(for conversation: Conversation) -> [Message] {
+        let normalizedConversationAddress = normalizePhoneNumber(conversation.address)
+        return messages
+            .filter { normalizePhoneNumber($0.address) == normalizedConversationAddress && pinnedMessages.contains($0.id) }
+            .sorted { $0.date > $1.date }  // Most recent first
+    }
 
-        pendingOutgoingQueue.sync {
-            pendingOutgoingMessages[pendingMessage.id] = pendingMessage
-        }
-
-        do {
-            let outgoingId = try await VPSService.shared.sendMessage(address: address, body: body)
-
-            // Immediately sync an encrypted copy to user_messages so the message
-            // is never stored as plain text on the server
-            syncEncryptedSentMessage(id: outgoingId, address: address, body: body, isMms: false)
-        } catch {
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self else { return }
-                self.messages.removeAll { $0.id == pendingMessage.id }
-                self.updateConversations(from: self.messages)
-            }
-
-            _ = pendingOutgoingQueue.sync {
-                pendingOutgoingMessages.removeValue(forKey: pendingMessage.id)
-            }
-
-            DispatchQueue.main.async {
-                self.error = error
-            }
-            throw error
+    /// Load pinned messages from local storage
+    func loadPinnedMessages() {
+        let defaults = UserDefaults.standard
+        if let savedPins = defaults.array(forKey: "pinned_messages") as? [String] {
+            pinnedMessages = Set(savedPins)
         }
     }
 
-    private func createPendingOutgoingMessage(to address: String, body: String) -> Message {
-        let normalizedAddress = normalizePhoneNumber(address)
-        let contactName = conversations.first { normalizePhoneNumber($0.address) == normalizedAddress }?.contactName
-
-        return Message(
-            id: "pending_\(UUID().uuidString)",
-            address: address,
-            body: body,
-            date: Date().timeIntervalSince1970 * 1000.0,
-            type: 2,
-            contactName: contactName,
-            isRead: true,
-            isMms: false,
-            attachments: nil,
-            e2eeFailed: false,
-            e2eeFailureReason: nil
-        )
+    /// Save pinned messages to local storage
+    func savePinnedMessages() {
+        let defaults = UserDefaults.standard
+        defaults.set(Array(pinnedMessages), forKey: "pinned_messages")
     }
 
-    /// Reconciles optimistic pending outgoing messages with confirmed remote messages.
-    ///
-    /// When a user sends a message, a "pending_*" placeholder is added to the UI
-    /// immediately. Once Android confirms delivery and the message syncs back via VPS,
-    /// this method matches pending messages to their remote counterparts using address +
-    /// body + timestamp proximity (within 5 minutes). Matched pending messages are
-    /// removed; unmatched ones remain visible as still-sending.
-    private func mergeMessagesWithPendingOutgoing(remoteMessages: [Message]) -> (mergedMessages: [Message], matchedPendingIds: Set<String>) {
-        let pendingSnapshot = pendingOutgoingQueue.sync { pendingOutgoingMessages }
-        guard !pendingSnapshot.isEmpty else {
-            return (remoteMessages, [])
-        }
-
-        let sentRemoteMessages = remoteMessages.filter { $0.type == 2 }
-        var remainingPending: [Message] = []
-        var matchedIds: Set<String> = []
-
-        for pending in pendingSnapshot.values {
-            if hasMatchingRemoteMessage(pending: pending, remoteMessages: sentRemoteMessages) {
-                matchedIds.insert(pending.id)
-            } else {
-                remainingPending.append(pending)
-            }
-        }
-
-        let merged = (remoteMessages + remainingPending).sorted { $0.date < $1.date }
-        return (merged, matchedIds)
-    }
-
-    private func hasMatchingRemoteMessage(pending: Message, remoteMessages: [Message]) -> Bool {
-        let pendingAddress = normalizePhoneNumber(pending.address)
-        let trimmedBody = pending.body.trimmingCharacters(in: .whitespacesAndNewlines)
-        let maxDeltaMs = 5.0 * 60.0 * 1000.0
-
-        for remote in remoteMessages {
-            guard remote.type == 2 else { continue }
-            guard normalizePhoneNumber(remote.address) == pendingAddress else { continue }
-            guard remote.body.trimmingCharacters(in: .whitespacesAndNewlines) == trimmedBody else { continue }
-            guard abs(remote.date - pending.date) <= maxDeltaMs else { continue }
-            guard remote.isMms == pending.isMms else { continue }
-            return true
-        }
-
-        return false
-    }
+    // MARK: - Reactions
 
     func setReaction(messageId: String, reaction: String?) {
         if let reaction = reaction, !reaction.isEmpty {
@@ -1541,6 +874,8 @@ class MessageStore: ObservableObject {
         }
         // Reactions are stored locally only (VPS does not have a reactions endpoint)
     }
+
+    // MARK: - Delete Messages
 
     /// Delete a message
     func deleteMessage(_ message: Message) {
@@ -1589,230 +924,7 @@ class MessageStore: ObservableObject {
         }
     }
 
-    // MARK: - Message Pinning
-
-    /// Pin or unpin a message
-    func togglePinMessage(_ message: Message) {
-        if pinnedMessages.contains(message.id) {
-            pinnedMessages.remove(message.id)
-        } else {
-            pinnedMessages.insert(message.id)
-        }
-        savePinnedMessages()
-    }
-
-    /// Check if a message is pinned
-    func isMessagePinned(_ message: Message) -> Bool {
-        return pinnedMessages.contains(message.id)
-    }
-
-    /// Get all pinned messages for a conversation
-    func pinnedMessages(for conversation: Conversation) -> [Message] {
-        let normalizedConversationAddress = normalizePhoneNumber(conversation.address)
-        return messages
-            .filter { normalizePhoneNumber($0.address) == normalizedConversationAddress && pinnedMessages.contains($0.id) }
-            .sorted { $0.date > $1.date }  // Most recent first
-    }
-
-    /// Load pinned messages from local storage
-    private func loadPinnedMessages() {
-        let defaults = UserDefaults.standard
-        if let savedPins = defaults.array(forKey: "pinned_messages") as? [String] {
-            pinnedMessages = Set(savedPins)
-        }
-    }
-
-    /// Save pinned messages to local storage
-    private func savePinnedMessages() {
-        let defaults = UserDefaults.standard
-        defaults.set(Array(pinnedMessages), forKey: "pinned_messages")
-    }
-
-    // MARK: - Send MMS Message
-
-    func sendMmsMessage(userId: String, to address: String, body: String, attachment: SelectedAttachment) async throws {
-        do {
-            // Upload attachment to R2 via VPS presigned URL
-            let uploadResponse = try await VPSService.shared.getFileUploadUrl(
-                fileName: attachment.fileName,
-                contentType: attachment.contentType,
-                fileSize: Int64(attachment.data.count)
-            )
-
-            // PUT file data to presigned URL
-            guard let uploadUrl = URL(string: uploadResponse.uploadUrl) else {
-                throw VPSError.invalidResponse
-            }
-            var uploadRequest = URLRequest(url: uploadUrl)
-            uploadRequest.httpMethod = "PUT"
-            uploadRequest.setValue(attachment.contentType, forHTTPHeaderField: "Content-Type")
-            uploadRequest.httpBody = attachment.data
-            let (_, uploadHttpResponse) = try await URLSession.shared.data(for: uploadRequest)
-            guard let httpResp = uploadHttpResponse as? HTTPURLResponse, (200...299).contains(httpResp.statusCode) else {
-                throw VPSError.invalidResponse
-            }
-
-            // Confirm upload
-            try await VPSService.shared.confirmFileUpload(fileKey: uploadResponse.fileKey, fileSize: Int64(attachment.data.count))
-
-            // Send MMS message via VPS
-            let outgoingId = try await VPSService.shared.sendMmsMessage(
-                address: address,
-                body: body,
-                attachments: [[
-                    "fileKey": uploadResponse.fileKey,
-                    "contentType": attachment.contentType,
-                    "fileName": attachment.fileName
-                ]]
-            )
-
-            // Immediately sync an encrypted copy to user_messages
-            syncEncryptedSentMessage(id: outgoingId, address: address, body: body, isMms: true)
-        } catch {
-            DispatchQueue.main.async {
-                self.error = error
-            }
-            throw error
-        }
-    }
-
-    /// Encrypt the sent message body and sync to user_messages so the server
-    /// never holds plain text. When Android later syncs the real sent message
-    /// (with the SMS provider ID), the Mac deduplicates via pending-message matching.
-    private func syncEncryptedSentMessage(id: String, address: String, body: String, isMms: Bool) {
-        Task {
-            guard let encrypted = E2EEManager.shared.encryptForSync(body) else {
-                return
-            }
-
-            do {
-                let syncPayload: [String: Any] = [
-                    "id": id,
-                    "threadId": 0,
-                    "address": address,
-                    "body": "",
-                    "date": Int(Date().timeIntervalSince1970 * 1000),
-                    "type": 2,
-                    "read": true,
-                    "isMms": isMms,
-                    "encrypted": true,
-                    "encryptedBody": encrypted.encryptedBody,
-                    "encryptedNonce": encrypted.encryptedNonce,
-                    "keyMap": encrypted.keyMap
-                ]
-
-                try await VPSService.shared.syncSentMessage(syncPayload)
-            } catch {
-                #if DEBUG
-                print("[MessageStore] Failed to sync encrypted sent message: \(error.localizedDescription)")
-                #endif
-            }
-        }
-    }
-
-    // MARK: - Conversation Actions
-
-    func togglePin(_ conversation: Conversation) {
-        let addresses = Set(conversation.allAddresses + [conversation.address])
-        let normalizedAddresses = Set(addresses.map { normalizePhoneNumber($0) })
-        let pinnedList = preferences.getAllPinned()
-        let pinnedSet = Set(pinnedList)
-        let normalizedConversation = normalizePhoneNumber(conversation.address)
-        let isPinned = addresses.contains { isAddressPinned($0, pinnedSet: pinnedSet) }
-
-        if isPinned {
-            for pinned in pinnedList {
-                if normalizePhoneNumber(pinned) == normalizedConversation {
-                    preferences.setPinned(pinned, pinned: false)
-                }
-            }
-            for address in addresses {
-                preferences.setPinned(address, pinned: false)
-            }
-            for normalized in normalizedAddresses {
-                preferences.setPinned(normalized, pinned: false)
-            }
-        } else {
-            preferences.setPinned(conversation.address, pinned: true)
-            let normalized = normalizePhoneNumber(conversation.address)
-            if normalized != conversation.address {
-                preferences.setPinned(normalized, pinned: true)
-            }
-        }
-        updateConversations(from: messages)
-    }
-
-    func isConversationPinned(_ conversation: Conversation, allAddresses: [String]) -> Bool {
-        let addresses = Set(allAddresses + [conversation.address])
-        let pinnedSet = Set(preferences.getAllPinned())
-        return addresses.contains { isAddressPinned($0, pinnedSet: pinnedSet) }
-    }
-
-    func toggleArchive(_ conversation: Conversation) {
-        preferences.setArchived(conversation.address, archived: !conversation.isArchived)
-        updateConversations(from: messages)
-    }
-
-    func toggleBlock(_ conversation: Conversation) {
-        preferences.setBlocked(conversation.address, blocked: !conversation.isBlocked)
-        updateConversations(from: messages)
-    }
-
-    func deleteConversation(_ conversation: Conversation) {
-        deleteConversations([conversation])
-    }
-
-    /// Delete multiple conversations (and all messages in them)
-    func deleteConversations(_ conversations: [Conversation]) {
-        guard !conversations.isEmpty else { return }
-
-        let addresses = Set(conversations.map { $0.address })
-        let messagesToDelete = messages.filter { addresses.contains($0.address) }
-
-        // Remove from preferences
-        for convo in conversations {
-            preferences.setArchived(convo.address, archived: false)
-            preferences.setPinned(convo.address, pinned: false)
-        }
-
-        deleteMessages(messagesToDelete)
-    }
-
     // MARK: - Filtered Conversations
-
-    private var spamAddressLookup: Set<String> {
-        let normalized = spamMessages.map { normalizePhoneNumber($0.address) }
-        return Set(normalized)
-    }
-
-    private func isSpamConversation(_ conversation: Conversation) -> Bool {
-        let normalized = normalizePhoneNumber(conversation.address)
-        return spamAddressLookup.contains(normalized)
-    }
-
-    var activeConversations: [Conversation] {
-        return conversations.filter { !$0.isArchived && !isSpamConversation($0) }
-    }
-
-    var archivedConversations: [Conversation] {
-        return conversations.filter { $0.isArchived && !isSpamConversation($0) }
-    }
-
-    var unreadConversations: [Conversation] {
-        return activeConversations.filter { $0.unreadCount > 0 }
-    }
-
-    var displayedConversations: [Conversation] {
-        if showSpamOnly {
-            return []
-        } else if showArchived {
-            return archivedConversations
-        } else if showUnreadOnly {
-            return unreadConversations
-        } else {
-            return activeConversations
-        }
-    }
 
     /// Filter mode for conversations
     enum ConversationFilter: String, CaseIterable {
@@ -1865,360 +977,107 @@ class MessageStore: ObservableObject {
         }
     }
 
-    var spamConversations: [SpamConversation] {
-        let grouped = Dictionary(grouping: spamMessages) { $0.address }
-        return grouped.map { (address, messages) in
-            let latest = messages.max(by: { $0.date < $1.date })
-            return SpamConversation(
-                address: address,
-                contactName: latest?.contactName ?? address,
-                latestMessage: latest?.body ?? "",
-                timestamp: latest?.date ?? 0,
-                messageCount: messages.count
-            )
-        }.sorted { $0.timestamp > $1.timestamp }
-    }
+    // MARK: - Pending Message Reconciliation
 
-    func spamMessages(for address: String) -> [SpamMessage] {
-        return spamMessages
-            .filter { $0.address == address }
-            .sorted { $0.date < $1.date }
-    }
-
-    func deleteSpamMessages(for address: String) async {
-        let ids = spamMessages.filter { $0.address == address }.map { $0.id }
-        for id in ids {
-            try? await VPSService.shared.deleteSpamMessage(messageId: id)
+    /// Reconciles optimistic pending outgoing messages with confirmed remote messages.
+    ///
+    /// When a user sends a message, a "pending_*" placeholder is added to the UI
+    /// immediately. Once Android confirms delivery and the message syncs back via VPS,
+    /// this method matches pending messages to their remote counterparts using address +
+    /// body + timestamp proximity (within 5 minutes). Matched pending messages are
+    /// removed; unmatched ones remain visible as still-sending.
+    func mergeMessagesWithPendingOutgoing(remoteMessages: [Message]) -> (mergedMessages: [Message], matchedPendingIds: Set<String>) {
+        let pendingSnapshot = pendingOutgoingQueue.sync { pendingOutgoingMessages }
+        guard !pendingSnapshot.isEmpty else {
+            return (remoteMessages, [])
         }
-        await MainActor.run {
-            self.spamMessages.removeAll { $0.address == address }
+
+        let sentRemoteMessages = remoteMessages.filter { $0.type == 2 }
+        var remainingPending: [Message] = []
+        var matchedIds: Set<String> = []
+
+        for pending in pendingSnapshot.values {
+            if hasMatchingRemoteMessage(pending: pending, remoteMessages: sentRemoteMessages) {
+                matchedIds.insert(pending.id)
+            } else {
+                remainingPending.append(pending)
+            }
         }
+
+        let merged = (remoteMessages + remainingPending).sorted { $0.date < $1.date }
+        return (merged, matchedIds)
     }
 
-    func clearAllSpam() async {
-        try? await VPSService.shared.clearAllSpamMessages()
-        await MainActor.run {
-            self.spamMessages.removeAll()
+    private func hasMatchingRemoteMessage(pending: Message, remoteMessages: [Message]) -> Bool {
+        let pendingAddress = normalizePhoneNumber(pending.address)
+        let trimmedBody = pending.body.trimmingCharacters(in: .whitespacesAndNewlines)
+        let maxDeltaMs = 5.0 * 60.0 * 1000.0
+
+        for remote in remoteMessages {
+            guard remote.type == 2 else { continue }
+            guard normalizePhoneNumber(remote.address) == pendingAddress else { continue }
+            guard remote.body.trimmingCharacters(in: .whitespacesAndNewlines) == trimmedBody else { continue }
+            guard abs(remote.date - pending.date) <= maxDeltaMs else { continue }
+            guard remote.isMms == pending.isMms else { continue }
+            return true
         }
+
+        return false
     }
 
-    func markMessageAsSpam(_ message: Message) {
-        Task {
-            try? await VPSService.shared.syncSpamMessage(
-                address: message.address,
-                body: message.body,
-                date: message.date,
-                spamScore: 1.0,
-                spamReason: "Manually marked as spam"
-            )
-            loadSpamMessagesFromVPS()
-        }
-    }
+    // MARK: - Load More Messages (Pagination)
 
-    func markConversationAsSpam(_ conversation: Conversation) {
-        guard let latest = messages
-            .filter({ $0.address == conversation.address })
-            .max(by: { $0.date < $1.date }) else { return }
-        markMessageAsSpam(latest)
-    }
+    /// Loads additional older messages for infinite scroll pagination.
+    ///
+    /// Loads messages from an additional time range (90 days by default)
+    /// before the oldest currently loaded message.
+    ///
+    /// ## State Management
+    /// - Sets `isLoadingMore` to true during load
+    /// - Updates `canLoadMore` based on whether more messages exist
+    /// - Merges with existing messages (deduplicated)
+    func loadMoreMessages() {
+        guard !isLoadingMore, canLoadMore else { return }
 
-    /// Mark a spam conversation as "not spam" - removes from spam and adds to whitelist
-    func markSpamAsNotSpam(address: String) async {
-        // Add to whitelist (this also removes from blocklist)
-        try? await VPSService.shared.addToWhitelist(phoneNumber: address)
+        isLoadingMore = true
 
-        // Delete spam messages for this address
-        await deleteSpamMessages(for: address)
-    }
+        // Use oldest message timestamp as cursor for VPS pagination
+        let oldestDate = messages.min(by: { $0.date < $1.date })?.date
 
-    // MARK: - VPS Spam Helpers
-
-    private func loadSpamMessagesFromVPS() {
         Task {
             do {
-                let response = try await VPSService.shared.getSpamMessages(limit: 100)
-                let mapped = response.messages.map { vpsSpam in
-                    SpamMessage(
-                        id: vpsSpam.id,
-                        address: vpsSpam.address,
-                        body: vpsSpam.body ?? "",
-                        date: Double(vpsSpam.date),
-                        contactName: nil,
-                        spamConfidence: Double(vpsSpam.spamScore ?? 0.5),
-                        spamReasons: vpsSpam.spamReason,
-                        detectedAt: Double(vpsSpam.date),
-                        isUserMarked: false,
-                        isRead: false
-                    )
-                }
+                let response = try await VPSService.shared.getMessages(
+                    limit: 200,
+                    before: oldestDate.map { Int64($0) }
+                )
+
+                let olderMessages = response.messages.map { self.convertVPSMessage($0) }
+
                 await MainActor.run {
-                    let previousCount = self.spamMessages.count
-                    self.spamMessages = mapped.sorted { $0.date > $1.date }
-                    if self.selectedSpamAddress == nil {
-                        self.selectedSpamAddress = self.spamMessages.first?.address
-                    }
+                    let existingIds = Set(self.messages.map { $0.id })
+                    let newMessages = olderMessages.filter { !existingIds.contains($0.id) }
+
+                    var allMessages = self.messages + newMessages
+                    allMessages.sort { $0.date > $1.date }
+
+                    self.messages = self.applyReadStatus(to: allMessages)
+                    self.updateConversations(from: self.messages)
+                    self.canLoadMore = response.hasMore
+                    self.isLoadingMore = false
+
                     #if DEBUG
-                    if mapped.count != previousCount {
-                        print("[MessageStore VPS] Loaded \(mapped.count) spam messages")
-                    }
+                    print("[MessageStore] Loaded \(newMessages.count) more messages via VPS pagination")
                     #endif
                 }
             } catch {
-                #if DEBUG
-                print("[MessageStore VPS] Error loading spam: \(error.localizedDescription)")
-                #endif
-            }
-        }
-    }
-
-    private func startSpamWebSocketListener() {
-        VPSService.shared.spamUpdated
-            .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in
-                self?.loadSpamMessagesFromVPS()
-            }
-            .store(in: &vpsCancellables)
-    }
-
-    // MARK: - Search
-
-    /// Extract only digits from a string for phone number comparison
-    private func digitsOnly(_ value: String) -> String {
-        return value.filter { $0.isNumber }
-    }
-
-    private func normalizeSearchText(_ value: String) -> String {
-        let folded = value
-            .folding(options: [.diacriticInsensitive], locale: .current)
-            .lowercased()
-        let cleaned = folded.map { char in
-            char.isLetter || char.isNumber ? char : " "
-        }
-        let collapsed = String(cleaned)
-            .split(whereSeparator: { $0.isWhitespace })
-            .joined(separator: " ")
-        return collapsed
-    }
-
-    func search(query: String, in conversationsList: [Conversation] = []) -> [Conversation] {
-        let list = conversationsList.isEmpty ? conversations : conversationsList
-
-        if query.isEmpty {
-            return list
-        }
-
-        let lowercaseQuery = query.lowercased()
-        let queryDigits = query.filter { $0.isNumber }
-        let normalizedQuery = normalizeSearchText(query)
-        let compactQuery = normalizedQuery.replacingOccurrences(of: " ", with: "")
-
-        if normalizedQuery.isEmpty {
-            return list
-        }
-
-        return list.filter { conversation in
-            // Match by display name (contact name or address)
-            if conversation.displayName.lowercased().contains(lowercaseQuery) {
-                return true
-            }
-
-            // Match by contact name if available
-            if let contactName = conversation.contactName,
-               contactName.lowercased().contains(lowercaseQuery) {
-                return true
-            }
-
-            // Match by last message content
-            if conversation.lastMessage.lowercased().contains(lowercaseQuery) {
-                return true
-            }
-
-            // Match by address (exact or partial)
-            if conversation.address.lowercased().contains(lowercaseQuery) {
-                return true
-            }
-
-            // Match by conversation ID
-            if conversation.id.lowercased().contains(lowercaseQuery) {
-                return true
-            }
-
-            // Normalized/compact matching (handles punctuation/spacing)
-            let displayNameNormalized = normalizeSearchText(conversation.displayName)
-            let displayNameCompact = displayNameNormalized.replacingOccurrences(of: " ", with: "")
-            if displayNameNormalized.contains(normalizedQuery) || displayNameCompact.contains(compactQuery) {
-                return true
-            }
-            if let contactName = conversation.contactName {
-                let contactNormalized = normalizeSearchText(contactName)
-                let contactCompact = contactNormalized.replacingOccurrences(of: " ", with: "")
-                if contactNormalized.contains(normalizedQuery) || contactCompact.contains(compactQuery) {
-                    return true
+                await MainActor.run {
+                    #if DEBUG
+                    print("[MessageStore] Error loading more messages: \(error)")
+                    #endif
+                    self.error = error
+                    self.isLoadingMore = false
                 }
             }
-            let lastMessageNormalized = normalizeSearchText(conversation.lastMessage)
-            let lastMessageCompact = lastMessageNormalized.replacingOccurrences(of: " ", with: "")
-            if lastMessageNormalized.contains(normalizedQuery) || lastMessageCompact.contains(compactQuery) {
-                return true
-            }
-            let addressNormalized = normalizeSearchText(conversation.address)
-            let addressCompact = addressNormalized.replacingOccurrences(of: " ", with: "")
-            if addressNormalized.contains(normalizedQuery) || addressCompact.contains(compactQuery) {
-                return true
-            }
-            let idNormalized = normalizeSearchText(conversation.id)
-            let idCompact = idNormalized.replacingOccurrences(of: " ", with: "")
-            if idNormalized.contains(normalizedQuery) || idCompact.contains(compactQuery) {
-                return true
-            }
-
-            // Phone number digit matching
-            if queryDigits.count >= 3 {
-                let addressDigits = conversation.address.filter { $0.isNumber }
-                let idDigits = conversation.id.filter { $0.isNumber }
-
-                // Check if query digits appear anywhere in address or id digits
-                if addressDigits.contains(queryDigits) {
-                    return true
-                }
-                if idDigits.contains(queryDigits) {
-                    return true
-                }
-
-                // Check if address/id digits appear in query
-                if queryDigits.contains(addressDigits) && !addressDigits.isEmpty {
-                    return true
-                }
-                if queryDigits.contains(idDigits) && !idDigits.isEmpty {
-                    return true
-                }
-            }
-
-            return false
         }
     }
-
-    func searchMessages(query: String) -> [Message] {
-        if query.isEmpty {
-            return []
-        }
-
-        let normalizedQuery = normalizeSearchText(query)
-        let compactQuery = normalizedQuery.replacingOccurrences(of: " ", with: "")
-        if normalizedQuery.isEmpty {
-            return []
-        }
-
-        // Get digits from query for phone number matching
-        let queryDigits = digitsOnly(query)
-        let isPhoneSearch = queryDigits.count >= 4
-
-        return messages.filter { message in
-            // Match by message body
-            if message.body.localizedCaseInsensitiveContains(query) {
-                return true
-            }
-            // Match by exact address
-            if message.address.contains(query) {
-                return true
-            }
-            // Match by contact name
-            if message.contactName?.localizedCaseInsensitiveContains(query) == true {
-                return true
-            }
-            // Normalized/compact matching for punctuation/spacing variations
-            let bodyNormalized = normalizeSearchText(message.body)
-            let bodyCompact = bodyNormalized.replacingOccurrences(of: " ", with: "")
-            if bodyNormalized.contains(normalizedQuery) || bodyCompact.contains(compactQuery) {
-                return true
-            }
-            let addressNormalized = normalizeSearchText(message.address)
-            let addressCompact = addressNormalized.replacingOccurrences(of: " ", with: "")
-            if addressNormalized.contains(normalizedQuery) || addressCompact.contains(compactQuery) {
-                return true
-            }
-            if let contactName = message.contactName {
-                let contactNormalized = normalizeSearchText(contactName)
-                let contactCompact = contactNormalized.replacingOccurrences(of: " ", with: "")
-                if contactNormalized.contains(normalizedQuery) || contactCompact.contains(compactQuery) {
-                    return true
-                }
-            }
-            // Match by phone number digits (handles all formats)
-            if isPhoneSearch {
-                let addressDigits = digitsOnly(message.address)
-                // Check if digits match
-                if addressDigits.contains(queryDigits) || queryDigits.contains(addressDigits) {
-                    return true
-                }
-                // Also check last N digits match
-                if queryDigits.count >= 7 && addressDigits.count >= 7 {
-                    let queryLast7 = String(queryDigits.suffix(7))
-                    let addressLast7 = String(addressDigits.suffix(7))
-                    if queryLast7 == addressLast7 {
-                        return true
-                    }
-                }
-            }
-            return false
-        }
-    }
-
-    // MARK: - Contacts lookup
-
-    private func startListeningForContacts(userId: String) {
-        // VPS contacts are loaded via REST + WebSocket push
-        contactsListenerUserId = userId
-        // Handled by startListeningForContactsVPS in the VPS listening path
-    }
-
-    private func stopListeningForContacts() {
-        contactsListenerUserId = nil
-        latestContacts = []
-        contactNameLookup = [:]
-    }
-
-    private func rebuildContactLookup() {
-        var lookup: [String: String] = [:]
-
-        for contact in latestContacts {
-            let normalized = normalizePhoneNumber(
-                (contact.normalizedNumber ?? "").isEmpty ? (contact.phoneNumber ?? "") : (contact.normalizedNumber ?? "")
-            )
-            if !normalized.isEmpty {
-                lookup[normalized] = contact.displayName
-            }
-        }
-
-        contactNameLookup = lookup
-
-        if !messages.isEmpty {
-            updateConversations(from: messages)
-        }
-    }
-
-    private func resolveContactName(candidate: String?, normalizedAddress: String) -> String? {
-        let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let lookup = contactNameLookup[normalizedAddress], !lookup.isEmpty {
-            return lookup
-        }
-
-        if let name = trimmed,
-           !name.isEmpty,
-           name.rangeOfCharacter(from: .letters) != nil {
-            return name
-        }
-
-        return trimmed?.isEmpty == true ? nil : trimmed
-    }
-}
-
-struct SpamConversation: Identifiable, Hashable {
-    let address: String
-    let contactName: String
-    let latestMessage: String
-    let timestamp: Double
-    let messageCount: Int
-
-    var id: String { address }
 }
