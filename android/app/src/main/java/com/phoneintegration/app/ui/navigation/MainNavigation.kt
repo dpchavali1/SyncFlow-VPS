@@ -70,8 +70,8 @@ fun MainNavigation(
 
     // Auto-register phone number from SIM, or show mandatory dialog
     LaunchedEffect(Unit) {
-        // Small delay to let the UI render first
-        kotlinx.coroutines.delay(2000)
+        // Delay to let permissions be granted on first install before reading SIM info
+        kotlinx.coroutines.delay(5000)
         val vpsClient = com.phoneintegration.app.vps.VPSClient.getInstance(context)
         if (vpsClient.userId != null) {
             // Restore from server first (covers reinstall / cleared prefs)

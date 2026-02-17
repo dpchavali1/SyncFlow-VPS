@@ -48,11 +48,23 @@ fun PhoneNumberRegistrationDialog(
     var sims by remember { mutableStateOf<List<SimManager.SimInfo>>(emptyList()) }
     var selectedSim by remember { mutableStateOf<SimManager.SimInfo?>(null) }
 
-    // Load SIM cards on first display
+    // Load SIM cards on first display.
+    // Retries up to 3 times if no SIMs found (permissions may not be granted yet on first install).
     LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) {
-            val simManager = SimManager(context)
-            sims = simManager.getActiveSims()
+        val simManager = SimManager(context)
+        var attempts = 0
+        val maxAttempts = 3
+        while (attempts < maxAttempts) {
+            val result = withContext(Dispatchers.IO) {
+                simManager.getActiveSims()
+            }
+            sims = result
+            if (result.isNotEmpty()) break
+            attempts++
+            if (attempts < maxAttempts) {
+                // Wait for permissions to be granted (first install) or SIM to be detected
+                kotlinx.coroutines.delay(2000)
+            }
         }
         isLoading = false
         // Auto-select if only one SIM with a readable number
