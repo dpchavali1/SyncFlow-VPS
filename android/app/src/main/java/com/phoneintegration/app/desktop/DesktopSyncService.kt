@@ -113,7 +113,7 @@ class DesktopSyncService(context: Context) {
         }
     }
 
-    fun listenForOutgoingMessages(pollIntervalMs: Long = 5000L): Flow<Map<String, Any?>> {
+    fun listenForOutgoingMessages(pollIntervalMs: Long = 30_000L): Flow<Map<String, Any?>> {
         return flow {
             while (true) {
                 if (isAuthenticated()) {

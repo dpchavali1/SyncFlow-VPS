@@ -180,6 +180,12 @@ class MessageStore: ObservableObject {
     /// VPS-specific cancellables
     private var vpsCancellables = Set<AnyCancellable>()
 
+    /// Polling fallback task — runs only when WebSocket is disconnected
+    private var pollFallbackTask: Task<Void, Never>?
+
+    /// Tracks the newest message date for incremental polling
+    private var lastPolledMessageDate: Double = 0
+
     /// Check if VPS mode is enabled
     private var isVPSMode: Bool {
         // Default to VPS mode
@@ -757,6 +763,82 @@ class MessageStore: ObservableObject {
         spamListenerUserId = userId
         loadSpamMessagesFromVPS()
         startSpamWebSocketListener()
+
+        // Start polling fallback — only fetches when WebSocket is disconnected
+        startPollingFallback()
+    }
+
+    /// Polling fallback that fetches new messages every 60 seconds when WebSocket is disconnected.
+    /// When WebSocket is connected, the poll is skipped (no battery/network cost).
+    private func startPollingFallback() {
+        pollFallbackTask?.cancel()
+        pollFallbackTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 60_000_000_000) // 60 seconds
+                guard !Task.isCancelled else { break }
+                guard let self = self else { break }
+
+                // Only poll when WebSocket is NOT connected
+                guard !VPSService.shared.isConnected else { continue }
+
+                #if DEBUG
+                print("[MessageStore] WebSocket disconnected — polling for new messages")
+                #endif
+
+                do {
+                    // Use the newest message date as the "after" parameter for incremental fetch
+                    let afterTimestamp = self.lastPolledMessageDate > 0
+                        ? self.lastPolledMessageDate
+                        : (self.messages.map { $0.date }.max() ?? 0)
+
+                    let response = try await VPSService.shared.getMessages(limit: 100, after: afterTimestamp)
+                    let newMessages = response.messages.map { self.convertVPSMessage($0) }
+
+                    if !newMessages.isEmpty {
+                        // Track the newest date for next poll
+                        if let newest = newMessages.map({ $0.date }).max() {
+                            self.lastPolledMessageDate = newest
+                        }
+
+                        await MainActor.run {
+                            var currentMessages = self.messages
+
+                            // Merge new messages, skip duplicates
+                            let existingIds = Set(currentMessages.map { $0.id })
+                            let unique = newMessages.filter { !existingIds.contains($0.id) }
+
+                            if !unique.isEmpty {
+                                currentMessages.append(contentsOf: unique)
+                                let processed = self.applyReadStatus(to: currentMessages)
+                                let mergeResult = self.mergeMessagesWithPendingOutgoing(remoteMessages: processed)
+                                let convos = self.buildConversations(from: mergeResult.mergedMessages)
+
+                                self.messages = mergeResult.mergedMessages
+                                self.conversations = convos
+
+                                #if DEBUG
+                                print("[MessageStore] Poll fallback: added \(unique.count) new messages")
+                                #endif
+
+                                // Notify for new incoming messages
+                                for msg in unique where msg.isReceived {
+                                    self.notificationService.showMessageNotification(
+                                        from: msg.address,
+                                        contactName: msg.contactName,
+                                        body: msg.body,
+                                        messageId: msg.id
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } catch {
+                    #if DEBUG
+                    print("[MessageStore] Poll fallback error: \(error.localizedDescription)")
+                    #endif
+                }
+            }
+        }
     }
 
     /// Converts a VPSMessage to the local Message type
@@ -970,6 +1052,8 @@ class MessageStore: ObservableObject {
         stopListeningForContacts()
         repairPollTask?.cancel()
         repairPollTask = nil
+        pollFallbackTask?.cancel()
+        pollFallbackTask = nil
 
         // Clear state
         currentUserId = nil

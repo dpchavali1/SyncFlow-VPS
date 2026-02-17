@@ -261,21 +261,43 @@ class SmsReceiver : BroadcastReceiver() {
             }
 
             // Sync to VPS if authenticated (real-time push to Mac/Web)
+            // Use goAsync() to keep the BroadcastReceiver alive while the coroutine runs,
+            // otherwise Android may kill the process before the sync HTTP call completes.
             val vpsSyncService = try {
                 com.phoneintegration.app.vps.VPSSyncService.getInstance(context)
             } catch (e: Exception) { null }
 
             if (vpsSyncService?.isAuthenticated == true) {
+                val pendingResult = goAsync()
                 CoroutineScope(Dispatchers.IO).launch {
                     try {
+                        // Wait briefly for the default SMS app (or our own insert above)
+                        // to commit the message to the content provider, then look it up
+                        // by address + timestamp to get the real _ID. This avoids orphan
+                        // rows in the VPS DB that would happen with a synthetic ID.
+                        kotlinx.coroutines.delay(1500)
+
                         val smsRepository = SmsRepository(context)
-                        val recentMessages = smsRepository.getAllRecentMessages(1)
-                        if (recentMessages.isNotEmpty()) {
-                            vpsSyncService.syncMessage(recentMessages[0])
-                            SecureLogger.d("SMS_RECEIVER", "Message synced to VPS")
+                        val recentMessages = smsRepository.getAllRecentMessages(3)
+                        // Find the message matching our sender + timestamp
+                        val matchingMsg = recentMessages.firstOrNull { msg ->
+                            msg.address == sender && kotlin.math.abs(msg.date - timestamp) < 5000
+                        } ?: recentMessages.firstOrNull()
+
+                        if (matchingMsg != null) {
+                            // Ensure contact name is set
+                            if (matchingMsg.contactName.isNullOrEmpty() && contactName != null) {
+                                matchingMsg.contactName = contactName
+                            }
+                            vpsSyncService.syncMessage(matchingMsg)
+                            SecureLogger.d("SMS_RECEIVER", "Message synced to VPS (id=${matchingMsg.id})")
+                        } else {
+                            SecureLogger.w("SMS_RECEIVER", "No matching message found in content provider for VPS sync")
                         }
                     } catch (e: Exception) {
                         SecureLogger.e("SMS_RECEIVER", "Error syncing message to VPS", e)
+                    } finally {
+                        pendingResult.finish()
                     }
                 }
             }

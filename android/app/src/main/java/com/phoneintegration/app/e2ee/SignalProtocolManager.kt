@@ -82,6 +82,11 @@ class SignalProtocolManager(private val context: Context) {
     private var privateKeysetHandle: KeysetHandle? = null
     private var encryptionPrimitive: HybridDecrypt? = null
     private var ecdhKeyPair: KeyPair? = null
+    // Prevent redundant key publishes within the same app session.
+    // publishDevicePublicKey() is called from ensureEcdhKeys() which is called
+    // per-message in buildMessageMap(). Without this flag, re-syncing N messages
+    // triggers N HTTP key-publish calls, flooding the server.
+    private var deviceKeyPublished = false
 
     init {
         // Initialize Tink
@@ -251,7 +256,10 @@ class SignalProtocolManager(private val context: Context) {
         if (prefs.getBoolean(KEY_ECDH_INITIALIZED, false)) {
             loadEcdhKeys()
             if (ecdhKeyPair != null) {
-                publishDevicePublicKey()
+                if (!deviceKeyPublished) {
+                    publishDevicePublicKey()
+                    deviceKeyPublished = true
+                }
                 return
             }
             // loadEcdhKeys failed (e.g. Keystore corruption) — regenerate
@@ -281,6 +289,7 @@ class SignalProtocolManager(private val context: Context) {
 
             ecdhKeyPair = keyPair
             publishDevicePublicKey()
+            deviceKeyPublished = true
             Log.d(TAG, "E2EE v2 device keys initialized")
         } catch (e: Exception) {
             Log.e(TAG, "Error initializing E2EE v2 keys", e)

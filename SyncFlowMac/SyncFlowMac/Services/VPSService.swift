@@ -1053,10 +1053,13 @@ public class VPSService: NSObject, ObservableObject {
 
     // MARK: - Messages
 
-    public func getMessages(limit: Int = 100, before: Int64? = nil, threadId: Int? = nil) async throws -> VPSMessagesResponse {
+    public func getMessages(limit: Int = 100, before: Int64? = nil, after: Double? = nil, threadId: Int? = nil) async throws -> VPSMessagesResponse {
         var path = "/api/messages?limit=\(limit)"
         if let before = before {
             path += "&before=\(before)"
+        }
+        if let after = after {
+            path += "&after=\(Int64(after))"
         }
         if let threadId = threadId {
             path += "&threadId=\(threadId)"

@@ -348,7 +348,7 @@ class OutgoingMessageWorker(
             // IntelligentSyncManager handles real-time outgoing messages via listeners
             // This worker serves as backup and for bulk operations
             val workRequest = PeriodicWorkRequestBuilder<OutgoingMessageWorker>(
-                repeatInterval = 15, // WorkManager minimum — last-resort safety net
+                repeatInterval = 60, // Safety net only — FCM + WebSocket handle real-time delivery
                 repeatIntervalTimeUnit = TimeUnit.MINUTES
             )
                 .setConstraints(constraints)

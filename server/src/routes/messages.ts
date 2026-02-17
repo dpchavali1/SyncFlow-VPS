@@ -166,6 +166,8 @@ router.post('/sync', async (req: Request, res: Response) => {
     const body = syncMessagesSchema.parse(req.body);
     const userId = req.userId!;
 
+    console.log(`[Messages] Sync request from userId=${userId}, messages=${body.messages.length}`);
+
     let synced = 0;
     let skipped = 0;
     const syncedMessages: any[] = [];
@@ -308,6 +310,7 @@ router.post('/sync', async (req: Request, res: Response) => {
       }
     }
 
+    console.log(`[Messages] Sync complete for userId=${userId}: synced=${synced}, skipped=${skipped}, total=${body.messages.length}`);
     res.json({ synced, skipped, total: body.messages.length });
   } catch (error) {
     if (error instanceof z.ZodError) {

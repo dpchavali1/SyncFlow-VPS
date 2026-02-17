@@ -15,6 +15,7 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import com.phoneintegration.app.auth.AuthManager
 import com.phoneintegration.app.data.PreferencesManager
 import com.phoneintegration.app.desktop.*
+import com.phoneintegration.app.vps.VPSSyncService
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -88,6 +89,8 @@ class BatteryAwareServiceManager private constructor(private val context: Contex
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var batteryMonitorJob: Job? = null
     private var networkMonitorJob: Job? = null
+    private var wsDisconnectJob: Job? = null
+    private val WS_BACKGROUND_DISCONNECT_DELAY_MS = 60_000L // 60 seconds grace period
 
     // User preferences
     private var userEnabledServices = setOf(
@@ -207,6 +210,23 @@ class BatteryAwareServiceManager private constructor(private val context: Contex
     private fun optimizeServicesForForeground() {
         val authManager = AuthManager.getInstance(context)
 
+        // Cancel any pending WebSocket disconnect — user returned to foreground
+        wsDisconnectJob?.cancel()
+        wsDisconnectJob = null
+
+        // Reconnect WebSocket immediately when returning to foreground
+        if (authManager.isAuthenticated() && DesktopSyncService.hasPairedDevices(context)) {
+            try {
+                val syncService = VPSSyncService.getInstance(context)
+                if (syncService.isAuthenticated) {
+                    syncService.connectWebSocket()
+                    Log.d(TAG, "WebSocket reconnected on foreground")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to reconnect WebSocket on foreground: ${e.message}")
+            }
+        }
+
         // Start intelligent sync manager when app is in foreground
         if (authManager.isAuthenticated()) {
             startIntelligentSync()
@@ -244,6 +264,21 @@ class BatteryAwareServiceManager private constructor(private val context: Contex
      * Optimize services for background usage (battery saving)
      */
     private fun optimizeServicesForBackground() {
+        // Schedule WebSocket disconnect after grace period — FCM will wake us for incoming events
+        wsDisconnectJob?.cancel()
+        wsDisconnectJob = scope.launch {
+            delay(WS_BACKGROUND_DISCONNECT_DELAY_MS)
+            try {
+                val syncService = VPSSyncService.getInstance(context)
+                if (syncService.isAuthenticated) {
+                    syncService.disconnectWebSocket()
+                    Log.d(TAG, "WebSocket disconnected after ${WS_BACKGROUND_DISCONNECT_DELAY_MS / 1000}s in background")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to disconnect WebSocket in background: ${e.message}")
+            }
+        }
+
         // Stop non-essential services when in background
         val batteryLevel = _batteryLevel.value
         val isCharging = _isCharging.value
