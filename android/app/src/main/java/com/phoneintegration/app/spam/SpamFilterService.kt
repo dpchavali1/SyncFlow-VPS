@@ -420,7 +420,11 @@ class SpamFilterService(private val context: Context) {
         var scamCount = 0
 
         messages.forEachIndexed { index, message ->
-            val result = checkMessage(message.address, message.body)
+            val result = checkMessage(
+                address = message.address,
+                body = message.body,
+                isFromContact = message.isFromContact
+            )
 
             if (result.isSpam) {
                 flaggedMessages.add(FlaggedMessage(
@@ -723,7 +727,8 @@ data class MessageToScan(
     val id: String,
     val address: String,
     val body: String,
-    val date: Long
+    val date: Long,
+    val isFromContact: Boolean = false
 )
 
 /**

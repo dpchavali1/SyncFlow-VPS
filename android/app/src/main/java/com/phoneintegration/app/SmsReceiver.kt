@@ -174,8 +174,12 @@ class SmsReceiver : BroadcastReceiver() {
                                 null
                             }
 
-                            // Combine results - use higher confidence
-                            if (advancedResult != null && advancedResult.confidence > basicResult.confidence) {
+                            // Combine results - if either check explicitly cleared (contact/whitelist),
+                            // respect that. Otherwise use higher confidence.
+                            if (isFromContact) {
+                                // Saved contacts are NEVER spam — skip combining
+                                SpamFilter.SpamCheckResult(isSpam = false, confidence = 0f, reasons = listOf("Saved contact"))
+                            } else if (advancedResult != null && advancedResult.confidence > basicResult.confidence) {
                                 SpamFilter.SpamCheckResult(
                                     isSpam = advancedResult.isSpam || basicResult.isSpam,
                                     confidence = advancedResult.confidence,

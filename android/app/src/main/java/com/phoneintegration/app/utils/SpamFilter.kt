@@ -786,11 +786,11 @@ object SpamFilter {
             return SpamCheckResult(isSpam = false, confidence = 0f, reasons = listOf("Trusted sender"))
         }
 
-        // STEP 2: Contact bonus
-        // Messages from saved contacts are less likely to be spam
-        // But we limit the bonus since businesses can be saved as contacts
+        // STEP 2: Saved contacts are NEVER spam
+        // Users explicitly save contacts — we trust that decision absolutely.
+        // Only user-initiated manual blocking can override this.
         if (isFromContact) {
-            score -= 0.15f
+            return SpamCheckResult(isSpam = false, confidence = 0f, reasons = listOf("Saved contact"))
         }
 
         // STEP 3: High confidence phrase detection (scam patterns)
