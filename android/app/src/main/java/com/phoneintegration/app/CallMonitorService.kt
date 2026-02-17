@@ -175,11 +175,9 @@ class CallMonitorService : Service() {
 
         // Register for phone number broadcasts from InCallService
         val filter = android.content.IntentFilter(DesktopInCallService.ACTION_INCOMING_CALL)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(incomingCallReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(incomingCallReceiver, filter)
-        }
+        androidx.core.content.ContextCompat.registerReceiver(
+            this, incomingCallReceiver, filter, androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED
+        )
 
         registerCallLogObserver()
         registerCallStateListener()
