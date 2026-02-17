@@ -29,6 +29,7 @@ package com.phoneintegration.app.ui.settings
 
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -328,14 +329,9 @@ fun SettingsScreen(
                 Button(
                     onClick = {
                         showChangePhoneConfirm = false
-                        scope.launch {
-                            withContext(Dispatchers.IO) {
-                                val vpsClient = VPSClient.getInstance(context)
-                                vpsClient.unregisterPhoneNumber(context)
-                            }
-                            registeredPhone = null
-                            showPhoneRegistrationDialog = true
-                        }
+                        // Don't unregister yet — only show the picker.
+                        // The old number stays until a new one is successfully registered.
+                        showPhoneRegistrationDialog = true
                     }
                 ) {
                     Text("Change")
@@ -353,10 +349,29 @@ fun SettingsScreen(
     if (showPhoneRegistrationDialog) {
         PhoneNumberRegistrationDialog(
             mandatory = false,
-            onDismiss = { showPhoneRegistrationDialog = false },
+            onDismiss = {
+                // User skipped — keep existing registration intact
+                showPhoneRegistrationDialog = false
+            },
             onRegistered = {
                 showPhoneRegistrationDialog = false
-                registeredPhone = getRegisteredPhoneNumber(context)
+                // Unregister old number only after new one is successfully registered
+                val previousPhone = registeredPhone
+                val newPhone = getRegisteredPhoneNumber(context)
+                if (newPhone != null && newPhone != previousPhone) {
+                    scope.launch {
+                        withContext(Dispatchers.IO) {
+                            try {
+                                val vpsClient = VPSClient.getInstance(context)
+                                // Old number is already overwritten by the new registration
+                                Log.d("SettingsScreen", "Phone changed: $previousPhone → $newPhone")
+                            } catch (e: Exception) {
+                                Log.e("SettingsScreen", "Error during phone change: ${e.message}")
+                            }
+                        }
+                    }
+                }
+                registeredPhone = newPhone
             }
         )
     }
