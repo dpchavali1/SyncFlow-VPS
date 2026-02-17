@@ -398,7 +398,7 @@ class SpamFilterService(private val context: Context) {
             }
         }
 
-        val isSpam = maxConfidence >= 0.6f || reasons.isNotEmpty()
+        val isSpam = maxConfidence >= 0.6f
 
         return SpamCheckResult(
             isSpam = isSpam,

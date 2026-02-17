@@ -34,7 +34,7 @@ public class VPSService: NSObject, ObservableObject {
     // ── Configuration ───────────────────────────────────────────────────────
     let baseUrl: String
     private let wsUrl: String
-    private let wsUrlFallback: String?
+    let wsUrlFallback: String?
     var activeWsUrl: String
     var didFallbackToInsecureWebSocket = false
     let session: URLSession
@@ -59,7 +59,7 @@ public class VPSService: NSObject, ObservableObject {
         guard let token = accessToken else { return nil }
         return "Bearer \(token)"
     }
-    @Published public private(set) var isConnected: Bool = false
+    @Published public var isConnected: Bool = false
 
     // ── WebSocket state ─────────────────────────────────────────────────────
     var webSocketTask: URLSessionWebSocketTask?
