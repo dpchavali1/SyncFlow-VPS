@@ -1080,4 +1080,109 @@ class MessageStore: ObservableObject {
             }
         }
     }
+
+    // MARK: - Contacts Lookup
+
+    func startListeningForContactsVPS(userId: String) {
+        Task {
+            do {
+                let response = try await VPSService.shared.getContacts()
+                let contacts: [Contact] = response.contacts.compactMap { vpsContact -> Contact? in
+                    let primaryPhone = vpsContact.phoneNumbers?.first
+                    let primaryEmail = vpsContact.emails?.first
+                    let syncMetadata = Contact.SyncMetadata(
+                        lastUpdatedAt: Date().timeIntervalSince1970 * 1000,
+                        lastSyncedAt: Date().timeIntervalSince1970 * 1000,
+                        lastUpdatedBy: "vps",
+                        version: 1,
+                        pendingAndroidSync: false,
+                        desktopOnly: false
+                    )
+                    return Contact(
+                        id: vpsContact.id,
+                        displayName: vpsContact.displayName ?? "Unknown",
+                        phoneNumber: primaryPhone,
+                        normalizedNumber: primaryPhone?.filter { $0.isNumber },
+                        phoneType: "mobile",
+                        photoBase64: vpsContact.photoThumbnail,
+                        notes: nil,
+                        email: primaryEmail,
+                        sync: syncMetadata
+                    )
+                }
+
+                // Build lookup from ALL phone numbers per contact (not just the first).
+                // latestContacts only stores the primary phone, but the VPS response
+                // has the full phoneNumbers array. Index every number so conversations
+                // on any of a contact's numbers resolve to their name.
+                var lookup: [String: String] = [:]
+                for vpsContact in response.contacts {
+                    guard let name = vpsContact.displayName, !name.isEmpty else { continue }
+                    for phone in vpsContact.phoneNumbers ?? [] {
+                        let normalized = normalizePhoneNumber(phone)
+                        if !normalized.isEmpty {
+                            lookup[normalized] = name
+                        }
+                    }
+                }
+
+                await MainActor.run {
+                    self.latestContacts = contacts
+                    self.contactNameLookup = lookup
+
+                    // Rebuild conversations with contact names
+                    let newConversations = self.buildConversations(from: self.messages)
+                    self.conversations = newConversations
+
+                    #if DEBUG
+                    print("[MessageStore VPS] Loaded \(contacts.count) contacts, \(lookup.count) phone lookup entries")
+                    #endif
+                }
+            } catch {
+                #if DEBUG
+                print("[MessageStore VPS] Error loading contacts: \(error.localizedDescription)")
+                #endif
+            }
+        }
+    }
+
+    func stopListeningForContacts() {
+        contactsListenerUserId = nil
+        latestContacts = []
+        contactNameLookup = [:]
+    }
+
+    func rebuildContactLookup() {
+        var lookup: [String: String] = [:]
+
+        for contact in latestContacts {
+            let normalized = normalizePhoneNumber(
+                (contact.normalizedNumber ?? "").isEmpty ? (contact.phoneNumber ?? "") : (contact.normalizedNumber ?? "")
+            )
+            if !normalized.isEmpty {
+                lookup[normalized] = contact.displayName
+            }
+        }
+
+        contactNameLookup = lookup
+
+        if !messages.isEmpty {
+            updateConversations(from: messages)
+        }
+    }
+
+    func resolveContactName(candidate: String?, normalizedAddress: String) -> String? {
+        let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let lookup = contactNameLookup[normalizedAddress], !lookup.isEmpty {
+            return lookup
+        }
+
+        if let name = trimmed,
+           !name.isEmpty,
+           name.rangeOfCharacter(from: .letters) != nil {
+            return name
+        }
+
+        return trimmed?.isEmpty == true ? nil : trimmed
+    }
 }

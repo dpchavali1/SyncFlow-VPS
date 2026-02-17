@@ -69,6 +69,8 @@ extension MessageStore {
         deleteConversations([conversation])
     }
 
+    // MARK: - Delete
+
     /// Delete multiple conversations (and all messages in them)
     func deleteConversations(_ conversations: [Conversation]) {
         guard !conversations.isEmpty else { return }

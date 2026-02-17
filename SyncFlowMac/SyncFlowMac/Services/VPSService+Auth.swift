@@ -101,24 +101,7 @@ extension VPSService {
         return VPSUser(userId: response.userId, deviceId: response.deviceId, admin: false)
     }
 
-    public func refreshAccessToken() async throws {
-        guard let token = refreshToken else {
-            throw VPSError.notAuthenticated
-        }
-
-        let body = ["refreshToken": token]
-
-        struct RefreshResponse: Codable {
-            let accessToken: String
-        }
-
-        let response: RefreshResponse = try await post("/api/auth/refresh", body: body, skipAuth: true)
-
-        accessToken = response.accessToken
-        if let data = response.accessToken.data(using: .utf8) {
-            _ = KeychainHelper.shared.save(key: keychainAccessToken, data: data)
-        }
-    }
+    // refreshAccessToken() is defined in VPSService.swift (core token management)
 
     public func getCurrentUser() async throws -> VPSUser {
         return try await get("/api/auth/me")
