@@ -57,6 +57,8 @@ class SyncFlowCallService : Service() {
         const val ACTION_START_CALL = "com.phoneintegration.app.START_SYNCFLOW_CALL"
         const val ACTION_INCOMING_USER_CALL = "com.phoneintegration.app.INCOMING_USER_CALL"
         const val ACTION_DISMISS_CALL_NOTIFICATION = "com.phoneintegration.app.DISMISS_CALL_NOTIFICATION"
+        const val ACTION_START_SCREEN_SHARE = "com.phoneintegration.app.START_SCREEN_SHARE"
+        const val ACTION_STOP_SCREEN_SHARE = "com.phoneintegration.app.STOP_SCREEN_SHARE"
 
         const val EXTRA_CALL_ID = "call_id"
         const val EXTRA_CALLEE_DEVICE_ID = "callee_device_id"
@@ -65,6 +67,7 @@ class SyncFlowCallService : Service() {
         const val EXTRA_WITH_VIDEO = "with_video"
         const val EXTRA_CALLER_NAME = "caller_name"
         const val EXTRA_CALLER_PHONE = "caller_phone"
+        const val EXTRA_SCREEN_SHARE_RESULT_CODE = "screen_share_result_code"
 
         // Singleton reference for call manager
         private var _callManager: SyncFlowCallManager? = null
@@ -283,6 +286,52 @@ class SyncFlowCallService : Service() {
                     ensureWebSocketConnected("start_call")
                     startCall(calleeDeviceId, calleeName, isVideo)
                 }
+            }
+            ACTION_START_SCREEN_SHARE -> {
+                val resultCode = intent.getIntExtra(EXTRA_SCREEN_SHARE_RESULT_CODE, 0)
+                val data = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra("screen_share_data", Intent::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra("screen_share_data")
+                }
+                val targetDevice = intent.getStringExtra(EXTRA_CALLEE_DEVICE_ID)
+                if (data != null && resultCode != 0) {
+                    isCallActive = true
+                    cancelIdleTimeout()
+                    ensureWebSocketConnected("screen_share")
+
+                    // Upgrade foreground service type to include media projection
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        try {
+                            val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID_SERVICE)
+                                .setContentTitle("SyncFlow")
+                                .setContentText("Sharing screen...")
+                                .setSmallIcon(R.drawable.ic_launcher_foreground)
+                                .setPriority(NotificationCompat.PRIORITY_LOW)
+                                .setSilent(true)
+                                .setOngoing(true)
+                                .build()
+                            startForeground(
+                                NOTIFICATION_ID_SERVICE,
+                                notification,
+                                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                                    or ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                            )
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Failed to upgrade foreground service type: ${e.message}")
+                        }
+                    }
+
+                    serviceScope.launch {
+                        _callManager?.startScreenShare(resultCode, data)
+                    }
+                }
+            }
+            ACTION_STOP_SCREEN_SHARE -> {
+                _callManager?.stopScreenShare()
+                isCallActive = _callManager?.callState?.value is SyncFlowCallManager.CallState.Connected
+                if (!isCallActive) startIdleTimeout()
             }
             ACTION_INCOMING_USER_CALL -> {
                 // Handle incoming user call directly from push notification

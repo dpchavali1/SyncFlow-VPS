@@ -69,6 +69,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <!-- ═══════════════════════════════════════════════════════════════
          HARDWARE FEATURES (Optional)
@@ -309,7 +310,7 @@
         <service
             android:name=".SyncFlowCallService"
             android:exported="false"
-            android:foregroundServiceType="phoneCall|microphone|camera|dataSync" />
+            android:foregroundServiceType="phoneCall|microphone|camera|dataSync|mediaProjection" />
 
         <service
             android:name=".SyncFlowMessagingService"

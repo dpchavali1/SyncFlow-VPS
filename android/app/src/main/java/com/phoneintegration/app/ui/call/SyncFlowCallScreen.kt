@@ -21,6 +21,8 @@ import androidx.compose.material.icons.filled.CenterFocusStrong
 import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.ScreenShare
+import androidx.compose.material.icons.filled.StopScreenShare
 import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material3.*
@@ -52,7 +54,8 @@ import org.webrtc.VideoTrack
 @Composable
 fun SyncFlowCallScreen(
     callManager: SyncFlowCallManager,
-    onCallEnded: () -> Unit
+    onCallEnded: () -> Unit,
+    onRequestScreenShare: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -63,6 +66,8 @@ fun SyncFlowCallScreen(
     val localVideoTrack by callManager.localVideoTrackFlow.collectAsState()
     val remoteVideoTrack by callManager.remoteVideoTrackFlow.collectAsState()
     val videoEffect by callManager.videoEffect.collectAsState()
+    val isScreenSharing by callManager.isScreenSharing.collectAsState()
+    val screenShareTrack by callManager.screenShareTrack.collectAsState()
 
     // Keep controls visible until video is working, then auto-hide after 8 seconds
     var showControls by remember { mutableStateOf(true) }
@@ -174,14 +179,22 @@ fun SyncFlowCallScreen(
                 showControls = !showControls
             }
     ) {
-        // Remote video (full screen)
-        remoteVideoTrack?.let { track ->
+        // Remote screen share (takes priority over camera)
+        if (screenShareTrack != null) {
             VideoRenderer(
-                videoTrack = track,
+                videoTrack = screenShareTrack!!,
                 modifier = Modifier.fillMaxSize(),
                 eglContext = callManager.getEglBaseContext()
             )
-        } ?: run {
+        }
+        // Remote video (full screen)
+        else if (remoteVideoTrack != null) {
+            VideoRenderer(
+                videoTrack = remoteVideoTrack!!,
+                modifier = Modifier.fillMaxSize(),
+                eglContext = callManager.getEglBaseContext()
+            )
+        } else {
             // Placeholder when no remote video
             Box(
                 modifier = Modifier.fillMaxSize(),
@@ -357,6 +370,22 @@ fun SyncFlowCallScreen(
                                 label = "Switch",
                                 isActive = false,
                                 onClick = { callManager.switchCamera() }
+                            )
+                        }
+
+                        // Screen share button
+                        if (onRequestScreenShare != null) {
+                            CallControlButton(
+                                icon = if (isScreenSharing) Icons.Filled.StopScreenShare else Icons.Filled.ScreenShare,
+                                label = if (isScreenSharing) "Stop Share" else "Share",
+                                isActive = isScreenSharing,
+                                onClick = {
+                                    if (isScreenSharing) {
+                                        callManager.stopScreenShare()
+                                    } else {
+                                        onRequestScreenShare()
+                                    }
+                                }
                             )
                         }
 

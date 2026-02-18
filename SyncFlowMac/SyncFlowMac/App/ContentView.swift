@@ -184,7 +184,7 @@ struct ContentView: View {
     @ViewBuilder
     private var activeSyncFlowCallOverlay: some View {
         if appState.showSyncFlowCallView {
-            SyncFlowCallView(callManager: appState.syncFlowCallManager)
+            SyncFlowCallView(callManager: appState.syncFlowCallManager, screenCaptureService: appState.screenCaptureService)
                 .transition(.opacity)
                 .zIndex(1050)
         }

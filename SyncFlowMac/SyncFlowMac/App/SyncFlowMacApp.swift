@@ -641,6 +641,9 @@ class AppState: ObservableObject {
     /// WebRTC call manager for device-to-device audio/video calls
     let syncFlowCallManager = SyncFlowCallManager()
 
+    /// Screen capture service for screen sharing
+    let screenCaptureService = ScreenCaptureService()
+
     // =========================================================================
     // MARK: - Message State
     // =========================================================================

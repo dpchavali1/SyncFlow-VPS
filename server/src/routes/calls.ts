@@ -743,7 +743,7 @@ const createSyncFlowCallSchema = z.object({
   calleeName: z.string().optional(),
   callerName: z.string().optional(),
   callerPlatform: z.string().optional(),
-  callType: z.enum(['audio', 'video']).default('audio'),
+  callType: z.enum(['audio', 'video', 'screen_share']).default('audio'),
 });
 
 // GET /calls/syncflow/pending - Get ringing SyncFlow calls where current user is callee

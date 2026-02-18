@@ -7,6 +7,7 @@
 
 import SwiftUI
 import WebRTC
+import ScreenCaptureKit
 
 // MARK: - WebRTC Video View Wrapper
 
@@ -42,18 +43,25 @@ struct RTCVideoViewRepresentable: NSViewRepresentable {
 struct SyncFlowCallView: View {
     @EnvironmentObject var appState: AppState
     @ObservedObject var callManager: SyncFlowCallManager
+    @ObservedObject var screenCaptureService: ScreenCaptureService
     @State private var showControls = true
     @State private var controlsTimer: Timer?
     @State private var callDurationTimer: Timer?
     @State private var callDuration: TimeInterval = 0
+    @State private var showScreenSharePicker = false
 
     var body: some View {
         ZStack {
             // Background
             Color.black.ignoresSafeArea()
 
+            // Remote screen share (full screen, takes priority over camera)
+            if let screenTrack = callManager.screenShareTrack {
+                RTCVideoViewRepresentable(videoTrack: screenTrack)
+                    .ignoresSafeArea()
+            }
             // Remote video (full screen)
-            if let remoteTrack = callManager.remoteVideoTrack {
+            else if let remoteTrack = callManager.remoteVideoTrack {
                 RTCVideoViewRepresentable(videoTrack: remoteTrack)
                     .ignoresSafeArea()
             } else {
@@ -142,6 +150,27 @@ struct SyncFlowCallView: View {
                             callManager.toggleVideo()
                         }
 
+                        // Screen share toggle
+                        if callManager.isScreenSharing {
+                            controlButton(
+                                icon: "rectangle.on.rectangle.slash",
+                                label: "Stop Share",
+                                isActive: true
+                            ) {
+                                Task {
+                                    await callManager.stopScreenSharing(screenCaptureService: screenCaptureService)
+                                }
+                            }
+                        } else {
+                            controlButton(
+                                icon: "rectangle.on.rectangle",
+                                label: "Share Screen",
+                                isActive: false
+                            ) {
+                                showScreenSharePicker = true
+                            }
+                        }
+
                         // End call
                         Button {
                             appState.endSyncFlowCall()
@@ -170,6 +199,34 @@ struct SyncFlowCallView: View {
         .onAppear { startControlsAutoHide(); startDurationTimer() }
         .onDisappear { controlsTimer?.invalidate(); callDurationTimer?.invalidate() }
         .onTapGesture { toggleControls() }
+        .sheet(isPresented: $showScreenSharePicker) {
+            ScreenSharePicker(
+                screenCaptureService: screenCaptureService,
+                onSelectDisplay: { display in
+                    showScreenSharePicker = false
+                    Task {
+                        try? await callManager.startScreenSharing(
+                            display: display,
+                            screenCaptureService: screenCaptureService
+                        )
+                    }
+                },
+                onSelectWindow: { window in
+                    showScreenSharePicker = false
+                    // Window sharing uses the same flow
+                    Task {
+                        let factory = SyncFlowCallManager.factory
+                        try? await screenCaptureService.startSharingWindow(window, factory: factory)
+                        if let track = screenCaptureService.getVideoTrack() {
+                            await MainActor.run {
+                                callManager.isScreenSharing = true
+                            }
+                        }
+                    }
+                },
+                onCancel: { showScreenSharePicker = false }
+            )
+        }
     }
 
     // MARK: - Helpers
@@ -348,5 +405,5 @@ struct IncomingSyncFlowCallView: View {
 // MARK: - Preview
 
 #Preview {
-    SyncFlowCallView(callManager: SyncFlowCallManager())
+    SyncFlowCallView(callManager: SyncFlowCallManager(), screenCaptureService: ScreenCaptureService())
 }

@@ -2,8 +2,8 @@
 //  ScreenCaptureService.swift
 //  SyncFlowMac
 //
-//  VPS-only version - WebRTC removed.
-//  Screen sharing is not available in VPS mode.
+//  Screen capture service using ScreenCaptureKit and WebRTC.
+//  Captures display or window content and feeds it to an RTCVideoSource.
 //
 
 import Foundation
@@ -12,11 +12,10 @@ import Combine
 import CoreMedia
 import AppKit
 import SwiftUI
+import WebRTC
 
-// MARK: - ScreenCaptureService (Stub - WebRTC Removed)
+// MARK: - ScreenCaptureService
 
-/// Stub screen capture service - WebRTC has been removed in VPS mode.
-/// Screen sharing requires WebRTC for real-time video transmission.
 @available(macOS 12.3, *)
 class ScreenCaptureService: NSObject, ObservableObject {
 
@@ -29,18 +28,23 @@ class ScreenCaptureService: NSObject, ObservableObject {
     @Published var selectedDisplay: SCDisplay?
     @Published var selectedWindow: SCWindow?
 
-    // MARK: - Stub Video Types
+    // MARK: - WebRTC Video
 
-    /// Stub type for video source (WebRTC removed)
-    var videoSource: Any?
-    /// Stub type for video track (WebRTC removed)
-    var videoTrack: Any?
+    private var rtcVideoSource: RTCVideoSource?
+    private(set) var rtcVideoTrack: RTCVideoTrack?
+    private var scStream: SCStream?
+    private var dummyCapturer: RTCVideoCapturer?
+    private var captureWidth: Int = 1280
+    private var captureHeight: Int = 720
+    private var captureFps: Int = 15
+
+    static let screenTrackId = "screen0"
+    static let screenStreamId = "screen_stream"
 
     // MARK: - Initialization
 
     override init() {
         super.init()
-        print("[ScreenCapture] WebRTC removed - screen sharing disabled in VPS mode")
         checkPermission()
     }
 
@@ -65,7 +69,6 @@ class ScreenCaptureService: NSObject, ObservableObject {
     }
 
     func requestPermission() {
-        // Open System Settings to Screen Recording permissions
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
             NSWorkspace.shared.open(url)
         }
@@ -87,21 +90,111 @@ class ScreenCaptureService: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Start Screen Sharing (Disabled)
+    // MARK: - Start Screen Sharing
 
-    func startSharingDisplay(_ display: SCDisplay) async throws {
-        print("[ScreenCapture] startSharingDisplay() - WebRTC removed, screen sharing disabled")
-        throw ScreenCaptureError.notSupported
+    /// Start sharing a display via WebRTC.
+    /// - Parameters:
+    ///   - display: The SCDisplay to capture
+    ///   - factory: RTCPeerConnectionFactory for creating video source/track
+    ///   - width: Capture width (default 1280)
+    ///   - height: Capture height (default 720)
+    ///   - fps: Frames per second (default 15)
+    func startSharingDisplay(_ display: SCDisplay, factory: RTCPeerConnectionFactory, width: Int = 1280, height: Int = 720, fps: Int = 15) async throws {
+        guard hasPermission else {
+            throw ScreenCaptureError.permissionDenied
+        }
+
+        captureWidth = width
+        captureHeight = height
+        captureFps = fps
+
+        // Create RTCVideoSource and a dummy capturer to feed frames
+        rtcVideoSource = factory.videoSource()
+        dummyCapturer = RTCVideoCapturer(delegate: rtcVideoSource!)
+        rtcVideoTrack = factory.videoTrack(with: rtcVideoSource!, trackId: Self.screenTrackId)
+        rtcVideoTrack?.isEnabled = true
+
+        // Create SCContentFilter for the display
+        let filter = SCContentFilter(display: display, excludingWindows: [])
+
+        // Configure capture
+        let config = SCStreamConfiguration()
+        config.width = width
+        config.height = height
+        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.showsCursor = true
+        if #available(macOS 13.0, *) {
+            config.capturesAudio = false
+        }
+
+        // Create and start stream
+        scStream = SCStream(filter: filter, configuration: config, delegate: self)
+        try scStream?.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "com.syncflow.screencapture"))
+        try await scStream?.startCapture()
+
+        await MainActor.run {
+            self.isScreenSharing = true
+            self.selectedDisplay = display
+            self.selectedWindow = nil
+        }
+
+        print("[ScreenCapture] Started sharing display \(display.displayID) at \(width)x\(height)@\(fps)fps")
     }
 
-    func startSharingWindow(_ window: SCWindow) async throws {
-        print("[ScreenCapture] startSharingWindow() - WebRTC removed, screen sharing disabled")
-        throw ScreenCaptureError.notSupported
+    /// Start sharing a specific window via WebRTC.
+    func startSharingWindow(_ window: SCWindow, factory: RTCPeerConnectionFactory, width: Int = 1280, height: Int = 720, fps: Int = 15) async throws {
+        guard hasPermission else {
+            throw ScreenCaptureError.permissionDenied
+        }
+
+        captureWidth = width
+        captureHeight = height
+        captureFps = fps
+
+        rtcVideoSource = factory.videoSource()
+        dummyCapturer = RTCVideoCapturer(delegate: rtcVideoSource!)
+        rtcVideoTrack = factory.videoTrack(with: rtcVideoSource!, trackId: Self.screenTrackId)
+        rtcVideoTrack?.isEnabled = true
+
+        let filter = SCContentFilter(desktopIndependentWindow: window)
+
+        let config = SCStreamConfiguration()
+        config.width = width
+        config.height = height
+        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.showsCursor = true
+        if #available(macOS 13.0, *) {
+            config.capturesAudio = false
+        }
+
+        scStream = SCStream(filter: filter, configuration: config, delegate: self)
+        try scStream?.addStreamOutput(self, type: .screen, sampleHandlerQueue: DispatchQueue(label: "com.syncflow.screencapture"))
+        try await scStream?.startCapture()
+
+        await MainActor.run {
+            self.isScreenSharing = true
+            self.selectedWindow = window
+            self.selectedDisplay = nil
+        }
+
+        print("[ScreenCapture] Started sharing window: \(window.title ?? "Unknown")")
     }
 
     // MARK: - Stop Screen Sharing
 
     func stopSharing() async {
+        if let stream = scStream {
+            try? await stream.stopCapture()
+            scStream = nil
+        }
+
+        rtcVideoTrack?.isEnabled = false
+        rtcVideoTrack = nil
+        rtcVideoSource = nil
+        dummyCapturer = nil
+
         await MainActor.run {
             isScreenSharing = false
             selectedDisplay = nil
@@ -110,10 +203,42 @@ class ScreenCaptureService: NSObject, ObservableObject {
         print("[ScreenCapture] Stopped screen sharing")
     }
 
-    // MARK: - Get Video Track (Disabled)
+    // MARK: - Get Video Track
 
-    func getVideoTrack() -> Any? {
-        return nil
+    func getVideoTrack() -> RTCVideoTrack? {
+        return rtcVideoTrack
+    }
+
+    // MARK: - Quality Presets
+
+    enum QualityPreset {
+        case low       // 480p @ 10fps
+        case balanced  // 720p @ 15fps
+        case high      // 1080p @ 30fps
+
+        var width: Int {
+            switch self {
+            case .low: return 854
+            case .balanced: return 1280
+            case .high: return 1920
+            }
+        }
+
+        var height: Int {
+            switch self {
+            case .low: return 480
+            case .balanced: return 720
+            case .high: return 1080
+            }
+        }
+
+        var fps: Int {
+            switch self {
+            case .low: return 10
+            case .balanced: return 15
+            case .high: return 30
+            }
+        }
     }
 
     // MARK: - Error
@@ -121,13 +246,16 @@ class ScreenCaptureService: NSObject, ObservableObject {
     enum ScreenCaptureError: Error, LocalizedError {
         case notSupported
         case permissionDenied
+        case captureStartFailed
 
         var errorDescription: String? {
             switch self {
             case .notSupported:
-                return "Screen sharing is not available in VPS mode (WebRTC removed)"
+                return "Screen sharing is not supported on this system"
             case .permissionDenied:
                 return "Screen recording permission denied"
+            case .captureStartFailed:
+                return "Failed to start screen capture"
             }
         }
     }
@@ -145,16 +273,40 @@ extension ScreenCaptureService: SCStreamDelegate {
     }
 }
 
+// MARK: - SCStreamOutput
+
+@available(macOS 12.3, *)
+extension ScreenCaptureService: SCStreamOutput {
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen else { return }
+        guard let capturer = dummyCapturer else { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        let timeStampNs = Int64(CMTimeGetSeconds(timestamp) * 1_000_000_000)
+
+        let rtcPixelBuffer = RTCCVPixelBuffer(pixelBuffer: pixelBuffer)
+        let videoFrame = RTCVideoFrame(
+            buffer: rtcPixelBuffer,
+            rotation: ._0,
+            timeStampNs: timeStampNs
+        )
+
+        // Feed frame to RTCVideoSource via the delegate pattern
+        rtcVideoSource?.capturer(capturer, didCapture: videoFrame)
+    }
+}
+
 // MARK: - Screen Share Picker View
 
 @available(macOS 12.3, *)
 struct ScreenSharePicker: View {
     @ObservedObject var screenCaptureService: ScreenCaptureService
-    let onSelect: () -> Void
+    let onSelectDisplay: (SCDisplay) -> Void
+    let onSelectWindow: (SCWindow) -> Void
     let onCancel: () -> Void
 
     @State private var selectedTab = 0
-    @State private var showError = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -175,37 +327,91 @@ struct ScreenSharePicker: View {
 
             Divider()
 
-            // VPS Mode Notice
-            VStack(spacing: 16) {
-                Image(systemName: "rectangle.on.rectangle.slash")
-                    .font(.system(size: 60))
-                    .foregroundColor(.secondary)
+            if !screenCaptureService.hasPermission {
+                // Permission required
+                VStack(spacing: 16) {
+                    Image(systemName: "lock.shield")
+                        .font(.system(size: 50))
+                        .foregroundColor(.secondary)
 
-                Text("Screen Sharing Not Available")
-                    .font(.title3)
-                    .fontWeight(.semibold)
+                    Text("Screen Recording Permission Required")
+                        .font(.title3)
+                        .fontWeight(.semibold)
 
-                Text("Screen sharing requires WebRTC, which has been disabled in VPS mode.")
-                    .font(.body)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal)
+                    Text("Grant Screen Recording permission in System Settings to share your screen.")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .padding(.horizontal)
+
+                    Button("Open System Settings") {
+                        screenCaptureService.requestPermission()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                // Tab picker: Displays vs Windows
+                Picker("", selection: $selectedTab) {
+                    Text("Displays").tag(0)
+                    Text("Windows").tag(1)
+                }
+                .pickerStyle(.segmented)
+                .padding()
+
+                ScrollView {
+                    if selectedTab == 0 {
+                        // Displays
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 200))], spacing: 12) {
+                            ForEach(screenCaptureService.availableDisplays, id: \.displayID) { display in
+                                DisplayPreviewCard(
+                                    display: display,
+                                    isSelected: screenCaptureService.selectedDisplay?.displayID == display.displayID,
+                                    onSelect: { onSelectDisplay(display) }
+                                )
+                            }
+                        }
+                        .padding()
+                    } else {
+                        // Windows
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 200))], spacing: 12) {
+                            ForEach(screenCaptureService.availableWindows, id: \.windowID) { window in
+                                WindowPreviewCard(
+                                    window: window,
+                                    isSelected: false,
+                                    onSelect: { onSelectWindow(window) }
+                                )
+                            }
+                        }
+                        .padding()
+
+                        if screenCaptureService.availableWindows.isEmpty {
+                            Text("No windows available")
+                                .foregroundColor(.secondary)
+                                .padding()
+                        }
+                    }
+                }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             Divider()
 
             // Footer
             HStack {
+                Button("Refresh") {
+                    Task { await screenCaptureService.refreshAvailableContent() }
+                }
                 Spacer()
-                Button("Close") {
+                Button("Cancel") {
                     onCancel()
                 }
-                .buttonStyle(.borderedProminent)
             }
             .padding()
         }
-        .frame(width: 400, height: 300)
+        .frame(width: 500, height: 400)
+        .onAppear {
+            Task { await screenCaptureService.refreshAvailableContent() }
+        }
     }
 }
 
@@ -218,7 +424,6 @@ struct DisplayPreviewCard: View {
     var body: some View {
         Button(action: onSelect) {
             VStack(spacing: 8) {
-                // Display preview placeholder
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Color.gray.opacity(0.2))
                     .aspectRatio(16/10, contentMode: .fit)
@@ -257,7 +462,6 @@ struct WindowPreviewCard: View {
     var body: some View {
         Button(action: onSelect) {
             VStack(spacing: 8) {
-                // Window preview placeholder
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Color.gray.opacity(0.2))
                     .aspectRatio(16/10, contentMode: .fit)

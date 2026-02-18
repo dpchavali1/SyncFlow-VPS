@@ -68,6 +68,15 @@ class SyncFlowCallManager(context: Context) {
     private val _videoEffect = MutableStateFlow(VideoEffect.NONE)
     val videoEffect: StateFlow<VideoEffect> = _videoEffect.asStateFlow()
 
+    // Screen sharing
+    private val _isScreenSharing = MutableStateFlow(false)
+    val isScreenSharing: StateFlow<Boolean> = _isScreenSharing.asStateFlow()
+
+    private val _screenShareTrack = MutableStateFlow<VideoTrack?>(null)
+    val screenShareTrack: StateFlow<VideoTrack?> = _screenShareTrack.asStateFlow()
+
+    private var screenShareManager: ScreenShareManager? = null
+
     // Coroutine scope
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
@@ -119,7 +128,8 @@ class SyncFlowCallManager(context: Context) {
                     putExtra(SyncFlowCallService.EXTRA_CALL_ID, callId)
                     putExtra(SyncFlowCallService.EXTRA_CALLER_NAME, callerName)
                     putExtra(SyncFlowCallService.EXTRA_CALLER_PHONE, callerId)
-                    putExtra(SyncFlowCallService.EXTRA_IS_VIDEO, callType == "video")
+                    putExtra(SyncFlowCallService.EXTRA_IS_VIDEO, callType == "video" || callType == "screen_share")
+                    putExtra("is_screen_share", callType == "screen_share")
                 }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     context.startForegroundService(intent)
@@ -758,7 +768,14 @@ class SyncFlowCallManager(context: Context) {
                     Log.d(TAG, "onTrack: kind=${track.kind()}, id=${track.id()}, enabled=${track.enabled()}")
                     if (track is VideoTrack) {
                         track.setEnabled(true)
-                        scope.launch { _remoteVideoTrackFlow.value = track }
+                        scope.launch {
+                            // Route screen share tracks to screenShareTrack, camera to remoteVideoTrack
+                            if (track.id() == "screen0") {
+                                _screenShareTrack.value = track
+                            } else {
+                                _remoteVideoTrackFlow.value = track
+                            }
+                        }
                     } else if (track is AudioTrack) {
                         track.setEnabled(true)
                     }
@@ -905,6 +922,9 @@ class SyncFlowCallManager(context: Context) {
     }
 
     private fun cleanupWebRTC() {
+        // Phase 0: Stop screen share if active
+        stopScreenShare()
+
         // Phase 1: Stop capture immediately
         try { videoCapturer?.stopCapture() } catch (_: Exception) {}
 
@@ -950,6 +970,97 @@ class SyncFlowCallManager(context: Context) {
             try { textureHelper?.dispose() } catch (e: Exception) { Log.w(TAG, "textureHelper dispose: ${e.message}") }
             try { pc?.close() } catch (e: Exception) { Log.w(TAG, "pc close: ${e.message}") }
         }, "WebRTC-Cleanup").start()
+    }
+
+    // ==================== Screen Sharing ====================
+
+    /**
+     * Start screen sharing during an active call or as standalone.
+     * @param resultCode Activity.RESULT_OK from MediaProjection consent
+     * @param data Intent data from MediaProjection consent
+     * @param width Capture width
+     * @param height Capture height
+     * @param fps Frames per second
+     */
+    suspend fun startScreenShare(resultCode: Int, data: Intent, width: Int = 720, height: Int = 1280, fps: Int = 15) {
+        val factory = peerConnectionFactory ?: return
+        val egl = eglBase ?: return
+
+        screenShareManager = ScreenShareManager(context, egl, factory)
+        val track = screenShareManager?.startCapture(resultCode, data, width, height, fps) ?: return
+
+        if (peerConnection != null) {
+            // Active call — add screen track to existing PeerConnection
+            peerConnection?.addTrack(track, listOf("screen_stream"))
+            Log.d(TAG, "Screen share track added to existing PeerConnection")
+        } else {
+            // Standalone screen share — create a new call with callType = screen_share
+            try {
+                _callState.value = CallState.Initializing
+                isCallInitiator = true
+                iceRestartAttempted = false
+                processedIceCandidates.clear()
+
+                val response = vpsClient.createSyncFlowCall(
+                    calleeId = currentToDevice ?: return,
+                    calleeName = "Screen Share",
+                    callType = "screen_share"
+                )
+                val callId = response["callId"]?.toString() ?: throw Exception("No call ID")
+                currentCallId = callId
+
+                val call = SyncFlowCall(
+                    id = callId,
+                    callerId = vpsClient.userId ?: "",
+                    callerName = "Me",
+                    callerPlatform = "android",
+                    calleeId = currentToDevice ?: "",
+                    calleeName = "Screen Share",
+                    calleePlatform = "unknown",
+                    callType = SyncFlowCall.CallType.VIDEO,
+                    status = SyncFlowCall.CallStatus.RINGING,
+                    startedAt = System.currentTimeMillis()
+                )
+                _currentCall.value = call
+
+                val turnCreds = vpsClient.getTurnCredentials()
+                val iceServers = parseIceServers(turnCreds)
+                createPeerConnection(iceServers, false) // no camera video
+                peerConnection?.addTrack(track, listOf("screen_stream"))
+
+                val offer = createOfferSuspend()
+                setLocalDescriptionSuspend(offer)
+                vpsClient.sendSignal(
+                    callId = callId,
+                    signalType = "offer",
+                    signalData = mapOf("sdp" to offer.description, "type" to offer.type.canonicalForm()),
+                    toDevice = currentToDevice
+                )
+                _callState.value = CallState.Ringing
+                startRingingTimeout()
+                startAnswerPolling(callId)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start standalone screen share", e)
+                screenShareManager?.stopCapture()
+                screenShareManager = null
+                _callState.value = CallState.Failed(e.message ?: "Screen share failed")
+                return
+            }
+        }
+
+        _isScreenSharing.value = true
+        Log.d(TAG, "Screen sharing started")
+    }
+
+    /**
+     * Stop screen sharing. Removes track from PeerConnection and releases capture.
+     */
+    fun stopScreenShare() {
+        screenShareManager?.stopCapture()
+        screenShareManager = null
+        _isScreenSharing.value = false
+        _screenShareTrack.value = null
+        Log.d(TAG, "Screen sharing stopped")
     }
 
     // ==================== Controls ====================

@@ -9,6 +9,7 @@ import Foundation
 import Combine
 import AVFoundation
 import WebRTC
+import ScreenCaptureKit
 
 // MARK: - SyncFlowCallManager
 
@@ -88,7 +89,7 @@ class SyncFlowCallManager: NSObject, ObservableObject {
 
     // MARK: - WebRTC Properties
 
-    private static let factory: RTCPeerConnectionFactory = {
+    static let factory: RTCPeerConnectionFactory = {
         RTCInitializeSSL()
         let encoderFactory = RTCDefaultVideoEncoderFactory()
         let decoderFactory = RTCDefaultVideoDecoderFactory()
@@ -198,7 +199,7 @@ class SyncFlowCallManager: NSObject, ObservableObject {
             callerName: callerName,
             callerPhone: nil,
             callerPlatform: callerPlatform,
-            isVideo: callType == "video"
+            isVideo: callType == "video" || callType == "screen_share"
         )
     }
 
@@ -547,12 +548,68 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         videoEffect = effect
     }
 
-    func startScreenSharing() async throws {
-        throw CallError.notSupported
+    /// Start screen sharing with a display, adding the track to the existing PeerConnection
+    /// or creating a standalone screen share call.
+    @available(macOS 12.3, *)
+    func startScreenSharing(display: SCDisplay, screenCaptureService: ScreenCaptureService) async throws {
+        let factory = SyncFlowCallManager.factory
+
+        try await screenCaptureService.startSharingDisplay(display, factory: factory)
+
+        guard let screenTrack = screenCaptureService.getVideoTrack() else {
+            throw CallError.connectionFailed
+        }
+
+        if let pc = peerConnection {
+            // Active call: add screen track to existing PeerConnection
+            pc.add(screenTrack, streamIds: [ScreenCaptureService.screenStreamId])
+            print("[SyncFlowCallManager] Screen share track added to active call")
+        } else {
+            // Standalone screen share: create a new call
+            let vps = VPSService.shared
+            await MainActor.run {
+                callState = .initializing
+                isEndingCall = false
+            }
+            isCallInitiator = true
+            iceRestartAttempted = false
+            processedIceCandidates.removeAll()
+
+            let callResult = try await vps.createSyncFlowCall(
+                calleeId: "", // Will be set via UI selection
+                calleeName: "Screen Share",
+                callType: "screen_share"
+            )
+            guard let callId = callResult["callId"] ?? callResult["id"] else {
+                throw CallError.connectionFailed
+            }
+            currentCallId = callId
+
+            let turnCreds = try await vps.getTurnCredentials()
+            let iceServers = parseIceServers(from: turnCreds)
+            try await createPeerConnection(iceServers: iceServers, isVideo: false)
+            peerConnection?.add(screenTrack, streamIds: [ScreenCaptureService.screenStreamId])
+
+            let offer = try await createOffer()
+            let offerData: [String: Any] = ["sdp": offer.sdp, "type": RTCSessionDescription.string(for: offer.type)]
+            try await vps.sendSignal(callId: callId, signalType: "offer", signalData: offerData)
+            await MainActor.run { callState = .ringing }
+            startRingingTimeout()
+            startAnswerPolling(callId: callId)
+        }
+
+        await MainActor.run {
+            isScreenSharing = true
+        }
     }
 
-    func stopScreenSharing() {
-        isScreenSharing = false
+    @available(macOS 12.3, *)
+    func stopScreenSharing(screenCaptureService: ScreenCaptureService) async {
+        await screenCaptureService.stopSharing()
+        await MainActor.run {
+            isScreenSharing = false
+            screenShareTrack = nil
+        }
     }
 
     func updateDeviceStatus(userId: String, online: Bool) async throws {
@@ -1020,7 +1077,12 @@ extension SyncFlowCallManager: RTCPeerConnectionDelegate {
         if let videoTrack = rtpReceiver.track as? RTCVideoTrack {
             DispatchQueue.main.async { [weak self] in
                 videoTrack.isEnabled = true
-                self?.remoteVideoTrack = videoTrack
+                // Route screen share tracks to screenShareTrack, camera to remoteVideoTrack
+                if videoTrack.trackId == ScreenCaptureService.screenTrackId {
+                    self?.screenShareTrack = videoTrack
+                } else {
+                    self?.remoteVideoTrack = videoTrack
+                }
             }
         } else if let audioTrack = rtpReceiver.track as? RTCAudioTrack {
             DispatchQueue.main.async { [weak self] in

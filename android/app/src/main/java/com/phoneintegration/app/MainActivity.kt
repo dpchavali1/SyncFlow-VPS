@@ -349,6 +349,47 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
+     * Launcher for MediaProjection consent dialog (screen sharing).
+     * On approval, starts SyncFlowCallService with ACTION_START_SCREEN_SHARE.
+     */
+    val screenShareLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == RESULT_OK && result.data != null) {
+            android.util.Log.d("MainActivity", "MediaProjection consent granted")
+            val serviceIntent = Intent(this, SyncFlowCallService::class.java).apply {
+                action = SyncFlowCallService.ACTION_START_SCREEN_SHARE
+                putExtra(SyncFlowCallService.EXTRA_SCREEN_SHARE_RESULT_CODE, result.resultCode)
+                putExtra("screen_share_data", result.data)
+                // Target device is stored temporarily when user clicks Share Screen
+                putExtra(SyncFlowCallService.EXTRA_CALLEE_DEVICE_ID, screenShareTargetDevice)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+        } else {
+            android.util.Log.d("MainActivity", "MediaProjection consent denied")
+        }
+    }
+
+    /** Target device for the screen share session, set before launching consent dialog */
+    var screenShareTargetDevice: String? = null
+
+    /**
+     * Launch the MediaProjection consent dialog to start screen sharing.
+     * @param targetDevice The device ID to share the screen with
+     */
+    fun requestScreenShare(targetDevice: String? = null) {
+        screenShareTargetDevice = targetDevice
+        val mediaProjectionManager = getSystemService(
+            android.content.Context.MEDIA_PROJECTION_SERVICE
+        ) as android.media.projection.MediaProjectionManager
+        screenShareLauncher.launch(mediaProjectionManager.createScreenCaptureIntent())
+    }
+
+    /**
      * Request exemption from battery optimization to ensure reliable background operation
      * This allows the app to run in background without being killed by Doze mode
      */
