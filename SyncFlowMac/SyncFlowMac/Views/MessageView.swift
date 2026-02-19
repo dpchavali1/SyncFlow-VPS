@@ -3430,160 +3430,199 @@ struct ComposeBar: View {
     @State private var isHoveringSchedule = false
     @State private var showScheduleSheet = false
 
+    /// SMS segment info computed from current message text.
+    private var smsInfo: SMSSegmentInfo {
+        SMSValidation.analyze(messageText)
+    }
+
+    /// Color for the segment counter based on how close to the limit.
+    private var segmentCounterColor: Color {
+        let count = messageText.count
+        if count >= SMSValidation.maxMessageLength {
+            return SyncFlowColors.error
+        } else if count >= Int(Double(SMSValidation.maxMessageLength) * 0.8) {
+            return SyncFlowColors.warning
+        }
+        return SyncFlowColors.textSecondary
+    }
+
     var body: some View {
-        HStack(spacing: 8) {
-            // Left action buttons group
-            HStack(spacing: 0) {
-                // Attachment button
-                ComposeActionButton(
-                    icon: hasAttachment ? "photo.fill" : "plus",
-                    isActive: hasAttachment,
-                    isHovered: $isHoveringAttachment,
-                    action: { onAttachmentTap?() },
-                    help: "Add photo or video"
-                )
-
-                // Templates button
-                ComposeActionButton(
-                    icon: "text.badge.star",
-                    isActive: showTemplates,
-                    isHovered: $isHoveringTemplates,
-                    action: { showTemplates.toggle() },
-                    help: "Message Templates"
-                )
-
-                // Emoji picker button
-                ComposeActionButton(
-                    icon: "face.smiling",
-                    isActive: false,
-                    isHovered: $isHoveringEmoji,
-                    action: { NSApp.orderFrontCharacterPalette(nil) },
-                    help: "Emoji & Symbols"
-                )
-            }
-            .padding(4)
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(SyncFlowColors.glassBackground)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(SyncFlowColors.glassBorder, lineWidth: 0.5)
-            )
-
-            // Text input area
+        VStack(spacing: 0) {
             HStack(spacing: 8) {
-                ZStack(alignment: .leading) {
-                    // Placeholder
-                    if messageText.isEmpty {
-                        Text(hasAttachment ? "Add a caption..." : "Message")
-                            .font(.system(size: 14))
-                            .foregroundColor(.secondary.opacity(0.7))
-                            .padding(.leading, 4)
-                    }
-
-                    // Text editor
-                    TextEditor(text: $messageText)
-                        .focused($isTextFieldFocused)
-                        .font(.system(size: 14))
-                        .frame(minHeight: 20, maxHeight: 80)
-                        .scrollContentBackground(.hidden)
-                        .padding(.vertical, 4)
-                }
-
-                // Microphone button (shows when no text)
-                if messageText.isEmpty && !hasAttachment {
-                    MicrophoneButton(audioRecorder: audioRecorder) {
-                        onMicrophoneTap?()
-                    }
-                }
-            }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(SyncFlowColors.glassBackground)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .strokeBorder(
-                        isTextFieldFocused ? SyncFlowColors.primary.opacity(0.5) : SyncFlowColors.glassBorder,
-                        lineWidth: isTextFieldFocused ? 1.5 : 1
+                // Left action buttons group
+                HStack(spacing: 0) {
+                    // Attachment button
+                    ComposeActionButton(
+                        icon: hasAttachment ? "photo.fill" : "plus",
+                        isActive: hasAttachment,
+                        isHovered: $isHoveringAttachment,
+                        action: { onAttachmentTap?() },
+                        help: "Add photo or video"
                     )
-            )
-            .shadow(
-                color: isTextFieldFocused ? SyncFlowColors.glowPrimary : Color.clear,
-                radius: isTextFieldFocused ? 6 : 0
-            )
-            .animation(SFAnimations.snappy, value: isTextFieldFocused)
 
-            // Schedule button (only show if onSchedule is provided and there's text)
-            if onSchedule != nil && canSend {
-                Button {
-                    showScheduleSheet = true
-                } label: {
-                    Image(systemName: "clock")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(isHoveringSchedule ? .accentColor : .secondary)
-                        .frame(width: 32, height: 32)
-                        .background(
-                            Circle()
-                                .fill(isHoveringSchedule ? Color.accentColor.opacity(0.1) : Color.clear)
-                        )
-                }
-                .buttonStyle(.plain)
-                .help("Schedule message for later")
-                .onHover { hovering in
-                    withAnimation(.easeInOut(duration: 0.12)) {
-                        isHoveringSchedule = hovering
-                    }
-                }
-            }
+                    // Templates button
+                    ComposeActionButton(
+                        icon: "text.badge.star",
+                        isActive: showTemplates,
+                        isHovered: $isHoveringTemplates,
+                        action: { showTemplates.toggle() },
+                        help: "Message Templates"
+                    )
 
-            // Send button
-            Button {
-                Task {
-                    await onSend()
+                    // Emoji picker button
+                    ComposeActionButton(
+                        icon: "face.smiling",
+                        isActive: false,
+                        isHovered: $isHoveringEmoji,
+                        action: { NSApp.orderFrontCharacterPalette(nil) },
+                        help: "Emoji & Symbols"
+                    )
                 }
-            } label: {
-                Group {
-                    if isSending {
-                        ProgressView()
-                            .scaleEffect(0.6)
-                            .frame(width: 16, height: 16)
-                    } else {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 14, weight: .semibold))
-                    }
-                }
-                .foregroundColor(.white)
-                .frame(width: 32, height: 32)
+                .padding(4)
                 .background(
-                    Circle()
-                        .fill(
-                            canSend ?
-                            LinearGradient(
-                                colors: [Color.accentColor, Color.accentColor.opacity(0.8)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            ) :
-                            LinearGradient(
-                                colors: [Color.gray.opacity(0.4), Color.gray.opacity(0.3)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(SyncFlowColors.glassBackground)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(SyncFlowColors.glassBorder, lineWidth: 0.5)
+                )
+
+                // Text input area
+                HStack(spacing: 8) {
+                    ZStack(alignment: .leading) {
+                        // Placeholder
+                        if messageText.isEmpty {
+                            Text(hasAttachment ? "Add a caption..." : "Message")
+                                .font(.system(size: 14))
+                                .foregroundColor(.secondary.opacity(0.7))
+                                .padding(.leading, 4)
+                        }
+
+                        // Text editor
+                        TextEditor(text: $messageText)
+                            .focused($isTextFieldFocused)
+                            .font(.system(size: 14))
+                            .frame(minHeight: 20, maxHeight: 80)
+                            .scrollContentBackground(.hidden)
+                            .padding(.vertical, 4)
+                            .onChange(of: messageText) { _, newValue in
+                                if newValue.count > SMSValidation.maxMessageLength {
+                                    messageText = String(newValue.prefix(SMSValidation.maxMessageLength))
+                                }
+                            }
+                    }
+
+                    // Microphone button (shows when no text)
+                    if messageText.isEmpty && !hasAttachment {
+                        MicrophoneButton(audioRecorder: audioRecorder) {
+                            onMicrophoneTap?()
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .fill(SyncFlowColors.glassBackground)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .strokeBorder(
+                            isTextFieldFocused ? SyncFlowColors.primary.opacity(0.5) : SyncFlowColors.glassBorder,
+                            lineWidth: isTextFieldFocused ? 1.5 : 1
                         )
                 )
                 .shadow(
-                    color: canSend ? Color.accentColor.opacity(0.3) : Color.clear,
-                    radius: 4,
-                    x: 0,
-                    y: 2
+                    color: isTextFieldFocused ? SyncFlowColors.glowPrimary : Color.clear,
+                    radius: isTextFieldFocused ? 6 : 0
                 )
+                .animation(SFAnimations.snappy, value: isTextFieldFocused)
+
+                // Schedule button (only show if onSchedule is provided and there's text)
+                if onSchedule != nil && canSend {
+                    Button {
+                        showScheduleSheet = true
+                    } label: {
+                        Image(systemName: "clock")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(isHoveringSchedule ? .accentColor : .secondary)
+                            .frame(width: 32, height: 32)
+                            .background(
+                                Circle()
+                                    .fill(isHoveringSchedule ? Color.accentColor.opacity(0.1) : Color.clear)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help("Schedule message for later")
+                    .onHover { hovering in
+                        withAnimation(.easeInOut(duration: 0.12)) {
+                            isHoveringSchedule = hovering
+                        }
+                    }
+                }
+
+                // Send button
+                Button {
+                    Task {
+                        await onSend()
+                    }
+                } label: {
+                    Group {
+                        if isSending {
+                            ProgressView()
+                                .scaleEffect(0.6)
+                                .frame(width: 16, height: 16)
+                        } else {
+                            Image(systemName: "arrow.up")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                    }
+                    .foregroundColor(.white)
+                    .frame(width: 32, height: 32)
+                    .background(
+                        Circle()
+                            .fill(
+                                canSend ?
+                                LinearGradient(
+                                    colors: [Color.accentColor, Color.accentColor.opacity(0.8)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ) :
+                                LinearGradient(
+                                    colors: [Color.gray.opacity(0.4), Color.gray.opacity(0.3)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                    )
+                    .shadow(
+                        color: canSend ? Color.accentColor.opacity(0.3) : Color.clear,
+                        radius: 4,
+                        x: 0,
+                        y: 2
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSend || isSending)
+                .animation(SFAnimations.snappy, value: canSend)
             }
-            .buttonStyle(.plain)
-            .disabled(!canSend || isSending)
-            .animation(SFAnimations.snappy, value: canSend)
+
+            // SMS segment counter — shown when typing
+            if !messageText.isEmpty {
+                HStack {
+                    Spacer()
+
+                    let info = smsInfo
+                    Text("\(info.charCount)/\(SMSValidation.maxMessageLength) · \(info.segments) segment\(info.segments == 1 ? "" : "s")\(info.encoding == .unicode ? " · Unicode" : "")")
+                        .font(SyncFlowTypography.labelSmall)
+                        .foregroundColor(segmentCounterColor)
+                }
+                .padding(.horizontal, 4)
+                .padding(.top, 4)
+                .transition(.opacity)
+                .animation(SFAnimations.snappy, value: messageText.isEmpty)
+            }
         }
         .sheet(isPresented: $showScheduleSheet) {
             ScheduleMessageSheet(
@@ -3618,7 +3657,8 @@ struct ComposeBar: View {
 
     private var canSend: Bool {
         let hasText = !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        return hasText || hasAttachment
+        let withinLimit = messageText.count <= SMSValidation.maxMessageLength
+        return (hasText || hasAttachment) && withinLimit
     }
 }
 
