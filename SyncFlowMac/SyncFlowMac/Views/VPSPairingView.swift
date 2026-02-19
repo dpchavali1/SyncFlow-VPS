@@ -12,25 +12,31 @@ import CoreImage.CIFilterBuiltins
 struct VPSPairingView: View {
     @StateObject private var viewModel = VPSPairingViewModel()
 
+    @State private var statusPulse = false
+
     var body: some View {
         VStack(spacing: 24) {
-            // Header
+            // Header with rounded typography
             Text("Pair with Android Phone")
-                .font(.title)
-                .fontWeight(.bold)
+                .font(SyncFlowTypography.headlineMedium)
 
             Text("Scan this QR code with your SyncFlow Android app to connect")
-                .font(.body)
-                .foregroundColor(.secondary)
+                .font(SyncFlowTypography.bodyMedium)
+                .foregroundColor(SyncFlowColors.textSecondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
 
-            // QR Code
+            // QR Code in glass card
             ZStack {
                 if viewModel.isLoading {
-                    ProgressView()
-                        .scaleEffect(1.5)
-                        .frame(width: 280, height: 280)
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .scaleEffect(1.5)
+                        Text("Generating pairing code...")
+                            .font(SyncFlowTypography.bodySmall)
+                            .foregroundColor(SyncFlowColors.textSecondary)
+                    }
+                    .frame(width: 280, height: 280)
                 } else if let qrImage = viewModel.qrImage {
                     Image(nsImage: qrImage)
                         .interpolation(.none)
@@ -38,63 +44,76 @@ struct VPSPairingView: View {
                         .scaledToFit()
                         .frame(width: 280, height: 280)
                         .background(Color.white)
-                        .cornerRadius(8)
+                        .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd))
                 } else if let error = viewModel.errorMessage {
-                    VStack(spacing: 12) {
-                        Image(systemName: "exclamationmark.triangle")
-                            .font(.system(size: 40))
-                            .foregroundColor(.orange)
-                        Text(error)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .multilineTextAlignment(.center)
-                        Button("Retry") {
-                            viewModel.startPairing()
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
+                    SFErrorState(
+                        message: error,
+                        onRetry: { viewModel.startPairing() }
+                    )
                     .frame(width: 280, height: 280)
                 }
             }
             .frame(width: 300, height: 300)
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(12)
+            .background(SyncFlowColors.glassBackground)
+            .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusPremium))
+            .overlay(
+                RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusPremium)
+                    .strokeBorder(SyncFlowColors.glassBorder, lineWidth: 1)
+            )
+            .shadow(color: Color.black.opacity(0.08), radius: SyncFlowSpacing.shadowLg, x: 0, y: 4)
 
-            // Status
+            // Status with animated pulse
             HStack(spacing: 8) {
                 if viewModel.isPairing {
-                    Circle()
-                        .fill(Color.orange)
-                        .frame(width: 8, height: 8)
+                    ZStack {
+                        Circle()
+                            .fill(Color.orange.opacity(0.3))
+                            .frame(width: 16, height: 16)
+                            .scaleEffect(statusPulse ? 1.5 : 1.0)
+                            .opacity(statusPulse ? 0 : 0.6)
+                        Circle()
+                            .fill(Color.orange)
+                            .frame(width: 8, height: 8)
+                    }
+                    .onAppear {
+                        withAnimation(.easeInOut(duration: 1.5).repeatForever(autoreverses: false)) {
+                            statusPulse = true
+                        }
+                    }
                     Text("Waiting for phone to scan...")
-                        .foregroundColor(.secondary)
+                        .foregroundColor(SyncFlowColors.textSecondary)
                 } else if viewModel.isPaired {
-                    Circle()
-                        .fill(Color.green)
-                        .frame(width: 8, height: 8)
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(SyncFlowColors.success)
+                        .transition(.scale.combined(with: .opacity))
                     Text("Connected!")
-                        .foregroundColor(.green)
+                        .foregroundColor(SyncFlowColors.success)
+                        .fontWeight(.medium)
                 }
             }
-            .font(.caption)
+            .font(SyncFlowTypography.bodySmall)
+            .animation(SFAnimations.bouncy, value: viewModel.isPaired)
 
-            // Instructions
-            VStack(alignment: .leading, spacing: 8) {
+            // Instructions in glass card
+            VStack(alignment: .leading, spacing: 10) {
                 InstructionRow(number: 1, text: "Open SyncFlow on your Android phone")
                 InstructionRow(number: 2, text: "Go to Settings > Pair Device")
                 InstructionRow(number: 3, text: "Tap 'Scan QR Code' and scan this code")
             }
-            .padding()
-            .background(Color(NSColor.controlBackgroundColor))
-            .cornerRadius(8)
+            .padding(SyncFlowSpacing.md)
+            .background(SyncFlowColors.glassBackground)
+            .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd))
+            .overlay(
+                RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd)
+                    .strokeBorder(SyncFlowColors.glassBorder, lineWidth: 1)
+            )
 
             Spacer()
 
             // Cancel button
-            Button("Cancel") {
+            SFSecondaryButton(text: "Cancel") {
                 viewModel.cancelPairing()
             }
-            .buttonStyle(.bordered)
         }
         .padding(24)
         .frame(width: 450, height: 650)
@@ -115,15 +134,22 @@ struct InstructionRow: View {
         HStack(alignment: .top, spacing: 12) {
             ZStack {
                 Circle()
-                    .fill(Color.accentColor)
+                    .fill(
+                        LinearGradient(
+                            colors: [SyncFlowColors.primary, SyncFlowColors.primary.opacity(0.7)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
                     .frame(width: 24, height: 24)
+                    .shadow(color: SyncFlowColors.primary.opacity(0.3), radius: 3, x: 0, y: 1)
                 Text("\(number)")
-                    .font(.caption)
-                    .fontWeight(.bold)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
                     .foregroundColor(.white)
             }
             Text(text)
-                .font(.body)
+                .font(SyncFlowTypography.bodyMedium)
+                .foregroundColor(SyncFlowColors.textPrimary)
         }
     }
 }

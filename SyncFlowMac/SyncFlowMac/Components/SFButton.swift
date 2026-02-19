@@ -89,16 +89,29 @@ struct SFPrimaryButton: View {
             .padding(.horizontal, size.horizontalPadding)
             .frame(height: size.height)
             .background(backgroundColor)
-            .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusSm))
+            .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd))
         }
         .buttonStyle(.plain)
         .disabled(isDisabled || isLoading)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.1)) {
+            withAnimation(hovering ? SFAnimations.hoverIn : SFAnimations.hoverOut) {
                 isHovered = hovering
             }
         }
-        .scaleEffect(isPressed ? 0.97 : 1.0)
+        .scaleEffect(isPressed ? SFAnimations.pressScale : 1.0)
+        .animation(SFAnimations.micro, value: isPressed)
+        .overlay(
+            RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd)
+                .fill(SyncFlowColors.glowPrimary)
+                .blur(radius: 8)
+                .opacity(isHovered && !isDisabled ? 0.5 : 0)
+                .allowsHitTesting(false)
+        )
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in if !isDisabled && !isLoading { isPressed = true } }
+                .onEnded { _ in isPressed = false }
+        )
     }
 
     private var backgroundColor: Color {
@@ -152,12 +165,12 @@ struct SFSecondaryButton: View {
             .foregroundColor(isDisabled ? SyncFlowColors.textDisabled : SyncFlowColors.primary)
             .padding(.horizontal, size.horizontalPadding)
             .frame(height: size.height)
-            .background(isHovered ? SyncFlowColors.primary.opacity(0.08) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusSm))
+            .background(isHovered ? SyncFlowColors.glassBackground : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd))
             .overlay(
-                RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusSm)
+                RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd)
                     .strokeBorder(
-                        isDisabled ? SyncFlowColors.border.opacity(0.5) : SyncFlowColors.border,
+                        isDisabled ? SyncFlowColors.glassBorder.opacity(0.5) : SyncFlowColors.glassBorder,
                         lineWidth: 1
                     )
             )
@@ -165,7 +178,7 @@ struct SFSecondaryButton: View {
         .buttonStyle(.plain)
         .disabled(isDisabled || isLoading)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.1)) {
+            withAnimation(SFAnimations.snappy) {
                 isHovered = hovering
             }
         }
@@ -214,7 +227,7 @@ struct SFGhostButton: View {
         .buttonStyle(.plain)
         .disabled(isDisabled)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.1)) {
+            withAnimation(SFAnimations.hoverIn) {
                 isHovered = hovering
             }
         }
@@ -256,7 +269,7 @@ struct SFDangerButton: View {
         .buttonStyle(.plain)
         .disabled(isDisabled)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.1)) {
+            withAnimation(SFAnimations.hoverIn) {
                 isHovered = hovering
             }
         }
@@ -272,8 +285,10 @@ struct SFIconButton: View {
     var iconSize: CGFloat = SyncFlowSpacing.iconMd
     var tint: Color = SyncFlowColors.textPrimary
     var isDisabled: Bool = false
+    var helpText: String? = nil
 
     @State private var isHovered = false
+    @State private var isPressed = false
 
     var body: some View {
         Button(action: {
@@ -285,13 +300,20 @@ struct SFIconButton: View {
                 .font(.system(size: iconSize, weight: .regular))
                 .foregroundColor(isDisabled ? SyncFlowColors.textDisabled : tint)
                 .frame(width: size, height: size)
-                .background(isHovered ? SyncFlowColors.hover : Color.clear)
+                .background(isHovered ? SyncFlowColors.hoverWarm : Color.clear)
                 .clipShape(Circle())
+                .scaleEffect(isPressed ? 0.9 : 1.0)
         }
         .buttonStyle(.plain)
         .disabled(isDisabled)
+        .animation(SFAnimations.micro, value: isPressed)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in if !isDisabled { isPressed = true } }
+                .onEnded { _ in isPressed = false }
+        )
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.1)) {
+            withAnimation(SFAnimations.hoverIn) {
                 isHovered = hovering
             }
         }
@@ -326,13 +348,20 @@ struct SFFab: View {
             .padding(.horizontal, text != nil ? 20 : 16)
             .frame(height: SyncFlowSpacing.fabSize)
             .frame(minWidth: SyncFlowSpacing.fabSize)
-            .background(isHovered ? backgroundColor.opacity(0.9) : backgroundColor)
+            .background(
+                LinearGradient(
+                    colors: [backgroundColor, backgroundColor.opacity(0.85)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
             .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusLg))
-            .shadow(color: .black.opacity(0.15), radius: isHovered ? 8 : 6, x: 0, y: isHovered ? 4 : 3)
+            .shadow(color: backgroundColor.opacity(0.3), radius: isHovered ? 12 : 8, x: 0, y: isHovered ? 6 : 4)
+            .scaleEffect(isHovered ? SFAnimations.hoverScale : 1.0)
         }
         .buttonStyle(.plain)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.15)) {
+            withAnimation(SFAnimations.bouncy) {
                 isHovered = hovering
             }
         }

@@ -249,10 +249,10 @@ struct SettingsOverviewView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Settings")
-                .font(.system(size: 28, weight: .semibold, design: .rounded))
+                .font(SyncFlowTypography.headlineMedium)
             Text("Manage sync, notifications, appearance, and your account in one place.")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
+                .font(SyncFlowTypography.bodyMedium)
+                .foregroundColor(SyncFlowColors.textSecondary)
         }
     }
 

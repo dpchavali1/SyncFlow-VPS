@@ -315,15 +315,15 @@ struct DealsHeader: View {
                     .foregroundColor(SyncFlowColors.textSecondary)
             }
 
-            // Search field
+            // Pill-shaped search field
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .foregroundColor(SyncFlowColors.textSecondary)
-                    .font(.system(size: 13))
+                    .font(.system(size: 13, weight: .medium))
 
                 TextField("Search deals...", text: $searchText)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 13))
+                    .font(SyncFlowTypography.bodySmall)
 
                 if !searchText.isEmpty {
                     Button(action: { searchText = "" }) {
@@ -336,8 +336,12 @@ struct DealsHeader: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(SyncFlowColors.surfaceSecondary)
-            .cornerRadius(8)
+            .background(SyncFlowColors.glassBackground)
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .strokeBorder(SyncFlowColors.glassBorder, lineWidth: 1)
+            )
             .frame(width: 200)
 
             // Refresh button

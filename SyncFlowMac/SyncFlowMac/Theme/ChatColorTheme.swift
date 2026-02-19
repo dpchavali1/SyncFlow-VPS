@@ -12,6 +12,8 @@ enum ChatColorTheme: String, CaseIterable, Identifiable {
     case graphite
     case aurora
     case midnight
+    case ocean
+    case rosegold
 
     var id: String { rawValue }
 
@@ -21,6 +23,8 @@ enum ChatColorTheme: String, CaseIterable, Identifiable {
         case .graphite: return "Graphite Gray"
         case .aurora: return "Aurora Green"
         case .midnight: return "Midnight Glow"
+        case .ocean: return "Deep Ocean"
+        case .rosegold: return "Rose Gold"
         }
     }
 
@@ -34,6 +38,10 @@ enum ChatColorTheme: String, CaseIterable, Identifiable {
             return Color(hex: "30D158")
         case .midnight:
             return Color(hex: "5AC8FA")
+        case .ocean:
+            return Color(hex: "0066FF")
+        case .rosegold:
+            return Color(hex: "B76E79")
         }
     }
 
@@ -47,6 +55,10 @@ enum ChatColorTheme: String, CaseIterable, Identifiable {
             return scheme == .dark ? Color(hex: "1C1C1E") : Color(hex: "E7F9EA")
         case .midnight:
             return scheme == .dark ? Color(hex: "111111") : Color(hex: "ECEFFF")
+        case .ocean:
+            return scheme == .dark ? Color(hex: "1A1A2E") : Color(hex: "EEF2FF")
+        case .rosegold:
+            return scheme == .dark ? Color(hex: "2A1F25") : Color(hex: "FFF0F5")
         }
     }
 
@@ -67,6 +79,10 @@ enum ChatColorTheme: String, CaseIterable, Identifiable {
             return [Color(hex: "30D158"), Color(hex: "4CD964")]
         case .midnight:
             return [Color(hex: "5AC8FA"), Color(hex: "0A84FF")]
+        case .ocean:
+            return [Color(hex: "0066FF"), Color(hex: "00AAFF")]
+        case .rosegold:
+            return [Color(hex: "B76E79"), Color(hex: "E8A0BF")]
         }
     }
 }

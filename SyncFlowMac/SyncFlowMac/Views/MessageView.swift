@@ -286,7 +286,7 @@ struct MessageView: View {
             )
 
             Rectangle()
-                .fill(SyncFlowColors.divider)
+                .fill(SyncFlowColors.glassBorder)
                 .frame(height: 1)
 
             // Search bar
@@ -1284,8 +1284,8 @@ struct ConversationHeader: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(spacing: 6) {
                     Text(conversation.displayName)
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(.primary)
+                        .font(SyncFlowTypography.titleMedium)
+                        .foregroundColor(SyncFlowColors.textPrimary)
 
                     if isPinned {
                         Image(systemName: "pin.fill")
@@ -1296,15 +1296,15 @@ struct ConversationHeader: View {
 
                 HStack(spacing: 4) {
                     Text(conversation.address)
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
+                        .font(SyncFlowTypography.bodySmall)
+                        .foregroundColor(SyncFlowColors.textSecondary)
 
                     if allAddresses.count > 1 {
                         Text("•")
-                            .foregroundColor(.secondary.opacity(0.5))
+                            .foregroundColor(SyncFlowColors.textTertiary)
                         Text("\(allAddresses.count) numbers")
-                            .font(.system(size: 11))
-                            .foregroundColor(.secondary.opacity(0.8))
+                            .font(SyncFlowTypography.labelSmall)
+                            .foregroundColor(SyncFlowColors.textSecondary)
                     }
                 }
             }
@@ -1365,8 +1365,12 @@ struct ConversationHeader: View {
             }
             .padding(.horizontal, 4)
             .padding(.vertical, 4)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(SyncFlowColors.glassBackground)
+            .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd, style: .continuous)
+                    .strokeBorder(SyncFlowColors.glassBorder, lineWidth: 0.5)
+            )
 
             // Call buttons
             HStack(spacing: 2) {
@@ -1424,8 +1428,12 @@ struct ConversationHeader: View {
             }
             .padding(.horizontal, 4)
             .padding(.vertical, 4)
-            .background(Color(nsColor: .controlBackgroundColor).opacity(0.6))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background(SyncFlowColors.glassBackground)
+            .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd, style: .continuous)
+                    .strokeBorder(SyncFlowColors.glassBorder, lineWidth: 0.5)
+            )
 
             // More options menu
             Menu {
@@ -1463,13 +1471,13 @@ struct ConversationHeader: View {
         .padding(.vertical, 12)
         .background(
             ZStack {
-                SyncFlowColors.chatHeaderBackground
+                VisualEffectBackground(material: .headerView, blendingMode: .withinWindow)
 
-                // Subtle bottom border
+                // Subtle bottom border using glass border
                 VStack {
                     Spacer()
                     Rectangle()
-                        .fill(Color.primary.opacity(0.06))
+                        .fill(SyncFlowColors.glassBorder)
                         .frame(height: 1)
                 }
             }
@@ -3456,7 +3464,11 @@ struct ComposeBar: View {
             .padding(4)
             .background(
                 RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor))
+                    .fill(SyncFlowColors.glassBackground)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(SyncFlowColors.glassBorder, lineWidth: 0.5)
             )
 
             // Text input area
@@ -3490,15 +3502,20 @@ struct ComposeBar: View {
             .padding(.vertical, 8)
             .background(
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor))
+                    .fill(SyncFlowColors.glassBackground)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .stroke(
-                        isTextFieldFocused ? Color.accentColor.opacity(0.5) : Color.clear,
-                        lineWidth: 1.5
+                    .strokeBorder(
+                        isTextFieldFocused ? SyncFlowColors.primary.opacity(0.5) : SyncFlowColors.glassBorder,
+                        lineWidth: isTextFieldFocused ? 1.5 : 1
                     )
             )
+            .shadow(
+                color: isTextFieldFocused ? SyncFlowColors.glowPrimary : Color.clear,
+                radius: isTextFieldFocused ? 6 : 0
+            )
+            .animation(SFAnimations.snappy, value: isTextFieldFocused)
 
             // Schedule button (only show if onSchedule is provided and there's text)
             if onSchedule != nil && canSend {
@@ -3566,7 +3583,7 @@ struct ComposeBar: View {
             }
             .buttonStyle(.plain)
             .disabled(!canSend || isSending)
-            .animation(.easeInOut(duration: 0.15), value: canSend)
+            .animation(SFAnimations.snappy, value: canSend)
         }
         .sheet(isPresented: $showScheduleSheet) {
             ScheduleMessageSheet(
@@ -3583,16 +3600,16 @@ struct ComposeBar: View {
         .padding(.vertical, 12)
         .background(
             ZStack {
-                // Top border
+                // Top glass border
                 VStack {
                     Rectangle()
-                        .fill(Color.primary.opacity(0.06))
+                        .fill(SyncFlowColors.glassBorder)
                         .frame(height: 1)
                     Spacer()
                 }
 
-                // Background
-                Color(nsColor: .windowBackgroundColor)
+                // Material background
+                VisualEffectBackground(material: .headerView, blendingMode: .withinWindow)
             }
         )
         .onAppear {
@@ -3622,13 +3639,13 @@ private struct ComposeActionButton: View {
                 .frame(width: 30, height: 30)
                 .background(
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(isHovered || isActive ? Color.primary.opacity(0.08) : Color.clear)
+                        .fill(isHovered || isActive ? SyncFlowColors.hoverWarm : Color.clear)
                 )
         }
         .buttonStyle(.plain)
         .help(help)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.12)) {
+            withAnimation(SFAnimations.hoverIn) {
                 isHovered = hovering
             }
         }
@@ -3718,13 +3735,13 @@ struct ReplyPreviewBar: View {
                     .frame(width: 20, height: 20)
                     .background(
                         Circle()
-                            .fill(isHoveringClose ? Color.primary.opacity(0.1) : Color.clear)
+                            .fill(isHoveringClose ? SyncFlowColors.hoverWarm : Color.clear)
                     )
             }
             .buttonStyle(.plain)
             .help("Cancel reply")
             .onHover { hovering in
-                withAnimation(.easeInOut(duration: 0.12)) {
+                withAnimation(SFAnimations.hoverIn) {
                     isHoveringClose = hovering
                 }
             }
@@ -3732,11 +3749,16 @@ struct ReplyPreviewBar: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(nsColor: .controlBackgroundColor))
-                .shadow(color: Color.black.opacity(0.04), radius: 2, x: 0, y: 1)
+            RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusLg, style: .continuous)
+                .fill(SyncFlowColors.glassBackground)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusLg, style: .continuous)
+                .strokeBorder(SyncFlowColors.glassBorder, lineWidth: 0.5)
         )
         .padding(.horizontal, 16)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+        .animation(SFAnimations.snappy, value: true)
     }
 }
 

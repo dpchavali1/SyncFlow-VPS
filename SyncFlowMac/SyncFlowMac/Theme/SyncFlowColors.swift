@@ -419,6 +419,57 @@ struct SyncFlowColors {
     }
 
     // ============================================
+    // Premium Surface Colors
+    // ============================================
+
+    /// Glass-like surface for premium cards and overlays
+    static var glassBackground: Color {
+        currentColorScheme == .dark
+            ? Color.white.opacity(0.06)
+            : Color.white.opacity(0.7)
+    }
+
+    /// Subtle glass border for floating elements
+    static var glassBorder: Color {
+        currentColorScheme == .dark
+            ? Color.white.opacity(0.1)
+            : Color.black.opacity(0.06)
+    }
+
+    /// Warm highlight for active/selected states
+    static var warmHighlight: Color {
+        currentColorScheme == .dark
+            ? Color(hex: "0A84FF").opacity(0.15)
+            : Color(hex: "0A84FF").opacity(0.10)
+    }
+
+    /// Subtle inner shadow color for inset surfaces
+    static var innerShadow: Color {
+        currentColorScheme == .dark
+            ? Color.black.opacity(0.3)
+            : Color.black.opacity(0.05)
+    }
+
+    /// Warmer hover state than default
+    static var hoverWarm: Color {
+        currentColorScheme == .dark
+            ? Color.white.opacity(0.10)
+            : Color.black.opacity(0.05)
+    }
+
+    /// Glow color for focused/active elements
+    static var glowPrimary: Color {
+        primary.opacity(0.3)
+    }
+
+    /// SideRail pill indicator / selected tab background
+    static var sideRailSelection: Color {
+        currentColorScheme == .dark
+            ? primary.opacity(0.20)
+            : primary.opacity(0.12)
+    }
+
+    // ============================================
     // Helper
     // ============================================
 
@@ -454,6 +505,6 @@ extension View {
         self
             .background(SyncFlowColors.surfaceElevated)
             .cornerRadius(SyncFlowSpacing.radiusMd)
-            .shadow(color: .black.opacity(0.08), radius: 4, x: 0, y: 2)
+            .shadow(color: .black.opacity(0.05), radius: 6, x: 0, y: 3)
     }
 }

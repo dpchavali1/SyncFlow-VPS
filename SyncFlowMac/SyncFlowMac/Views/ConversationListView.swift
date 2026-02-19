@@ -223,15 +223,17 @@ struct ConversationListView: View {
             // =================================================================
             VStack(spacing: 8) {
                 HStack(spacing: 8) {
-                    // Search field
-                    HStack {
+                    // Pill-shaped search field with glass background
+                    HStack(spacing: 8) {
                         Image(systemName: "magnifyingglass")
-                            .foregroundColor(.secondary)
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(isSearchFieldFocused ? SyncFlowColors.primary : SyncFlowColors.textSecondary)
                         TextField("Search conversations", text: $searchText)
                             .textFieldStyle(.plain)
+                            .font(SyncFlowTypography.bodyMedium)
                             .focused($isSearchFieldFocused)
                             .onChange(of: isSearchFieldFocused) { _, focused in
-                                withAnimation(.easeInOut(duration: 0.2)) {
+                                withAnimation(SFAnimations.snappy) {
                                     isSearchActive = focused
                                 }
                             }
@@ -244,14 +246,27 @@ struct ConversationListView: View {
                                 selectedLabelId = nil
                             }) {
                                 Image(systemName: "xmark.circle.fill")
-                                    .foregroundColor(.secondary)
+                                    .foregroundColor(SyncFlowColors.textSecondary)
                             }
                             .buttonStyle(.plain)
                         }
                     }
-                    .padding(8)
-                    .background(SyncFlowColors.surfaceSecondary)
-                    .cornerRadius(8)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(SyncFlowColors.glassBackground)
+                    .clipShape(Capsule())
+                    .overlay(
+                        Capsule()
+                            .strokeBorder(
+                                isSearchFieldFocused ? SyncFlowColors.primary.opacity(0.5) : SyncFlowColors.glassBorder,
+                                lineWidth: isSearchFieldFocused ? 1.5 : 1
+                            )
+                    )
+                    .shadow(
+                        color: isSearchFieldFocused ? SyncFlowColors.glowPrimary : Color.clear,
+                        radius: isSearchFieldFocused ? 6 : 0
+                    )
+                    .animation(SFAnimations.snappy, value: isSearchFieldFocused)
 
                     // Selection mode toggle button (compact icon)
                     if !isSelectionMode {
@@ -644,7 +659,7 @@ struct ConversationListView: View {
                 }
             }
         }
-        .background(SyncFlowColors.sidebarBackground)
+        .materialBackground(.sidebar)
         .alert("Delete Selected Conversations?", isPresented: $showBulkDeleteConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Delete", role: .destructive) {
