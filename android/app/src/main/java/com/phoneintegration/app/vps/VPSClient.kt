@@ -546,7 +546,7 @@ class VPSClient private constructor(
         val withScheme = if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
             trimmed
         } else {
-            "http://$trimmed"
+            "https://$trimmed"
         }
         return withScheme.trimEnd('/')
     }

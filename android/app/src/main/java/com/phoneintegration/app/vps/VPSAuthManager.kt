@@ -343,7 +343,7 @@ class VPSAuthManager private constructor(private val context: Context) {
     suspend fun completePairing(token: String): Result<Unit> {
         return try {
             vpsClient.completePairing(token)
-            Log.i(TAG, "Pairing completed for token: $token")
+            Log.i(TAG, "Pairing completed for token: ${token.take(8)}...")
             Result.success(Unit)
         } catch (e: Exception) {
             Log.e(TAG, "Pairing completion failed", e)

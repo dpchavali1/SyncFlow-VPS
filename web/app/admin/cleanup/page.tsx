@@ -2117,7 +2117,7 @@ export default function AdminCleanupPage() {
     }
 
     // VPS mode: skip Firebase auth, use localStorage session directly
-    const isVPS = !!process.env.NEXT_PUBLIC_VPS_URL || !!localStorage.getItem('vps_user_id') || true
+    const isVPS = !!process.env.NEXT_PUBLIC_VPS_URL || !!localStorage.getItem('vps_user_id')
     if (isVPS) {
       console.log('AdminCleanupPage: VPS mode - using session auth')
       const storedUserId = localStorage.getItem('syncflow_user_id') || localStorage.getItem('vps_user_id') || 'admin'

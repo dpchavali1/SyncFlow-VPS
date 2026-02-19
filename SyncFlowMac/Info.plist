@@ -42,8 +42,9 @@
 	<!-- App Transport Security -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
-		<!-- Allow HTTP for VPS mode - IP addresses don't work reliably with exception domains -->
 		<key>NSAllowsArbitraryLoads</key>
+		<false/>
+		<key>NSAllowsLocalNetworking</key>
 		<true/>
 		<key>NSExceptionDomains</key>
 		<dict>

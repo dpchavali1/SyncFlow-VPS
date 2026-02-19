@@ -316,7 +316,7 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
      */
     suspend fun completePairing(token: String): Result<Unit> {
         return try {
-            Log.d(TAG, "Completing pairing for token: $token")
+            Log.d(TAG, "Completing pairing for token: ${token.take(8)}...")
             vpsAuthManager.completePairing(token)
 
             // Mark that we have paired devices
@@ -342,7 +342,7 @@ class UnifiedIdentityManager private constructor(private val context: Context) {
      */
     suspend fun redeemPairingToken(token: String, deviceName: String, platform: String): Result<DeviceInfo> {
         return try {
-            Log.d(TAG, "Redeeming pairing token: $token")
+            Log.d(TAG, "Redeeming pairing token: ${token.take(8)}...")
 
             val result = vpsAuthManager.redeemPairing(token, deviceName, platform)
             if (result.isSuccess) {

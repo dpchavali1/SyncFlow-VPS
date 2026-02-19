@@ -3,7 +3,7 @@
 const isDev = process.env.NODE_ENV === 'development'
 const scriptSrc = isDev
   ? "'self' 'unsafe-inline' 'unsafe-eval' https://pagead2.googlesyndication.com https://www.googletagservices.com https://www.google.com"
-  : "'self' 'unsafe-inline' https://pagead2.googlesyndication.com https://www.googletagservices.com https://www.google.com"
+  : "'self' https://pagead2.googlesyndication.com https://www.googletagservices.com https://www.google.com"
 
 const contentSecurityPolicy = [
   "default-src 'self'",
@@ -14,7 +14,7 @@ const contentSecurityPolicy = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https://firebasestorage.googleapis.com https://*.googleusercontent.com https://pagead2.googlesyndication.com https://*.doubleclick.net https://*.google.com https://*.r2.cloudflarestorage.com",
   "font-src 'self' data:",
-  "connect-src 'self' https://*.firebaseio.com wss://*.firebaseio.com https://*.googleapis.com https://firebasestorage.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com https://*.cloudfunctions.net http://api.sfweb.app https://api.sfweb.app ws://api.sfweb.app wss://api.sfweb.app http://5.78.188.206 ws://5.78.188.206:3001 http://localhost:4000 ws://localhost:4001 https://pagead2.googlesyndication.com https://*.google.com https://*.doubleclick.net https://*.r2.cloudflarestorage.com",
+  `connect-src 'self' https://*.firebaseio.com wss://*.firebaseio.com https://*.googleapis.com https://firebasestorage.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com https://*.cloudfunctions.net https://api.sfweb.app wss://api.sfweb.app https://pagead2.googlesyndication.com https://*.google.com https://*.doubleclick.net https://*.r2.cloudflarestorage.com${isDev ? ' http://localhost:4000 ws://localhost:4001 http://5.78.188.206 ws://5.78.188.206:3001' : ''}`,
   "media-src 'self' blob: https://firebasestorage.googleapis.com",
   "worker-src 'self' blob:",
   "frame-src 'self' https://pagead2.googlesyndication.com https://*.doubleclick.net https://www.google.com https://tpc.googlesyndication.com",
