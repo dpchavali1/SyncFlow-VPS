@@ -37,31 +37,48 @@ struct CallHistoryView: View {
         VStack(spacing: 0) {
             // Filter bar
             HStack(spacing: 12) {
-                // Dial button
+                // Dial button with gradient
                 Button(action: { appState.showDialer = true }) {
                     Image(systemName: "phone.badge.plus")
-                        .font(.title3)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(width: 36, height: 36)
+                        .background(
+                            LinearGradient(
+                                colors: [SyncFlowColors.success, SyncFlowColors.success.opacity(0.8)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd))
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
                 .help("Make a call")
 
-                // Search bar
-                HStack {
+                // Pill-shaped search bar
+                HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
-                        .foregroundColor(.secondary)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(SyncFlowColors.textSecondary)
                     TextField("Search calls", text: $searchText)
                         .textFieldStyle(.plain)
+                        .font(SyncFlowTypography.bodyMedium)
                     if !searchText.isEmpty {
                         Button(action: { searchText = "" }) {
                             Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.secondary)
+                                .foregroundColor(SyncFlowColors.textSecondary)
                         }
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(8)
-                .background(Color(nsColor: .controlBackgroundColor))
-                .cornerRadius(8)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(SyncFlowColors.glassBackground)
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .strokeBorder(SyncFlowColors.glassBorder, lineWidth: 1)
+                )
 
                 // Type filters
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -177,9 +194,13 @@ struct FilterChip: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(isSelected ? Color.accentColor : Color(nsColor: .controlBackgroundColor))
-            .foregroundColor(isSelected ? .white : .primary)
-            .cornerRadius(16)
+            .background(isSelected ? SyncFlowColors.primary : SyncFlowColors.glassBackground)
+            .foregroundColor(isSelected ? .white : SyncFlowColors.textPrimary)
+            .clipShape(Capsule())
+            .overlay(
+                Capsule()
+                    .strokeBorder(isSelected ? Color.clear : SyncFlowColors.glassBorder, lineWidth: 1)
+            )
         }
         .buttonStyle(.plain)
     }
@@ -255,9 +276,14 @@ struct CallHistoryRow: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(isHovered ? Color(nsColor: .controlBackgroundColor) : Color.clear)
+        .background(
+            RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd)
+                .fill(isHovered ? SyncFlowColors.hoverWarm : Color.clear)
+        )
         .onHover { hovering in
-            isHovered = hovering
+            withAnimation(SFAnimations.hoverIn) {
+                isHovered = hovering
+            }
         }
     }
 

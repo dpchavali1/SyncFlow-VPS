@@ -520,6 +520,9 @@ enum AppTab: String, CaseIterable {
     case callHistory = "Calls"    /// Call log and dialer
     case deals = "Deals"          /// Promotional deals and offers
 
+    /// Human-readable display name for tooltips and accessibility
+    var displayName: String { rawValue }
+
     /// SF Symbol icon name for each tab
     var icon: String {
         switch self {

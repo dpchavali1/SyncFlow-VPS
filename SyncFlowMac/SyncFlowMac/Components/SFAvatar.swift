@@ -77,6 +77,9 @@ struct SFAvatar: View {
     var backgroundColor: Color = SyncFlowColors.primaryContainer
     var textColor: Color = SyncFlowColors.primary
 
+    @State private var pulseScale: CGFloat = 1.0
+    @State private var pulseOpacity: Double = 0.6
+
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             // Main avatar
@@ -105,24 +108,51 @@ struct SFAvatar: View {
                 initialsView
             }
 
-            // Status indicator
+            // Status indicator with pulse for online
             if status != .none {
-                Circle()
-                    .fill(Color(nsColor: .windowBackgroundColor))
-                    .frame(width: size.badgeSize + 4, height: size.badgeSize + 4)
-                    .overlay(
+                ZStack {
+                    // Pulse ring for online status
+                    if status == .online {
                         Circle()
-                            .fill(status.color)
-                            .frame(width: size.badgeSize, height: size.badgeSize)
-                    )
-                    .offset(x: 2, y: 2)
+                            .fill(status.color.opacity(0.4))
+                            .frame(width: size.badgeSize + 6, height: size.badgeSize + 6)
+                            .scaleEffect(pulseScale)
+                            .opacity(pulseOpacity)
+                            .onAppear { startPulse() }
+                    }
+
+                    Circle()
+                        .fill(Color(nsColor: .windowBackgroundColor))
+                        .frame(width: size.badgeSize + 4, height: size.badgeSize + 4)
+                        .overlay(
+                            Circle()
+                                .fill(status.color)
+                                .frame(width: size.badgeSize, height: size.badgeSize)
+                        )
+                }
+                .offset(x: 2, y: 2)
             }
+        }
+    }
+
+    private func startPulse() {
+        withAnimation(
+            Animation.easeInOut(duration: 1.5).repeatForever(autoreverses: true)
+        ) {
+            pulseScale = 1.5
+            pulseOpacity = 0.0
         }
     }
 
     private var initialsView: some View {
         Circle()
-            .fill(backgroundColor)
+            .fill(
+                LinearGradient(
+                    colors: [backgroundColor, backgroundColor.opacity(0.7)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+            )
             .frame(width: size.size, height: size.size)
             .overlay(
                 Text(initials)

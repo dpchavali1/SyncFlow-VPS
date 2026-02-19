@@ -33,11 +33,13 @@ struct SFFilterChip: View {
             .frame(height: SyncFlowSpacing.chipHeight)
             .background(backgroundColor)
             .clipShape(Capsule())
-            .overlay(borderOverlay)
+            .overlay(chipBorderOverlay)
+            .scaleEffect(isHovered ? 1.03 : 1.0)
         }
         .buttonStyle(.plain)
+        .animation(SFAnimations.snappy, value: selected)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.1)) {
+            withAnimation(SFAnimations.micro) {
                 isHovered = hovering
             }
         }
@@ -51,17 +53,17 @@ struct SFFilterChip: View {
         if selected {
             return SyncFlowColors.primary
         } else if isHovered {
-            return SyncFlowColors.hover
+            return SyncFlowColors.hoverWarm
         } else {
-            return SyncFlowColors.surfaceTertiary
+            return SyncFlowColors.glassBackground
         }
     }
 
     @ViewBuilder
-    private var borderOverlay: some View {
+    private var chipBorderOverlay: some View {
         if !selected {
             Capsule()
-                .strokeBorder(SyncFlowColors.border.opacity(0.5), lineWidth: 1)
+                .strokeBorder(SyncFlowColors.glassBorder, lineWidth: 1)
         }
     }
 }
@@ -81,7 +83,7 @@ struct SFFilterChipGroup: View {
                     icon: icons?[option],
                     selected: selected == option
                 ) {
-                    withAnimation(.easeInOut(duration: 0.15)) {
+                    withAnimation(SFAnimations.snappy) {
                         if selected == option {
                             selected = nil
                         } else {
@@ -109,7 +111,7 @@ struct SFMultiFilterChipGroup: View {
                     icon: icons?[option],
                     selected: selected.contains(option)
                 ) {
-                    withAnimation(.easeInOut(duration: 0.15)) {
+                    withAnimation(SFAnimations.snappy) {
                         if selected.contains(option) {
                             selected.remove(option)
                         } else {
@@ -158,7 +160,7 @@ struct SFDismissibleChip: View {
                 .strokeBorder(SyncFlowColors.border.opacity(0.5), lineWidth: 1)
         )
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.1)) {
+            withAnimation(SFAnimations.hoverIn) {
                 isHovered = hovering
             }
         }
@@ -204,7 +206,7 @@ struct SFInputChip: View {
                 .strokeBorder(SyncFlowColors.border.opacity(0.5), lineWidth: 1)
         )
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.1)) {
+            withAnimation(SFAnimations.hoverIn) {
                 isHovered = hovering
             }
         }
@@ -243,7 +245,7 @@ struct SFSuggestionChip: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.1)) {
+            withAnimation(SFAnimations.hoverIn) {
                 isHovered = hovering
             }
         }

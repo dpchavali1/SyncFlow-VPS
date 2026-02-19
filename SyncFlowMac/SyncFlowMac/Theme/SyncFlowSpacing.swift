@@ -194,6 +194,35 @@ struct SyncFlowSpacing {
     static let dialPadLetterSpacing: CGFloat = 2
 
     // ============================================
+    // Premium Layout Constants
+    // ============================================
+
+    static let sideRailWidth: CGFloat = 60       // Wider than previous 52
+    static let sideRailIconSize: CGFloat = 20
+    static let sideRailButtonSize: CGFloat = 40
+    static let sideRailPillWidth: CGFloat = 4    // Vertical pill indicator
+    static let sideRailPillHeight: CGFloat = 24
+
+    // ============================================
+    // Shadow System
+    // ============================================
+
+    static let shadowSm: CGFloat = 2
+    static let shadowMd: CGFloat = 6
+    static let shadowLg: CGFloat = 12
+    static let shadowXl: CGFloat = 20
+
+    // ============================================
+    // Premium Radius & Heights
+    // ============================================
+
+    /// Elevated radius for premium cards
+    static let radiusPremium: CGFloat = 14
+
+    /// Compose bar minimum height
+    static let composeBarMinHeight: CGFloat = 44
+
+    // ============================================
     // Animation Durations (seconds)
     // ============================================
 

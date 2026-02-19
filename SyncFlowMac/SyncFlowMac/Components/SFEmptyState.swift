@@ -68,9 +68,21 @@ struct SFEmptyState: View {
 
     var body: some View {
         VStack(spacing: SyncFlowSpacing.lg) {
-            Image(systemName: icon ?? type.icon)
-                .font(.system(size: 64, weight: .light))
-                .foregroundColor(iconColor)
+            // Icon in glass circle with floating animation
+            ZStack {
+                Circle()
+                    .fill(SyncFlowColors.glassBackground)
+                    .frame(width: 120, height: 120)
+                    .overlay(
+                        Circle()
+                            .strokeBorder(SyncFlowColors.glassBorder, lineWidth: 1)
+                    )
+
+                Image(systemName: icon ?? type.icon)
+                    .font(.system(size: 48, weight: .light))
+                    .foregroundColor(iconColor)
+            }
+            .floatingAnimation()
 
             VStack(spacing: SyncFlowSpacing.xs) {
                 Text(title ?? type.title)
@@ -227,8 +239,8 @@ struct SFSkeletonRow: View {
     private var skeletonGradient: LinearGradient {
         LinearGradient(
             colors: [
-                SyncFlowColors.surfaceTertiary.opacity(isAnimating ? 0.3 : 0.6),
-                SyncFlowColors.surfaceTertiary.opacity(isAnimating ? 0.6 : 0.3)
+                SyncFlowColors.glassBackground.opacity(isAnimating ? 0.3 : 0.6),
+                SyncFlowColors.glassBackground.opacity(isAnimating ? 0.6 : 0.3)
             ],
             startPoint: .leading,
             endPoint: .trailing

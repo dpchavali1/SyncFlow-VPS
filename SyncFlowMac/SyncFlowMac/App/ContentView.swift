@@ -270,8 +270,10 @@ struct MainView: View {
                 isSyncing: appState.isSyncing
             )
 
-            Divider()
-                .background(SyncFlowColors.divider)
+            // Subtle glass border instead of hard divider
+            Rectangle()
+                .fill(SyncFlowColors.glassBorder)
+                .frame(width: 1)
 
             VStack(spacing: 0) {
                 // Usage limit warning banner
@@ -474,23 +476,41 @@ struct SideRail: View {
     /// Whether to show checkmark after sync completes
     @State private var showSyncComplete = false
 
+    @State private var bottomButtonHovered: String? = nil
+
     var body: some View {
         VStack(spacing: 18) {
+            // New Message button with gradient circle
             Button(action: onNewMessage) {
-                Image(systemName: "square.and.pencil")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundColor(SyncFlowColors.primary)
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [SyncFlowColors.primary.opacity(0.15), SyncFlowColors.accentPurple.opacity(0.1)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: SyncFlowSpacing.sideRailButtonSize, height: SyncFlowSpacing.sideRailButtonSize)
+
+                    Image(systemName: "square.and.pencil")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(SyncFlowColors.primary)
+                }
             }
             .buttonStyle(.plain)
+            .help("New Message")
             .padding(.top, 14)
 
             Divider()
-                .background(SyncFlowColors.divider)
+                .opacity(0.5)
 
             ForEach(AppTab.allCases, id: \.self) { tab in
                 if tab == .deals {
                     // Prominent Deals button with gradient and animation
-                    Button(action: { selectedTab = tab }) {
+                    Button(action: {
+                        withAnimation(SFAnimations.snappy) { selectedTab = tab }
+                    }) {
                         ZStack {
                             // Animated glow effect
                             Circle()
@@ -507,8 +527,8 @@ struct SideRail: View {
                                 .opacity(dealsIconPulse ? 0.6 : 0.3)
 
                             // Icon with gradient
-                            Image(systemName: selectedTab == tab ? "tag.fill" : "tag.fill")
-                                .font(.system(size: 18, weight: .bold))
+                            Image(systemName: "tag.fill")
+                                .font(.system(size: SyncFlowSpacing.sideRailIconSize, weight: .bold))
                                 .foregroundStyle(
                                     LinearGradient(
                                         colors: [Color.orange, Color.pink],
@@ -516,9 +536,9 @@ struct SideRail: View {
                                         endPoint: .bottomTrailing
                                     )
                                 )
-                                .frame(width: 36, height: 36)
+                                .frame(width: SyncFlowSpacing.sideRailButtonSize, height: SyncFlowSpacing.sideRailButtonSize)
                                 .background(
-                                    Circle()
+                                    RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd)
                                         .fill(
                                             selectedTab == tab
                                                 ? LinearGradient(colors: [Color.orange.opacity(0.25), Color.pink.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing)
@@ -530,23 +550,39 @@ struct SideRail: View {
                     .buttonStyle(.plain)
                     .help("Discover Deals")
                     .onAppear {
-                        // Subtle pulse animation
                         withAnimation(.easeInOut(duration: 2).repeatForever(autoreverses: true)) {
                             dealsIconPulse = true
                         }
                     }
                 } else {
-                    Button(action: { selectedTab = tab }) {
-                        Image(systemName: tab.icon)
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundColor(selectedTab == tab ? SyncFlowColors.primary : SyncFlowColors.textSecondary)
-                            .frame(width: 36, height: 36)
-                            .background(
-                                Circle()
-                                    .fill(selectedTab == tab ? SyncFlowColors.primary.opacity(0.18) : Color.clear)
-                            )
+                    Button(action: {
+                        withAnimation(SFAnimations.snappy) { selectedTab = tab }
+                    }) {
+                        ZStack {
+                            // Pill selection indicator on leading edge
+                            HStack(spacing: 0) {
+                                if selectedTab == tab {
+                                    Capsule()
+                                        .fill(SyncFlowColors.primary)
+                                        .frame(width: SyncFlowSpacing.sideRailPillWidth, height: SyncFlowSpacing.sideRailPillHeight)
+                                        .transition(.scale(scale: 0.5, anchor: .leading).combined(with: .opacity))
+                                }
+                                Spacer()
+                            }
+                            .frame(width: SyncFlowSpacing.sideRailButtonSize)
+
+                            Image(systemName: tab.icon)
+                                .font(.system(size: SyncFlowSpacing.sideRailIconSize, weight: selectedTab == tab ? .bold : .medium))
+                                .foregroundColor(selectedTab == tab ? SyncFlowColors.primary : SyncFlowColors.textSecondary)
+                                .frame(width: SyncFlowSpacing.sideRailButtonSize, height: SyncFlowSpacing.sideRailButtonSize)
+                                .background(
+                                    RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd)
+                                        .fill(selectedTab == tab ? SyncFlowColors.sideRailSelection : Color.clear)
+                                )
+                        }
                     }
                     .buttonStyle(.plain)
+                    .help(tab.displayName)
                 }
             }
 
@@ -562,32 +598,38 @@ struct SideRail: View {
                         Image(systemName: "checkmark.circle.fill")
                             .font(.system(size: 16))
                             .foregroundColor(.green)
-                            .frame(width: 36, height: 36)
+                            .frame(width: SyncFlowSpacing.sideRailButtonSize, height: SyncFlowSpacing.sideRailButtonSize)
                             .transition(.scale.combined(with: .opacity))
                     } else {
                         Image(systemName: "arrow.triangle.2.circlepath")
                             .font(.system(size: 16))
                             .foregroundColor(isSyncing ? SyncFlowColors.primary : SyncFlowColors.textSecondary)
-                            .frame(width: 36, height: 36)
+                            .frame(width: SyncFlowSpacing.sideRailButtonSize, height: SyncFlowSpacing.sideRailButtonSize)
+                            .background(
+                                RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd)
+                                    .fill(bottomButtonHovered == "sync" ? SyncFlowColors.hoverWarm : Color.clear)
+                            )
                             .rotationEffect(.degrees(syncRotation))
                     }
                 }
                 .buttonStyle(.plain)
                 .help("Sync Now")
                 .disabled(isSyncing)
+                .onHover { hovering in
+                    withAnimation(SFAnimations.hoverIn) {
+                        bottomButtonHovered = hovering ? "sync" : (bottomButtonHovered == "sync" ? nil : bottomButtonHovered)
+                    }
+                }
                 .onChange(of: isSyncing) { newValue in
                     if newValue {
-                        // Start spinning
                         withAnimation(.linear(duration: 1).repeatForever(autoreverses: false)) {
                             syncRotation = 360
                         }
                     } else {
-                        // Stop spinning, show checkmark
                         syncRotation = 0
-                        withAnimation(.spring()) {
+                        withAnimation(SFAnimations.bouncy) {
                             showSyncComplete = true
                         }
-                        // Hide checkmark after 1.5s
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                             withAnimation(.easeOut) {
                                 showSyncComplete = false
@@ -603,15 +645,20 @@ struct SideRail: View {
                 Button(action: onScreenShare) {
                     Image(systemName: "rectangle.on.rectangle")
                         .font(.system(size: 16))
-                        .foregroundColor(SyncFlowColors.textSecondary)
-                        .frame(width: 36, height: 36)
+                        .foregroundColor(bottomButtonHovered == "screen" ? SyncFlowColors.primary : SyncFlowColors.textSecondary)
+                        .frame(width: SyncFlowSpacing.sideRailButtonSize, height: SyncFlowSpacing.sideRailButtonSize)
                         .background(
-                            Circle()
-                                .fill(Color.clear)
+                            RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd)
+                                .fill(bottomButtonHovered == "screen" ? SyncFlowColors.hoverWarm : Color.clear)
                         )
                 }
                 .buttonStyle(.plain)
                 .help("Share Screen")
+                .onHover { hovering in
+                    withAnimation(SFAnimations.hoverIn) {
+                        bottomButtonHovered = hovering ? "screen" : (bottomButtonHovered == "screen" ? nil : bottomButtonHovered)
+                    }
+                }
                 .padding(.bottom, 4)
             }
 
@@ -620,15 +667,20 @@ struct SideRail: View {
                 Button(action: onAIAssistant) {
                     Image(systemName: "sparkles")
                         .font(.system(size: 16))
-                        .foregroundColor(SyncFlowColors.textSecondary)
-                        .frame(width: 36, height: 36)
+                        .foregroundColor(bottomButtonHovered == "ai" ? SyncFlowColors.primary : SyncFlowColors.textSecondary)
+                        .frame(width: SyncFlowSpacing.sideRailButtonSize, height: SyncFlowSpacing.sideRailButtonSize)
                         .background(
-                            Circle()
-                                .fill(Color.clear)
+                            RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd)
+                                .fill(bottomButtonHovered == "ai" ? SyncFlowColors.hoverWarm : Color.clear)
                         )
                 }
                 .buttonStyle(.plain)
                 .help("AI Assistant (Cmd+Shift+A)")
+                .onHover { hovering in
+                    withAnimation(SFAnimations.hoverIn) {
+                        bottomButtonHovered = hovering ? "ai" : (bottomButtonHovered == "ai" ? nil : bottomButtonHovered)
+                    }
+                }
             }
 
             // Support Chat button
@@ -636,28 +688,44 @@ struct SideRail: View {
                 Button(action: onSupportChat) {
                     Image(systemName: "questionmark.bubble")
                         .font(.system(size: 16))
-                        .foregroundColor(SyncFlowColors.textSecondary)
-                        .frame(width: 36, height: 36)
+                        .foregroundColor(bottomButtonHovered == "support" ? SyncFlowColors.primary : SyncFlowColors.textSecondary)
+                        .frame(width: SyncFlowSpacing.sideRailButtonSize, height: SyncFlowSpacing.sideRailButtonSize)
                         .background(
-                            Circle()
-                                .fill(Color.clear)
+                            RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd)
+                                .fill(bottomButtonHovered == "support" ? SyncFlowColors.hoverWarm : Color.clear)
                         )
                 }
                 .buttonStyle(.plain)
                 .help("AI Support Chat")
+                .onHover { hovering in
+                    withAnimation(SFAnimations.hoverIn) {
+                        bottomButtonHovered = hovering ? "support" : (bottomButtonHovered == "support" ? nil : bottomButtonHovered)
+                    }
+                }
                 .padding(.bottom, 8)
             }
 
             SettingsLink {
                 Image(systemName: "gearshape")
                     .font(.system(size: 16))
-                    .foregroundColor(SyncFlowColors.textSecondary)
+                    .foregroundColor(bottomButtonHovered == "settings" ? SyncFlowColors.primary : SyncFlowColors.textSecondary)
+                    .frame(width: SyncFlowSpacing.sideRailButtonSize, height: SyncFlowSpacing.sideRailButtonSize)
+                    .background(
+                        RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd)
+                            .fill(bottomButtonHovered == "settings" ? SyncFlowColors.hoverWarm : Color.clear)
+                    )
             }
             .buttonStyle(.plain)
+            .help("Settings")
+            .onHover { hovering in
+                withAnimation(SFAnimations.hoverIn) {
+                    bottomButtonHovered = hovering ? "settings" : (bottomButtonHovered == "settings" ? nil : bottomButtonHovered)
+                }
+            }
             .padding(.bottom, 16)
         }
-        .frame(width: 52)
-        .background(SyncFlowColors.sidebarRailBackground)
+        .frame(width: SyncFlowSpacing.sideRailWidth)
+        .materialBackground(.sidebar)
     }
 }
 
@@ -803,20 +871,11 @@ struct SpamDetailView: View {
 /// Prompts user to select a conversation from the sidebar.
 struct EmptyStateView: View {
     var body: some View {
-        VStack(spacing: 20) {
-            Image(systemName: "message.fill")
-                .font(.system(size: 60))
-                .foregroundColor(.secondary)
-
-            Text("Select a conversation")
-                .font(.title2)
-                .foregroundColor(.secondary)
-
-            Text("Choose a conversation from the sidebar to view messages")
-                .font(.body)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-        }
+        SFEmptyState(
+            type: .noMessages,
+            title: "Select a Conversation",
+            message: "Choose a conversation from the sidebar to view messages"
+        )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(nsColor: .windowBackgroundColor))
     }
@@ -958,35 +1017,46 @@ struct UpgradeBanner: View {
         HStack(spacing: 16) {
             Image(systemName: "sparkles")
                 .font(.title2)
-                .foregroundColor(.blue)
+                .foregroundStyle(
+                    LinearGradient(
+                        colors: [SyncFlowColors.primary, SyncFlowColors.accentPurple],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("Upgrade to SyncFlow Pro")
-                    .font(.headline)
+                    .font(SyncFlowTypography.headlineSmall)
                 Text("Unlock photo sync, 1GB storage, and remove this banner")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                    .font(SyncFlowTypography.bodySmall)
+                    .foregroundColor(SyncFlowColors.textSecondary)
             }
 
             Spacer()
 
             Text("$4.99/mo")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
+                .font(SyncFlowTypography.bodySmall)
+                .foregroundColor(SyncFlowColors.textSecondary)
 
-            Button("Upgrade") {
+            SFPrimaryButton(text: "Upgrade") {
                 showPaywall = true
             }
-            .buttonStyle(.borderedProminent)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(
+        .background(.ultraThinMaterial)
+        .overlay(
             LinearGradient(
-                colors: [Color.blue.opacity(0.1), Color.purple.opacity(0.1)],
+                colors: [SyncFlowColors.primary.opacity(0.05), SyncFlowColors.accentPurple.opacity(0.05)],
                 startPoint: .leading,
                 endPoint: .trailing
             )
+        )
+        .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusPremium))
+        .overlay(
+            RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusPremium)
+                .strokeBorder(SyncFlowColors.glassBorder, lineWidth: 1)
         )
         .sheet(isPresented: $showPaywall) {
             PaywallView()

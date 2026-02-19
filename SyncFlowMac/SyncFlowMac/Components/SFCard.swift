@@ -14,13 +14,14 @@ enum SFCardVariant {
     case outlined   // Border outline
     case filled     // Solid background
     case flat       // No elevation, minimal styling
+    case glass      // Glass morphism with vibrancy
 }
 
 // MARK: - SFCard
 
 struct SFCard<Content: View>: View {
     var variant: SFCardVariant = .elevated
-    var cornerRadius: CGFloat = SyncFlowSpacing.radiusMd
+    var cornerRadius: CGFloat = SyncFlowSpacing.radiusPremium
     var onClick: (() -> Void)? = nil
     @ViewBuilder var content: () -> Content
 
@@ -30,6 +31,7 @@ struct SFCard<Content: View>: View {
     var body: some View {
         contentView
             .background(backgroundColor)
+            .background(variant == .glass ? AnyView(VisualEffectBackground(material: .popover, blendingMode: .withinWindow)) : AnyView(EmptyView()))
             .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
             .overlay(borderOverlay)
             .shadow(
@@ -38,14 +40,15 @@ struct SFCard<Content: View>: View {
                 x: 0,
                 y: shadowY
             )
+            .offset(y: variant == .elevated && isHovered ? -1 : 0)
             .onHover { hovering in
-                withAnimation(.easeInOut(duration: 0.15)) {
+                withAnimation(SFAnimations.snappy) {
                     isHovered = hovering
                 }
             }
             .onTapGesture {
                 if let onClick = onClick {
-                    withAnimation(.easeInOut(duration: 0.1)) {
+                    withAnimation(SFAnimations.micro) {
                         isPressed = true
                     }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
@@ -67,26 +70,36 @@ struct SFCard<Content: View>: View {
         case .elevated:
             return isHovered ? SyncFlowColors.surfaceElevated.opacity(0.95) : SyncFlowColors.surfaceElevated
         case .outlined:
-            return isHovered ? SyncFlowColors.hover : SyncFlowColors.surface
+            return isHovered ? SyncFlowColors.hoverWarm : SyncFlowColors.surface
         case .filled:
             return isHovered ? SyncFlowColors.surfaceTertiary.opacity(0.9) : SyncFlowColors.surfaceTertiary
         case .flat:
-            return isHovered ? SyncFlowColors.hover : .clear
+            return isHovered ? SyncFlowColors.hoverWarm : .clear
+        case .glass:
+            return SyncFlowColors.glassBackground
         }
     }
 
     @ViewBuilder
     private var borderOverlay: some View {
-        if variant == .outlined {
+        switch variant {
+        case .outlined:
             RoundedRectangle(cornerRadius: cornerRadius)
-                .strokeBorder(SyncFlowColors.border, lineWidth: 1)
+                .strokeBorder(SyncFlowColors.glassBorder, lineWidth: 1)
+        case .glass:
+            RoundedRectangle(cornerRadius: cornerRadius)
+                .strokeBorder(SyncFlowColors.glassBorder, lineWidth: 1)
+        default:
+            EmptyView()
         }
     }
 
     private var shadowColor: Color {
         switch variant {
         case .elevated:
-            return .black.opacity(0.08)
+            return .black.opacity(0.06)
+        case .glass:
+            return .black.opacity(0.04)
         default:
             return .clear
         }
@@ -95,7 +108,9 @@ struct SFCard<Content: View>: View {
     private var shadowRadius: CGFloat {
         switch variant {
         case .elevated:
-            return isHovered ? 6 : 4
+            return isHovered ? 10 : 6
+        case .glass:
+            return isHovered ? 8 : 4
         default:
             return 0
         }
@@ -104,6 +119,8 @@ struct SFCard<Content: View>: View {
     private var shadowY: CGFloat {
         switch variant {
         case .elevated:
+            return isHovered ? 4 : 2
+        case .glass:
             return isHovered ? 3 : 2
         default:
             return 0
@@ -115,7 +132,7 @@ struct SFCard<Content: View>: View {
 
 struct SFPaddedCard<Content: View>: View {
     var variant: SFCardVariant = .elevated
-    var cornerRadius: CGFloat = SyncFlowSpacing.radiusMd
+    var cornerRadius: CGFloat = SyncFlowSpacing.radiusPremium
     var padding: EdgeInsets = SyncFlowPadding.card
     var onClick: (() -> Void)? = nil
     @ViewBuilder var content: () -> Content
@@ -187,11 +204,11 @@ struct SFListCard<Content: View>: View {
     var body: some View {
         content()
             .background(
-                RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusSm)
-                    .fill(backgroundColor)
+                RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd)
+                    .fill(listCardBackgroundColor)
             )
             .onHover { hovering in
-                withAnimation(.easeInOut(duration: 0.1)) {
+                withAnimation(SFAnimations.micro) {
                     isHovered = hovering
                 }
             }
@@ -200,11 +217,11 @@ struct SFListCard<Content: View>: View {
             }
     }
 
-    private var backgroundColor: Color {
+    private var listCardBackgroundColor: Color {
         if selected {
-            return SyncFlowColors.primary.opacity(0.12)
+            return SyncFlowColors.warmHighlight
         } else if isHovered {
-            return SyncFlowColors.hover
+            return SyncFlowColors.hoverWarm
         } else {
             return .clear
         }

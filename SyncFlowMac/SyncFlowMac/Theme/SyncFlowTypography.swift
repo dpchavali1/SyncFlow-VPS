@@ -23,16 +23,16 @@ struct SyncFlowTypography {
     // Headline Styles - Screen headers
     // ============================================
 
-    static let headlineLarge = Font.system(size: 32, weight: .semibold, design: .default)
-    static let headlineMedium = Font.system(size: 28, weight: .semibold, design: .default)
-    static let headlineSmall = Font.system(size: 24, weight: .semibold, design: .default)
+    static let headlineLarge = Font.system(size: 32, weight: .semibold, design: .rounded)
+    static let headlineMedium = Font.system(size: 28, weight: .semibold, design: .rounded)
+    static let headlineSmall = Font.system(size: 24, weight: .semibold, design: .rounded)
 
     // ============================================
     // Title Styles - Section headers
     // ============================================
 
-    static let titleLarge = Font.system(size: 22, weight: .medium, design: .default)
-    static let titleMedium = Font.system(size: 16, weight: .medium, design: .default)
+    static let titleLarge = Font.system(size: 22, weight: .medium, design: .rounded)
+    static let titleMedium = Font.system(size: 16, weight: .medium, design: .rounded)
     static let titleSmall = Font.system(size: 14, weight: .medium, design: .default)
 
     // ============================================
@@ -91,6 +91,10 @@ struct SyncFlowTypography {
     // Dial pad
     static let dialPadNumber = Font.system(size: 32, weight: .regular, design: .rounded)
     static let dialPadLetters = Font.system(size: 10, weight: .regular, design: .default)
+
+    // Premium additions
+    static let sideRailTooltip = Font.system(size: 11, weight: .medium, design: .rounded)
+    static let composeBar = Font.system(size: 14, weight: .regular, design: .default)
 }
 
 // MARK: - Text Style Modifiers

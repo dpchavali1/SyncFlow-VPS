@@ -72,10 +72,23 @@ struct SFConversationRow: View {
             }
         }
         .padding(SyncFlowPadding.listItem)
-        .background(backgroundColor)
-        .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusSm))
+        .background(conversationRowBg)
+        .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd))
+        .overlay(
+            // Leading pill indicator for selected state
+            HStack {
+                if selected {
+                    Capsule()
+                        .fill(SyncFlowColors.primary)
+                        .frame(width: SyncFlowSpacing.sideRailPillWidth, height: SyncFlowSpacing.sideRailPillHeight)
+                        .transition(.scale.combined(with: .opacity))
+                }
+                Spacer()
+            }
+            .padding(.leading, 2)
+        )
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.1)) {
+            withAnimation(SFAnimations.micro) {
                 isHovered = hovering
             }
         }
@@ -84,11 +97,11 @@ struct SFConversationRow: View {
         }
     }
 
-    private var backgroundColor: Color {
+    private var conversationRowBg: Color {
         if selected {
-            return SyncFlowColors.primary.opacity(0.12)
+            return SyncFlowColors.warmHighlight
         } else if isHovered {
-            return SyncFlowColors.hover
+            return SyncFlowColors.hoverWarm
         } else {
             return .clear
         }
@@ -140,10 +153,10 @@ struct SFContactRow: View {
             }
         }
         .padding(SyncFlowPadding.listItem)
-        .background(backgroundColor)
-        .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusSm))
+        .background(contactRowBg)
+        .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd))
         .onHover { hovering in
-            withAnimation(.easeInOut(duration: 0.1)) {
+            withAnimation(SFAnimations.micro) {
                 isHovered = hovering
             }
         }
@@ -152,11 +165,11 @@ struct SFContactRow: View {
         }
     }
 
-    private var backgroundColor: Color {
+    private var contactRowBg: Color {
         if selected {
-            return SyncFlowColors.primary.opacity(0.12)
+            return SyncFlowColors.warmHighlight
         } else if isHovered {
-            return SyncFlowColors.hover
+            return SyncFlowColors.hoverWarm
         } else {
             return .clear
         }
@@ -217,11 +230,12 @@ struct SFSettingsRow: View {
             }
         }
         .padding(SyncFlowPadding.listItem)
-        .background(isHovered && onClick != nil ? SyncFlowColors.hover : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusSm))
+        .background(isHovered && onClick != nil ? SyncFlowColors.hoverWarm : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd))
+        .offset(x: isHovered && onClick != nil ? 2 : 0)
         .onHover { hovering in
             if onClick != nil && enabled {
-                withAnimation(.easeInOut(duration: 0.1)) {
+                withAnimation(SFAnimations.micro) {
                     isHovered = hovering
                 }
             }

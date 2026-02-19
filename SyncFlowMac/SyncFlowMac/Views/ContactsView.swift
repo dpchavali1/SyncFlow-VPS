@@ -44,29 +44,35 @@ struct ContactsView: View {
         VStack(spacing: 0) {
             // Header with search and new contact button
             HStack {
-                // Search bar
-                HStack {
+                // Pill-shaped search bar
+                HStack(spacing: 8) {
                     Image(systemName: "magnifyingglass")
-                        .foregroundColor(.secondary)
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(SyncFlowColors.textSecondary)
                     TextField("Search contacts", text: $searchText)
                         .textFieldStyle(.plain)
+                        .font(SyncFlowTypography.bodyMedium)
                     if !searchText.isEmpty {
                         Button(action: { searchText = "" }) {
                             Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.secondary)
+                                .foregroundColor(SyncFlowColors.textSecondary)
                         }
                         .buttonStyle(.plain)
                     }
                 }
-                .padding(12)
-                .background(Color(nsColor: .controlBackgroundColor))
-                .cornerRadius(8)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(SyncFlowColors.glassBackground)
+                .clipShape(Capsule())
+                .overlay(
+                    Capsule()
+                        .strokeBorder(SyncFlowColors.glassBorder, lineWidth: 1)
+                )
 
                 // New contact button
-                Button(action: { showNewContactSheet = true }) {
-                    Label("New Contact", systemImage: "person.badge.plus")
-                }
-                .buttonStyle(.borderedProminent)
+                SFPrimaryButton(text: "New Contact", action: {
+                    showNewContactSheet = true
+                }, leadingIcon: "person.badge.plus")
             }
             .padding()
 
@@ -404,7 +410,7 @@ struct ContactRow: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(isHovered ? Color(nsColor: .controlBackgroundColor).opacity(0.5) : Color.clear)
+        .background(isHovered ? SyncFlowColors.hoverWarm : Color.clear)
         .cornerRadius(8)
         .onHover { hovering in
             isHovered = hovering
@@ -599,7 +605,7 @@ struct PendingContactRow: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(isHovered ? Color(nsColor: .controlBackgroundColor) : Color.clear)
+        .background(isHovered ? SyncFlowColors.hoverWarm : Color.clear)
         .onHover { hovering in
             isHovered = hovering
         }
