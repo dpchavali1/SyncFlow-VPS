@@ -27,12 +27,14 @@ data class SyncFlowCall(
 ) {
     enum class CallType {
         AUDIO,
-        VIDEO;
+        VIDEO,
+        SCREEN_SHARE;
 
         companion object {
             fun fromString(value: String): CallType {
                 return when (value.lowercase()) {
                     "video" -> VIDEO
+                    "screen_share" -> SCREEN_SHARE
                     else -> AUDIO
                 }
             }
@@ -40,6 +42,9 @@ data class SyncFlowCall(
 
         override fun toString(): String = name.lowercase()
     }
+
+    val isScreenShare: Boolean
+        get() = callType == CallType.SCREEN_SHARE
 
     enum class CallStatus {
         RINGING,    // Call initiated, waiting for answer

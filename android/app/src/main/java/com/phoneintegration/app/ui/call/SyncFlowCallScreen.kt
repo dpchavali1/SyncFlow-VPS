@@ -133,10 +133,13 @@ fun SyncFlowCallScreen(
         }
     }
 
+    // Detect if this is a screen share session (viewing remote screen, not a video call)
+    val isScreenShareViewer = currentCall?.isScreenShare == true
+
     // Log state for debugging
     LaunchedEffect(callState, currentCall, localVideoTrack, remoteVideoTrack) {
         android.util.Log.d("SyncFlowCallScreen", "CallState: $callState")
-        android.util.Log.d("SyncFlowCallScreen", "CurrentCall: ${currentCall?.displayName}, isVideo: ${currentCall?.isVideo}")
+        android.util.Log.d("SyncFlowCallScreen", "CurrentCall: ${currentCall?.displayName}, isVideo: ${currentCall?.isVideo}, isScreenShare: ${currentCall?.isScreenShare}")
         android.util.Log.d("SyncFlowCallScreen", "LocalVideoTrack: $localVideoTrack")
         android.util.Log.d("SyncFlowCallScreen", "RemoteVideoTrack: $remoteVideoTrack")
     }
@@ -205,20 +208,22 @@ fun SyncFlowCallScreen(
                     verticalArrangement = Arrangement.spacedBy(20.dp)
                 ) {
                     Icon(
-                        imageVector = if (currentCall?.isVideo == true) Icons.Filled.Videocam else Icons.Filled.Call,
+                        imageVector = if (isScreenShareViewer) Icons.Filled.ScreenShare
+                            else if (currentCall?.isVideo == true) Icons.Filled.Videocam
+                            else Icons.Filled.Call,
                         contentDescription = null,
                         modifier = Modifier.size(80.dp),
                         tint = Color.White.copy(alpha = 0.5f)
                     )
 
                     Text(
-                        text = currentCall?.displayName ?: "Calling...",
+                        text = if (isScreenShareViewer) "Screen Share" else (currentCall?.displayName ?: "Calling..."),
                         style = MaterialTheme.typography.headlineLarge,
                         color = Color.White
                     )
 
                     Text(
-                        text = getStatusText(callState),
+                        text = if (isScreenShareViewer) "Waiting for screen..." else getStatusText(callState),
                         style = MaterialTheme.typography.titleMedium,
                         color = Color.White.copy(alpha = 0.7f)
                     )
@@ -226,8 +231,8 @@ fun SyncFlowCallScreen(
             }
         }
 
-        // Local video preview (PiP)
-        if (localVideoTrack != null && isVideoEnabled) {
+        // Local video preview (PiP) - hidden during screen share viewing
+        if (localVideoTrack != null && isVideoEnabled && !isScreenShareViewer) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
@@ -269,7 +274,7 @@ fun SyncFlowCallScreen(
                 ) {
                     Column {
                         Text(
-                            text = currentCall?.displayName ?: "",
+                            text = if (isScreenShareViewer) "Screen Share" else (currentCall?.displayName ?: ""),
                             style = MaterialTheme.typography.titleLarge,
                             color = Color.White,
                             fontWeight = FontWeight.SemiBold
@@ -333,16 +338,18 @@ fun SyncFlowCallScreen(
                         horizontalArrangement = Arrangement.SpaceEvenly,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Mute button
+                        // Mute button (hidden for screen share viewer)
+                        if (!isScreenShareViewer) {
                         CallControlButton(
                             icon = if (isMuted) Icons.Filled.MicOff else Icons.Filled.Mic,
                             label = if (isMuted) "Unmute" else "Mute",
                             isActive = isMuted,
                             onClick = { callManager.toggleMute() }
                         )
+                        }
 
-                        // Video toggle
-                        if (currentCall?.isVideo == true) {
+                        // Video toggle (hidden for screen share viewer)
+                        if (currentCall?.isVideo == true && !isScreenShareViewer) {
                             CallControlButton(
                                 icon = if (isVideoEnabled) Icons.Filled.Videocam else Icons.Filled.VideocamOff,
                                 label = if (isVideoEnabled) "Stop Video" else "Start Video",
@@ -373,8 +380,8 @@ fun SyncFlowCallScreen(
                             )
                         }
 
-                        // Screen share button
-                        if (onRequestScreenShare != null) {
+                        // Screen share button (hidden when viewing remote screen share)
+                        if (onRequestScreenShare != null && !isScreenShareViewer) {
                             CallControlButton(
                                 icon = if (isScreenSharing) Icons.Filled.StopScreenShare else Icons.Filled.ScreenShare,
                                 label = if (isScreenSharing) "Stop Share" else "Share",

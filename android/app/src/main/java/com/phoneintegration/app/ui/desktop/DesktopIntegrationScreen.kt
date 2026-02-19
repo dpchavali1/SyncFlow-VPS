@@ -705,6 +705,14 @@ fun DesktopIntegrationScreen(
                                     successMessage = "Successfully paired with ${tokenData.name}!"
                                     showSuccessDialog = true
 
+                                    // Auto-enable sync toggles on first pairing
+                                    preferencesManager.setBackgroundSyncEnabled(true)
+                                    preferencesManager.setNotificationMirrorEnabled(true)
+                                    preferencesManager.setPhotoSyncEnabled(true)
+                                    isBackgroundSyncEnabled = true
+                                    isNotificationMirrorEnabled = true
+                                    isPhotoSyncEnabled = true
+
                                     // CallMonitorService is on-demand — FCM will start it when calls come in
                                     // Sync call history and SIM info as one-time operations here
 
@@ -878,6 +886,14 @@ fun DesktopIntegrationScreen(
                                         showSuccessDialog = true
                                         android.util.Log.d("DesktopIntegrationScreen", "SUCCESS DIALOG STATE SET: showSuccessDialog=$showSuccessDialog, successMessage=$successMessage")
 
+                                        // Auto-enable sync toggles on pairing
+                                        preferencesManager.setBackgroundSyncEnabled(true)
+                                        preferencesManager.setNotificationMirrorEnabled(true)
+                                        preferencesManager.setPhotoSyncEnabled(true)
+                                        isBackgroundSyncEnabled = true
+                                        isNotificationMirrorEnabled = true
+                                        isPhotoSyncEnabled = true
+
                                         // CallMonitorService is on-demand — FCM will start it when calls come in
 
                                         // Start IntelligentSyncManager for ongoing sync
@@ -940,6 +956,15 @@ fun DesktopIntegrationScreen(
                                         }
                                         successMessage = "Successfully paired with desktop device!"
                                         showSuccessDialog = true
+
+                                        // Auto-enable sync toggles on pairing
+                                        preferencesManager.setBackgroundSyncEnabled(true)
+                                        preferencesManager.setNotificationMirrorEnabled(true)
+                                        preferencesManager.setPhotoSyncEnabled(true)
+                                        isBackgroundSyncEnabled = true
+                                        isNotificationMirrorEnabled = true
+                                        isPhotoSyncEnabled = true
+
                                         // CallMonitorService is on-demand — FCM will start it when calls come in
                                         // Use NonCancellable so navigation away doesn't kill the sync
                                         scope.launch(Dispatchers.IO + kotlinx.coroutines.NonCancellable) {

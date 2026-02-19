@@ -41,6 +41,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.Analytics
+import androidx.compose.material.icons.filled.ScreenShare
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.LocalOffer
 import androidx.compose.material.icons.filled.CardGiftcard
@@ -165,7 +166,8 @@ fun ConversationListScreen(
     onOpenArchived: () -> Unit = {},
     onOpenDownloads: () -> Unit = {},
     onOpenSpam: () -> Unit = {},
-    onOpenBlocked: () -> Unit = {}
+    onOpenBlocked: () -> Unit = {},
+    onScreenShare: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -335,6 +337,37 @@ fun ConversationListScreen(
                             )
                             HorizontalDivider()
                             DropdownMenuItem(
+                                text = { Text("Share Screen") },
+                                onClick = {
+                                    showMenu = false
+                                    onScreenShare()
+                                },
+                                leadingIcon = {
+                                    Icon(Icons.Filled.ScreenShare, contentDescription = null)
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("AI Assistant") },
+                                onClick = {
+                                    showMenu = false
+                                    onOpenAI()
+                                },
+                                leadingIcon = {
+                                    Text("🧠")
+                                }
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Statistics") },
+                                onClick = {
+                                    showMenu = false
+                                    onOpenStats()
+                                },
+                                leadingIcon = {
+                                    Icon(Icons.Default.Analytics, contentDescription = null)
+                                }
+                            )
+                            HorizontalDivider()
+                            DropdownMenuItem(
                                 text = { Text("Settings") },
                                 onClick = {
                                     showMenu = false
@@ -350,41 +383,14 @@ fun ConversationListScreen(
             )
         },
         floatingActionButton = {
-            Column(
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+            FloatingActionButton(
+                onClick = onNewMessage,
+                containerColor = MaterialTheme.colorScheme.primaryContainer
             ) {
-                // AI Assistant FAB
-                SmallFloatingActionButton(
-                    onClick = onOpenAI,
-                    containerColor = MaterialTheme.colorScheme.tertiaryContainer
-                ) {
-                    Text(
-                        text = "🧠",
-                        style = MaterialTheme.typography.titleMedium
-                    )
-                }
-
-                // Statistics FAB
-                SmallFloatingActionButton(
-                    onClick = onOpenStats,
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Analytics,
-                        contentDescription = "Statistics"
-                    )
-                }
-
-                // New Message FAB
-                FloatingActionButton(
-                    onClick = onNewMessage,
-                    containerColor = MaterialTheme.colorScheme.primaryContainer
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Edit,
-                        contentDescription = "New Message"
-                    )
-                }
+                Icon(
+                    imageVector = Icons.Default.Edit,
+                    contentDescription = "New Message"
+                )
             }
         }
     ) { padding ->

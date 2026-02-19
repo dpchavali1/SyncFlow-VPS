@@ -22,6 +22,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
 import androidx.core.content.ContextCompat
@@ -238,7 +239,9 @@ class SyncFlowCallService : Service() {
         // MUST call startForeground() immediately for ANY action started via startForegroundService().
         // Without this, early returns in action handlers would crash with
         // ForegroundServiceDidNotStartInTimeException on Android O+.
-        startForegroundNotification()
+        // For screen share, include MEDIA_PROJECTION type from the start since it can't be added later.
+        val isScreenShareAction = intent?.action == ACTION_START_SCREEN_SHARE
+        startForegroundNotification(includeMediaProjection = isScreenShareAction)
 
         when (intent?.action) {
             ACTION_START_SERVICE -> {
@@ -301,27 +304,10 @@ class SyncFlowCallService : Service() {
                     cancelIdleTimeout()
                     ensureWebSocketConnected("screen_share")
 
-                    // Upgrade foreground service type to include media projection
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        try {
-                            val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID_SERVICE)
-                                .setContentTitle("SyncFlow")
-                                .setContentText("Sharing screen...")
-                                .setSmallIcon(R.drawable.ic_launcher_foreground)
-                                .setPriority(NotificationCompat.PRIORITY_LOW)
-                                .setSilent(true)
-                                .setOngoing(true)
-                                .build()
-                            startForeground(
-                                NOTIFICATION_ID_SERVICE,
-                                notification,
-                                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-                                    or ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
-                            )
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Failed to upgrade foreground service type: ${e.message}")
-                        }
-                    }
+                    // MEDIA_PROJECTION type was already set in startForegroundNotification()
+
+                    // Set target device for standalone screen share before starting
+                    targetDevice?.let { _callManager?.setTargetDevice(it) }
 
                     serviceScope.launch {
                         _callManager?.startScreenShare(resultCode, data)
@@ -339,8 +325,9 @@ class SyncFlowCallService : Service() {
                 val callerName = intent.getStringExtra(EXTRA_CALLER_NAME) ?: "Unknown"
                 val callerPhone = intent.getStringExtra(EXTRA_CALLER_PHONE) ?: ""
                 val isVideo = intent.getBooleanExtra(EXTRA_IS_VIDEO, false)
+                val isScreenShare = intent.getBooleanExtra("is_screen_share", false)
 
-                Log.d(TAG, "Incoming user call: callId=$callId, caller=$callerName")
+                Log.d(TAG, "Incoming user call: callId=$callId, caller=$callerName, isScreenShare=$isScreenShare")
 
                 // Guard: ignore duplicate notifications for the same call
                 // This handles: same WebSocket message twice, FCM after WebSocket, service restart, process death
@@ -361,6 +348,12 @@ class SyncFlowCallService : Service() {
 
                 markCallHandled(callId, applicationContext)
 
+                val resolvedCallType = when {
+                    isScreenShare -> com.phoneintegration.app.models.SyncFlowCall.CallType.SCREEN_SHARE
+                    isVideo -> com.phoneintegration.app.models.SyncFlowCall.CallType.VIDEO
+                    else -> com.phoneintegration.app.models.SyncFlowCall.CallType.AUDIO
+                }
+
                 // Create the pending incoming call
                 val call = com.phoneintegration.app.models.SyncFlowCall(
                     id = callId,
@@ -370,8 +363,7 @@ class SyncFlowCallService : Service() {
                     calleeId = userId,
                     calleeName = "",
                     calleePlatform = "android",
-                    callType = if (isVideo) com.phoneintegration.app.models.SyncFlowCall.CallType.VIDEO
-                              else com.phoneintegration.app.models.SyncFlowCall.CallType.AUDIO,
+                    callType = resolvedCallType,
                     status = com.phoneintegration.app.models.SyncFlowCall.CallStatus.RINGING,
                     startedAt = System.currentTimeMillis(),
                     isUserCall = true,
@@ -379,10 +371,32 @@ class SyncFlowCallService : Service() {
                 )
 
                 cancelIdleTimeout() // Keep service alive while call is ringing
-                pendingIncomingCall = call
-                _pendingIncomingCallFlow.value = call  // Update flow for MainActivity
-                showIncomingCallNotification(call)
-                launchIncomingCallActivity(call)
+
+                if (isScreenShare) {
+                    // Screen share: play chime, show toast, auto-answer and launch viewer
+                    Log.d(TAG, "Auto-answering screen share call $callId")
+                    playScreenShareChime()
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        Toast.makeText(this, "Incoming screen share from $callerName", Toast.LENGTH_SHORT).show()
+                    }
+                    isCallActive = true
+                    serviceScope.launch {
+                        _callManager?.answerCall(userId, callId, withVideo = false)
+                        withContext(Dispatchers.Main) {
+                            // Launch screen share viewer activity
+                            val viewerIntent = Intent(this@SyncFlowCallService, MainActivity::class.java)
+                            viewerIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                            viewerIntent.putExtra("navigate_to", "screen_share_viewer")
+                            viewerIntent.putExtra("call_id", callId)
+                            startActivity(viewerIntent)
+                        }
+                    }
+                } else {
+                    pendingIncomingCall = call
+                    _pendingIncomingCallFlow.value = call  // Update flow for MainActivity
+                    showIncomingCallNotification(call)
+                    launchIncomingCallActivity(call)
+                }
                 startCallStatusPolling(call)
 
                 // Verify call is still ringing on the server (async).
@@ -511,15 +525,16 @@ class SyncFlowCallService : Service() {
         }
     }
 
-    private fun startForegroundNotification() {
+    private fun startForegroundNotification(includeMediaProjection: Boolean = false) {
         // We MUST always call startForeground() when started via startForegroundService(),
         // even when the app is backgrounded. Skipping it causes
         // ForegroundServiceDidNotStartInTimeException on Android 14+.
         // Using FOREGROUND_SERVICE_TYPE_PHONE_CALL is allowed from background when started
         // via high-priority FCM (which is how incoming calls arrive when app is killed).
+        val contentText = if (includeMediaProjection) "Sharing screen..." else "Processing call..."
         val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID_SERVICE)
             .setContentTitle("SyncFlow")
-            .setContentText("Processing call...")
+            .setContentText(contentText)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .setSilent(true)
@@ -528,7 +543,11 @@ class SyncFlowCallService : Service() {
 
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(NOTIFICATION_ID_SERVICE, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL)
+                var serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+                if (includeMediaProjection) {
+                    serviceType = serviceType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                }
+                startForeground(NOTIFICATION_ID_SERVICE, notification, serviceType)
             } else {
                 startForeground(NOTIFICATION_ID_SERVICE, notification)
             }
@@ -950,6 +969,31 @@ class SyncFlowCallService : Service() {
         }
     }
 
+    private fun playScreenShareChime() {
+        try {
+            val notificationUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            MediaPlayer().apply {
+                setDataSource(this@SyncFlowCallService, notificationUri)
+                setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build()
+                )
+                isLooping = false
+                prepare()
+                start()
+                setOnCompletionListener { mp ->
+                    mp.reset()
+                    mp.release()
+                }
+            }
+            Log.d(TAG, "Screen share chime played")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error playing screen share chime", e)
+        }
+    }
+
     private fun startVibration() {
         try {
             vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -1037,13 +1081,7 @@ class SyncFlowCallService : Service() {
                     Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
                     Intent.FLAG_ACTIVITY_CLEAR_TOP
 
-            // Add flags for showing over lock screen (for older API levels)
-            // Do NOT use FLAG_DISMISS_KEYGUARD - we want to show over lock screen without forcing unlock
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) {
-                @Suppress("DEPRECATION")
-                addFlags(android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                        android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
-            }
+            // Lock screen override is handled in MainActivity via setShowWhenLocked / window flags
 
             putExtra("incoming_syncflow_call_id", call.id)
             putExtra("incoming_syncflow_call_name", call.callerName)
@@ -1187,13 +1225,7 @@ class SyncFlowCallService : Service() {
                     Intent.FLAG_ACTIVITY_REORDER_TO_FRONT
             addFlags(Intent.FLAG_ACTIVITY_NO_USER_ACTION)
 
-            // Add flags for showing over lock screen (for older API levels)
-            // Do NOT use FLAG_DISMISS_KEYGUARD - we want to show over lock screen without forcing unlock
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O_MR1) {
-                @Suppress("DEPRECATION")
-                addFlags(android.view.WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-                        android.view.WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON)
-            }
+            // Lock screen override is handled in MainActivity via setShowWhenLocked / window flags
 
             putExtra("active_syncflow_call", true)
             putExtra("active_syncflow_call_id", callId)

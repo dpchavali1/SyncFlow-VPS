@@ -933,9 +933,24 @@ class SmsRepository(private val context: Context) {
                     )
                 } else null
 
-                // Send the SMS with optional delivery intent
-                SmsManager.getDefault().sendTextMessage(address, null, body, null, deliveryIntent)
-                Log.d("SmsRepository", "SMS sent to $address (deliveryIntent=${deliveryIntent != null})")
+                val smsManager = SmsManager.getDefault()
+                val parts = smsManager.divideMessage(body)
+
+                if (parts.size > 1) {
+                    // Multipart message (>160 chars) — must use sendMultipartTextMessage
+                    val deliveryIntents = if (deliveryIntent != null) {
+                        // Only need delivery callback on the last part
+                        ArrayList(parts.mapIndexed { index, _ ->
+                            if (index == parts.size - 1) deliveryIntent else null
+                        })
+                    } else null
+                    smsManager.sendMultipartTextMessage(address, null, parts, null, deliveryIntents)
+                    Log.d("SmsRepository", "Multipart SMS (${parts.size} parts) sent to $address")
+                } else {
+                    // Single-part message — use sendTextMessage
+                    smsManager.sendTextMessage(address, null, body, null, deliveryIntent)
+                    Log.d("SmsRepository", "SMS sent to $address (deliveryIntent=${deliveryIntent != null})")
+                }
 
                 // Write to sent folder only when we are the default SMS app.
                 // Non-default apps can't write to the SMS content provider; the sent

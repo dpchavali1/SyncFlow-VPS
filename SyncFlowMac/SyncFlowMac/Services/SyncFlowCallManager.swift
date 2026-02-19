@@ -551,7 +551,7 @@ class SyncFlowCallManager: NSObject, ObservableObject {
     /// Start screen sharing with a display, adding the track to the existing PeerConnection
     /// or creating a standalone screen share call.
     @available(macOS 12.3, *)
-    func startScreenSharing(display: SCDisplay, screenCaptureService: ScreenCaptureService) async throws {
+    func startScreenSharing(display: SCDisplay, screenCaptureService: ScreenCaptureService, calleeDeviceId: String? = nil) async throws {
         let factory = SyncFlowCallManager.factory
 
         try await screenCaptureService.startSharingDisplay(display, factory: factory)
@@ -575,8 +575,11 @@ class SyncFlowCallManager: NSObject, ObservableObject {
             iceRestartAttempted = false
             processedIceCandidates.removeAll()
 
+            guard let targetDeviceId = calleeDeviceId, !targetDeviceId.isEmpty else {
+                throw CallError.connectionFailed
+            }
             let callResult = try await vps.createSyncFlowCall(
-                calleeId: "", // Will be set via UI selection
+                calleeId: targetDeviceId,
                 calleeName: "Screen Share",
                 callType: "screen_share"
             )

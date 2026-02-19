@@ -56,6 +56,7 @@
 
 import SwiftUI
 import AppKit
+import ScreenCaptureKit
 
 // =============================================================================
 // MARK: - ContentView (Root View)
@@ -258,7 +259,15 @@ struct MainView: View {
                 selectedTab: $appState.selectedTab,
                 onNewMessage: { appState.showNewMessage = true },
                 onAIAssistant: { showAIAssistant = true },
-                onSupportChat: { appState.showSupportChat = true }
+                onSupportChat: { appState.showSupportChat = true },
+                onSync: {
+                    appState.syncNow()
+                    messageStore.syncNow()
+                },
+                onScreenShare: {
+                    appState.requestStandaloneScreenShare()
+                },
+                isSyncing: appState.isSyncing
             )
 
             Divider()
@@ -381,6 +390,41 @@ struct MainView: View {
             SupportChatView()
                 .environmentObject(appState)
         }
+        // Standalone Screen Share picker sheet
+        .sheet(isPresented: $appState.showScreenSharePicker) {
+            if #available(macOS 12.3, *) {
+                ScreenSharePicker(
+                    screenCaptureService: appState.screenCaptureService,
+                    onSelectDisplay: { display in
+                        appState.showScreenSharePicker = false
+                        Task {
+                            try? await appState.syncFlowCallManager.startScreenSharing(
+                                display: display,
+                                screenCaptureService: appState.screenCaptureService,
+                                calleeDeviceId: appState.screenShareTargetDeviceId
+                            )
+                            await MainActor.run {
+                                appState.showSyncFlowCallView = true
+                            }
+                        }
+                    },
+                    onSelectWindow: { window in
+                        appState.showScreenSharePicker = false
+                        Task {
+                            try? await appState.screenCaptureService.startSharingWindow(
+                                window,
+                                factory: SyncFlowCallManager.factory
+                            )
+                            await MainActor.run {
+                                appState.showSyncFlowCallView = true
+                            }
+                        }
+                    },
+                    onCancel: { appState.showScreenSharePicker = false }
+                )
+                .frame(minWidth: 500, minHeight: 400)
+            }
+        }
     }
 }
 
@@ -412,8 +456,23 @@ struct SideRail: View {
     /// Optional callback to show support chat
     var onSupportChat: (() -> Void)? = nil
 
+    /// Optional callback to trigger manual sync
+    var onSync: (() -> Void)? = nil
+
+    /// Optional callback to share screen
+    var onScreenShare: (() -> Void)? = nil
+
+    /// Whether a sync is currently in progress
+    var isSyncing: Bool = false
+
     /// Animation state for Deals icon pulse effect
     @State private var dealsIconPulse = false
+
+    /// Rotation angle for sync spinner
+    @State private var syncRotation: Double = 0
+
+    /// Whether to show checkmark after sync completes
+    @State private var showSyncComplete = false
 
     var body: some View {
         VStack(spacing: 18) {
@@ -492,6 +551,69 @@ struct SideRail: View {
             }
 
             Spacer()
+
+            // Sync Now button
+            if let onSync = onSync {
+                Button(action: {
+                    guard !isSyncing else { return }
+                    onSync()
+                }) {
+                    if showSyncComplete {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.system(size: 16))
+                            .foregroundColor(.green)
+                            .frame(width: 36, height: 36)
+                            .transition(.scale.combined(with: .opacity))
+                    } else {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .font(.system(size: 16))
+                            .foregroundColor(isSyncing ? SyncFlowColors.primary : SyncFlowColors.textSecondary)
+                            .frame(width: 36, height: 36)
+                            .rotationEffect(.degrees(syncRotation))
+                    }
+                }
+                .buttonStyle(.plain)
+                .help("Sync Now")
+                .disabled(isSyncing)
+                .onChange(of: isSyncing) { newValue in
+                    if newValue {
+                        // Start spinning
+                        withAnimation(.linear(duration: 1).repeatForever(autoreverses: false)) {
+                            syncRotation = 360
+                        }
+                    } else {
+                        // Stop spinning, show checkmark
+                        syncRotation = 0
+                        withAnimation(.spring()) {
+                            showSyncComplete = true
+                        }
+                        // Hide checkmark after 1.5s
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                            withAnimation(.easeOut) {
+                                showSyncComplete = false
+                            }
+                        }
+                    }
+                }
+                .padding(.bottom, 4)
+            }
+
+            // Screen Share button
+            if let onScreenShare = onScreenShare {
+                Button(action: onScreenShare) {
+                    Image(systemName: "rectangle.on.rectangle")
+                        .font(.system(size: 16))
+                        .foregroundColor(SyncFlowColors.textSecondary)
+                        .frame(width: 36, height: 36)
+                        .background(
+                            Circle()
+                                .fill(Color.clear)
+                        )
+                }
+                .buttonStyle(.plain)
+                .help("Share Screen")
+                .padding(.bottom, 4)
+            }
 
             // AI Assistant button
             if let onAIAssistant = onAIAssistant {

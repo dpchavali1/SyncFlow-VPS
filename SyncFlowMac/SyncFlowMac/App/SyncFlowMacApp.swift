@@ -367,6 +367,18 @@ struct SyncFlowMacApp: App {
                     set: { appState.notificationMirrorService.setEnabled($0) }
                 ))
 
+                Toggle("Photo Sync", isOn: Binding(
+                    get: { appState.photoSyncEnabled },
+                    set: { appState.togglePhotoSync(enabled: $0) }
+                ))
+
+                Divider()
+
+                Button("Share Screen") {
+                    appState.requestStandaloneScreenShare()
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+
                 Divider()
 
                 // Hotspot control
@@ -644,6 +656,12 @@ class AppState: ObservableObject {
     /// Screen capture service for screen sharing
     let screenCaptureService = ScreenCaptureService()
 
+    /// Whether to show the standalone screen share picker
+    @Published var showScreenSharePicker: Bool = false
+
+    /// Cached Android device ID for standalone screen share
+    var screenShareTargetDeviceId: String?
+
     // =========================================================================
     // MARK: - Message State
     // =========================================================================
@@ -694,6 +712,10 @@ class AppState: ObservableObject {
     /// Photo sync service
     let photoSyncService = PhotoSyncService.shared
     @Published var showPhotoGallery: Bool = false
+    @Published var photoSyncEnabled: Bool = true
+
+    /// Manual sync state
+    @Published var isSyncing: Bool = false
 
     /// Notification mirroring service
     let notificationMirrorService = NotificationMirrorService.shared
@@ -759,6 +781,14 @@ class AppState: ObservableObject {
     /// 4. Subscribe to call state changes for UI updates
     /// 5. Subscribe to continuity state for handoff suggestions
     init() {
+        // Restore photo sync toggle state (defaults to true if not set)
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "photo_sync_enabled") == nil {
+            self.photoSyncEnabled = true
+        } else {
+            self.photoSyncEnabled = defaults.bool(forKey: "photo_sync_enabled")
+        }
+
         // Check for existing pairing
         if let storedUserId = UserDefaults.standard.string(forKey: "syncflow_user_id") {
             self.userId = storedUserId
@@ -1159,24 +1189,35 @@ class AppState: ObservableObject {
 
         if let lastUserId = lastPairedUserId {
             if lastUserId == userId {
-                // Same user re-pairing - cache is valid
+                // Same user re-pairing - cache is valid, keep existing toggle states
                 #if DEBUG
                 let cachedMessageCount = IncrementalSyncManager.shared.getCachedMessages(userId: userId).count
                 print("[Pairing] Same user re-pairing - using cached data (\(cachedMessageCount) cached messages)")
                 #endif
             } else {
                 // Different user - clear previous user's cache for privacy
+                // and reset all sync toggles to enabled for fresh start
                 #if DEBUG
                 print("[Pairing] Different user detected (previous: \(lastUserId), new: \(userId)), clearing cache")
                 #endif
 
                 IncrementalSyncManager.shared.clearCache(userId: lastUserId)
                 UserDefaults.standard.removeObject(forKey: "last_paired_user_id")
+
+                // Reset sync toggles to enabled for new user
+                clipboardSyncEnabled = true
+                togglePhotoSync(enabled: true)
+                notificationMirrorService.setEnabled(true)
             }
         } else {
             #if DEBUG
             print("[Pairing] No previous cache found - first time pairing or cache was cleared")
             #endif
+
+            // First-time pairing: enable all sync features by default
+            clipboardSyncEnabled = true
+            togglePhotoSync(enabled: true)
+            notificationMirrorService.setEnabled(true)
         }
 
         // Save this user as the last paired user for future verification
@@ -1528,6 +1569,70 @@ class AppState: ObservableObject {
         clipboardSyncService.stopSync()
     }
 
+    // MARK: - Manual Sync
+
+    /// Triggers a manual sync of all services.
+    /// Called from the Sync Now button in the SideRail.
+    // MARK: - Standalone Screen Share
+
+    /// Prepares and shows the screen share picker for standalone screen sharing.
+    /// Fetches the Android device ID first, then shows the picker.
+    func requestStandaloneScreenShare() {
+        Task {
+            do {
+                if let response = try? await VPSService.shared.getDevices() {
+                    if let androidDevice = response.devices.first(where: { $0.deviceType == "android" }) {
+                        await MainActor.run {
+                            self.screenShareTargetDeviceId = androidDevice.id
+                            self.showScreenSharePicker = true
+                        }
+                    } else {
+                        #if DEBUG
+                        print("[ScreenShare] No Android device found for standalone screen share")
+                        #endif
+                    }
+                }
+            }
+        }
+    }
+
+    func syncNow() {
+        guard !isSyncing, let userId = userId else { return }
+        isSyncing = true
+
+        #if DEBUG
+        print("[AppState] Manual sync triggered")
+        #endif
+
+        // Refresh phone status
+        phoneStatusService.requestRefresh()
+
+        // Refresh clipboard sync
+        if clipboardSyncEnabled {
+            clipboardSyncService.syncNow()
+        }
+
+        // Refresh photo sync
+        if photoSyncEnabled {
+            photoSyncService.stopSync()
+            photoSyncService.startSync(userId: userId)
+        }
+
+        // Refresh notification mirroring
+        if notificationMirrorService.isEnabled {
+            notificationMirrorService.stopSync()
+            notificationMirrorService.startSync(userId: userId)
+        }
+
+        // Minimum 1.5s visible animation, then clear
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            await MainActor.run {
+                self.isSyncing = false
+            }
+        }
+    }
+
     func toggleClipboardSync(enabled: Bool) {
         clipboardSyncEnabled = enabled
         if enabled, let userId = userId {
@@ -1540,11 +1645,23 @@ class AppState: ObservableObject {
     // MARK: - Photo Sync
 
     private func startPhotoSync(userId: String) {
-        photoSyncService.startSync(userId: userId)
+        if photoSyncEnabled {
+            photoSyncService.startSync(userId: userId)
+        }
     }
 
     private func stopPhotoSync() {
         photoSyncService.stopSync()
+    }
+
+    func togglePhotoSync(enabled: Bool) {
+        photoSyncEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: "photo_sync_enabled")
+        if enabled, let userId = userId {
+            photoSyncService.startSync(userId: userId)
+        } else {
+            photoSyncService.stopSync()
+        }
     }
 
     // MARK: - Notification Mirroring

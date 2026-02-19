@@ -310,7 +310,32 @@ router.post('/register', async (req: Request, res: Response) => {
         [normalizedPhone, userId]
       );
       if (deleteResult.rows.length > 0) {
-        console.warn(`⚠️ Phone ${normalizedPhone} was taken from user ${deleteResult.rows[0].user_id} by user ${userId}`);
+        const oldUserId = deleteResult.rows[0].user_id;
+        console.warn(`⚠️ Phone ${normalizedPhone} was taken from user ${oldUserId} by user ${userId}`);
+
+        // Transfer active subscription from old user to new user (reinstall scenario).
+        // Only transfer if the new user doesn't already have a paid plan.
+        const oldSub = await client.query(
+          `SELECT plan, status, started_at, expires_at, stripe_customer_id, stripe_subscription_id
+           FROM user_subscriptions WHERE user_id = $1 AND plan <> 'free' AND status IN ('active', 'cancelling')`,
+          [oldUserId]
+        );
+        if (oldSub.rows.length > 0) {
+          const newSub = await client.query(
+            `SELECT plan FROM user_subscriptions WHERE user_id = $1 AND plan <> 'free'`,
+            [userId]
+          );
+          if (newSub.rows.length === 0) {
+            // Transfer: update the subscription row to point to the new user
+            await client.query(
+              `UPDATE user_subscriptions SET user_id = $1 WHERE user_id = $2`,
+              [userId, oldUserId]
+            );
+            console.log(`✅ Transferred ${oldSub.rows[0].plan} subscription from user ${oldUserId} to ${userId} (phone re-registration)`);
+          } else {
+            console.log(`ℹ️ New user ${userId} already has plan ${newSub.rows[0].plan}, skipping subscription transfer from ${oldUserId}`);
+          }
+        }
       }
 
       // Insert or update the user's registration with device_id audit trail.
@@ -821,6 +846,17 @@ router.post('/syncflow', async (req: Request, res: Response) => {
       );
       if (phoneRegistry.length > 0) {
         calleeUserId = phoneRegistry[0].user_id;
+      }
+    }
+
+    // Try device ID lookup (for standalone screen share where calleeId is a device UUID)
+    if (!calleeUserId) {
+      const deviceLookup = await query(
+        `SELECT user_id FROM user_devices WHERE id = $1`,
+        [body.calleeId]
+      );
+      if (deviceLookup.length > 0) {
+        calleeUserId = deviceLookup[0].user_id;
       }
     }
 

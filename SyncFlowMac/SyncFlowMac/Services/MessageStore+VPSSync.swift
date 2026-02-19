@@ -209,20 +209,64 @@ extension MessageStore {
         startPollingFallback()
     }
 
+    // MARK: - Manual Sync
+
+    /// Manually triggers a full re-sync of messages, contacts, and spam.
+    /// Called when the user taps the Sync Now button.
+    func syncNow() {
+        guard let userId = currentUserId else { return }
+
+        #if DEBUG
+        print("[MessageStore] Manual sync triggered")
+        #endif
+
+        // Re-fetch messages from VPS
+        Task {
+            do {
+                let response = try await VPSService.shared.getMessages(limit: 500)
+                let fetchedMessages = response.messages.map { self.convertVPSMessage($0) }
+
+                await MainActor.run {
+                    let processedMessages = self.applyReadStatus(to: fetchedMessages)
+                    let mergeResult = self.mergeMessagesWithPendingOutgoing(remoteMessages: processedMessages)
+                    let newConversations = self.buildConversations(from: mergeResult.mergedMessages)
+
+                    self.messages = mergeResult.mergedMessages
+                    self.conversations = newConversations
+
+                    #if DEBUG
+                    print("[MessageStore] Manual sync: loaded \(fetchedMessages.count) messages, \(newConversations.count) conversations")
+                    #endif
+                }
+            } catch {
+                #if DEBUG
+                print("[MessageStore] Manual sync error: \(error.localizedDescription)")
+                #endif
+            }
+        }
+
+        // Re-sync contacts
+        startListeningForContactsVPS(userId: userId)
+
+        // Refresh spam
+        loadSpamMessagesFromVPS()
+    }
+
     // MARK: - Polling Fallback
 
-    /// Polling fallback that fetches new messages every 60 seconds when WebSocket is disconnected.
-    /// When WebSocket is connected, the poll is skipped (no battery/network cost).
+    /// Polling fallback that fetches new messages periodically.
+    /// When WebSocket is disconnected, polls every 30 seconds (aggressive).
+    /// When WebSocket is connected, polls every 120 seconds as a safety net
+    /// to catch any messages that may have been missed during brief glitches.
     func startPollingFallback() {
         pollFallbackTask?.cancel()
         pollFallbackTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 60_000_000_000) // 60 seconds
+                let isWsConnected = VPSService.shared.isConnected
+                let sleepSeconds: UInt64 = isWsConnected ? 120 : 30 // 2 min if connected, 30s if not
+                try? await Task.sleep(nanoseconds: sleepSeconds * 1_000_000_000)
                 guard !Task.isCancelled else { break }
                 guard let self = self else { break }
-
-                // Only poll when WebSocket is NOT connected
-                guard !VPSService.shared.isConnected else { continue }
 
                 #if DEBUG
                 print("[MessageStore] WebSocket disconnected — polling for new messages")

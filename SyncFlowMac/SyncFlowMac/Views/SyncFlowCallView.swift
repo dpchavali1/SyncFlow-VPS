@@ -106,7 +106,9 @@ struct SyncFlowCallView: View {
                     // Top bar - call info
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(callManager.currentCall?.displayName ?? "")
+                            Text(isViewingRemoteScreenShare
+                                ? "Screen Share from \(callManager.currentCall?.displayName ?? "")"
+                                : (callManager.currentCall?.displayName ?? ""))
                                 .font(.headline)
                                 .foregroundColor(.white)
 
@@ -132,50 +134,52 @@ struct SyncFlowCallView: View {
 
                     // Bottom controls
                     HStack(spacing: 24) {
-                        // Mute button
-                        controlButton(
-                            icon: callManager.isMuted ? "mic.slash.fill" : "mic.fill",
-                            label: callManager.isMuted ? "Unmute" : "Mute",
-                            isActive: callManager.isMuted
-                        ) {
-                            callManager.toggleMute()
-                        }
-
-                        // Video toggle
-                        controlButton(
-                            icon: callManager.isVideoEnabled ? "video.fill" : "video.slash.fill",
-                            label: callManager.isVideoEnabled ? "Camera Off" : "Camera On",
-                            isActive: !callManager.isVideoEnabled
-                        ) {
-                            callManager.toggleVideo()
-                        }
-
-                        // Screen share toggle
-                        if callManager.isScreenSharing {
+                        if !isViewingRemoteScreenShare {
+                            // Mute button
                             controlButton(
-                                icon: "rectangle.on.rectangle.slash",
-                                label: "Stop Share",
-                                isActive: true
+                                icon: callManager.isMuted ? "mic.slash.fill" : "mic.fill",
+                                label: callManager.isMuted ? "Unmute" : "Mute",
+                                isActive: callManager.isMuted
                             ) {
-                                Task {
-                                    await callManager.stopScreenSharing(screenCaptureService: screenCaptureService)
+                                callManager.toggleMute()
+                            }
+
+                            // Video toggle
+                            controlButton(
+                                icon: callManager.isVideoEnabled ? "video.fill" : "video.slash.fill",
+                                label: callManager.isVideoEnabled ? "Camera Off" : "Camera On",
+                                isActive: !callManager.isVideoEnabled
+                            ) {
+                                callManager.toggleVideo()
+                            }
+
+                            // Screen share toggle
+                            if callManager.isScreenSharing {
+                                controlButton(
+                                    icon: "rectangle.on.rectangle.slash",
+                                    label: "Stop Share",
+                                    isActive: true
+                                ) {
+                                    Task {
+                                        await callManager.stopScreenSharing(screenCaptureService: screenCaptureService)
+                                    }
+                                }
+                            } else {
+                                controlButton(
+                                    icon: "rectangle.on.rectangle",
+                                    label: "Share Screen",
+                                    isActive: false
+                                ) {
+                                    showScreenSharePicker = true
                                 }
                             }
-                        } else {
-                            controlButton(
-                                icon: "rectangle.on.rectangle",
-                                label: "Share Screen",
-                                isActive: false
-                            ) {
-                                showScreenSharePicker = true
-                            }
                         }
 
-                        // End call
+                        // End call / Stop Viewing
                         Button {
                             appState.endSyncFlowCall()
                         } label: {
-                            Image(systemName: "phone.down.fill")
+                            Image(systemName: isViewingRemoteScreenShare ? "xmark" : "phone.down.fill")
                                 .font(.title2)
                                 .foregroundColor(.white)
                                 .frame(width: 56, height: 56)
@@ -183,6 +187,7 @@ struct SyncFlowCallView: View {
                                 .clipShape(Circle())
                         }
                         .buttonStyle(.plain)
+                        .help(isViewingRemoteScreenShare ? "Stop Viewing" : "End Call")
                     }
                     .padding(.bottom, 40)
                     .padding(.horizontal)
@@ -231,13 +236,19 @@ struct SyncFlowCallView: View {
 
     // MARK: - Helpers
 
+    /// True when we're viewing a remote screen share (not sending one)
+    private var isViewingRemoteScreenShare: Bool {
+        callManager.screenShareTrack != nil && !callManager.isScreenSharing
+    }
+
     private var statusText: String {
         switch callManager.callState {
         case .idle: return ""
         case .initializing: return "Initializing..."
         case .ringing: return "Ringing..."
         case .connecting: return "Connecting..."
-        case .connected: return formattedDuration
+        case .connected:
+            return isViewingRemoteScreenShare ? "Viewing screen share" : formattedDuration
         case .failed(let msg): return "Failed: \(msg)"
         case .ended: return "Call Ended"
         }

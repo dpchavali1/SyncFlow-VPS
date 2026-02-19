@@ -108,6 +108,7 @@ import com.phoneintegration.app.data.PreferencesManager
 import com.phoneintegration.app.e2ee.SignalProtocolManager
 import com.phoneintegration.app.webrtc.SyncFlowCallManager
 import com.phoneintegration.app.services.BatteryAwareServiceManager
+import com.phoneintegration.app.ui.call.ScreenShareViewerScreen
 import com.phoneintegration.app.ui.call.SyncFlowCallScreen
 import com.phoneintegration.app.ui.call.IncomingSyncFlowCallScreen
 import com.phoneintegration.app.ui.navigation.MainNavigation
@@ -1174,18 +1175,33 @@ class MainActivity : ComponentActivity() {
                             (callState == SyncFlowCallManager.CallState.Connected ||
                              callState == SyncFlowCallManager.CallState.Connecting ||
                              callState == SyncFlowCallManager.CallState.Ringing)) {
-                            SyncFlowCallScreen(
-                                callManager = currentCallManager,
-                                onCallEnded = {
-                                    android.util.Log.d("MainActivity", "Call ended from SyncFlowCallScreen")
-                                    showActiveCallScreen = false
-                                    // If we launched from a locked screen, finish the activity
-                                    if (wasLaunchedFromLockedScreen) {
-                                        android.util.Log.d("MainActivity", "Finishing activity (was locked screen)")
-                                        this@MainActivity.finish()
+                            if (currentCallManager.currentCall?.isScreenShare == true) {
+                                ScreenShareViewerScreen(
+                                    callManager = currentCallManager,
+                                    onStopViewing = {
+                                        android.util.Log.d("MainActivity", "Screen share viewing stopped")
+                                        showActiveCallScreen = false
+                                        // End call via service intent
+                                        val endIntent = Intent(this@MainActivity, SyncFlowCallService::class.java).apply {
+                                            action = SyncFlowCallService.ACTION_END_CALL
+                                        }
+                                        startService(endIntent)
                                     }
-                                }
-                            )
+                                )
+                            } else {
+                                SyncFlowCallScreen(
+                                    callManager = currentCallManager,
+                                    onCallEnded = {
+                                        android.util.Log.d("MainActivity", "Call ended from SyncFlowCallScreen")
+                                        showActiveCallScreen = false
+                                        // If we launched from a locked screen, finish the activity
+                                        if (wasLaunchedFromLockedScreen) {
+                                            android.util.Log.d("MainActivity", "Finishing activity (was locked screen)")
+                                            this@MainActivity.finish()
+                                        }
+                                    }
+                                )
+                            }
                         }
                     }
                 }
@@ -1262,6 +1278,17 @@ class MainActivity : ComponentActivity() {
 
     private fun handleCallIntent(intent: Intent?) {
         if (intent == null) return
+
+        // Handle screen share viewer navigation from service
+        val navigateTo = intent.getStringExtra("navigate_to")
+        if (navigateTo == "screen_share_viewer") {
+            Log.d("MainActivity", "Navigating to screen share viewer")
+            _pendingActiveCallId = intent.getStringExtra("call_id")
+            _pendingActiveCallName = "Screen Share"
+            _pendingActiveCallVideo = false
+            _activeCallTrigger.value++
+            return
+        }
 
         val action = intent.getStringExtra("syncflow_call_action")
         if (action == "answer") {

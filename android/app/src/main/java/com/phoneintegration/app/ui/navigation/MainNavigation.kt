@@ -42,6 +42,7 @@ import android.util.Log
 import java.net.URLEncoder
 import java.net.URLDecoder
 import com.phoneintegration.app.ui.components.PhoneNumberRegistrationDialog
+import com.phoneintegration.app.MainActivity
 import com.phoneintegration.app.ui.components.isPhoneNumberRegistered
 import com.phoneintegration.app.ui.components.restorePhoneRegistrationFromVPS
 
@@ -214,6 +215,40 @@ fun MainNavigation(
                     },
                     onOpenBlocked = {
                         navController.navigate("blocked")
+                    },
+                    onScreenShare = {
+                        val activity = context as? MainActivity
+                        Log.d("MainNavigation", "Screen share clicked, activity=$activity")
+                        if (activity != null) {
+                            scope.launch {
+                                try {
+                                    val vpsClient = com.phoneintegration.app.vps.VPSClient.getInstance(context)
+                                    val devices = vpsClient.getDevices()
+                                    Log.d("MainNavigation", "Got ${devices.devices.size} devices: ${devices.devices.map { "${it.deviceName}(${it.deviceType},current=${it.isCurrent})" }}")
+                                    val macDevice = devices.devices.firstOrNull { it.deviceType == "macos" && !it.isCurrent }
+                                    if (macDevice != null) {
+                                        Log.d("MainNavigation", "Found Mac device: ${macDevice.id} (${macDevice.deviceName})")
+                                        withContext(Dispatchers.Main) {
+                                            Toast.makeText(context, "Starting screen share with ${macDevice.deviceName}...", Toast.LENGTH_SHORT).show()
+                                            activity.requestScreenShare(targetDevice = macDevice.id)
+                                        }
+                                    } else {
+                                        Log.w("MainNavigation", "No macOS device found in device list")
+                                        withContext(Dispatchers.Main) {
+                                            Toast.makeText(context, "No paired Mac found. Make sure Mac app is paired.", Toast.LENGTH_LONG).show()
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e("MainNavigation", "Failed to get devices for screen share", e)
+                                    withContext(Dispatchers.Main) {
+                                        Toast.makeText(context, "Failed to start screen share: ${e.message}", Toast.LENGTH_LONG).show()
+                                    }
+                                }
+                            }
+                        } else {
+                            Log.e("MainNavigation", "Context is not MainActivity: ${context.javaClass.name}")
+                            Toast.makeText(context, "Cannot start screen share from this context", Toast.LENGTH_SHORT).show()
+                        }
                     }
                 )
             }

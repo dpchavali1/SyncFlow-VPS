@@ -1761,7 +1761,7 @@ class VPSClient private constructor(
 
     suspend fun getUserSubscription(): Map<String, Any?> = withContext(Dispatchers.IO) {
         try {
-            get("/api/user/subscription")
+            get("/api/usage/subscription")
         } catch (e: Exception) {
             Log.e(TAG, "Error getting subscription: ${e.message}")
             emptyMap()
@@ -2134,7 +2134,8 @@ class VPSClient private constructor(
                         putExtra(com.phoneintegration.app.SyncFlowCallService.EXTRA_CALL_ID, callId)
                         putExtra(com.phoneintegration.app.SyncFlowCallService.EXTRA_CALLER_NAME, callerName)
                         putExtra(com.phoneintegration.app.SyncFlowCallService.EXTRA_CALLER_PHONE, callerId)
-                        putExtra(com.phoneintegration.app.SyncFlowCallService.EXTRA_IS_VIDEO, callType == "video")
+                        putExtra(com.phoneintegration.app.SyncFlowCallService.EXTRA_IS_VIDEO, callType == "video" || callType == "screen_share")
+                        putExtra("is_screen_share", callType == "screen_share")
                     }
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                         context.startForegroundService(intent)

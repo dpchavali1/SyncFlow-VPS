@@ -37,6 +37,11 @@ class SyncFlowCallManager(context: Context) {
     private var remoteDescriptionSet = false
     private var currentCallId: String? = null
     private var currentToDevice: String? = null
+
+    /** Set the target device ID for standalone screen share (called before startScreenShare). */
+    fun setTargetDevice(deviceId: String) {
+        currentToDevice = deviceId
+    }
     private var isFrontCamera = true
     private var disconnectTimeoutJob: Job? = null
     private var ringingTimeoutJob: Job? = null
