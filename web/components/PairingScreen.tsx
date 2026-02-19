@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { useRouter, usePathname } from 'next/navigation'
-import { Smartphone, CheckCircle, AlertCircle, RefreshCw, Download } from 'lucide-react'
+import { motion, AnimatePresence } from 'framer-motion'
+import { Smartphone, CheckCircle, AlertCircle, RefreshCw, Download, MessageSquare, Shield } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import { useAppStore } from '@/lib/store'
 import {
@@ -15,6 +16,7 @@ import {
   PairingSession,
 } from '@/lib/firebase'
 import { getDeviceId } from '@/lib/deviceId'
+import { scaleIn, fadeIn } from '@/lib/animations'
 import Link from 'next/link'
 
 export default function PairingScreen() {
@@ -192,206 +194,263 @@ export default function PairingScreen() {
   }, [initializePairing, pathname])
 
   return (
-    <div className="h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 overflow-y-auto">
-      {isInitializing && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 shadow-xl">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto mb-4"></div>
-            <p className="text-gray-600 dark:text-gray-400">Initializing pairing...</p>
-          </div>
-        </div>
-      )}
+    <div className="h-screen bg-mesh overflow-y-auto">
+      {/* Initializing overlay */}
+      <AnimatePresence>
+        {isInitializing && step === 'loading' && (
+          <motion.div
+            variants={fadeIn}
+            initial="hidden"
+            animate="visible"
+            exit="exit"
+            className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50"
+          >
+            <div className="glass-elevated rounded-2xl p-6 shadow-xl">
+              <div className="w-8 h-8 rounded-full border-2 border-blue-200 border-t-blue-500 animate-spin mx-auto mb-4" />
+              <p className="text-gray-600 dark:text-gray-400 text-sm">Initializing pairing...</p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <div className="max-w-2xl mx-auto w-full py-8 px-4">
-        <div className="text-center mb-6">
+        {/* Header */}
+        <motion.div
+          variants={fadeIn}
+          initial="hidden"
+          animate="visible"
+          className="text-center mb-6"
+        >
           <div className="flex items-center justify-center mb-3">
-            <Smartphone className="w-10 h-10 text-blue-600 mr-2" />
-            <h1 className="text-3xl font-bold text-gray-900 dark:text-white">SyncFlow</h1>
+            <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-500 to-violet-600 flex items-center justify-center shadow-lg shadow-blue-500/25 mr-3">
+              <MessageSquare className="w-6 h-6 text-white" />
+            </div>
+            <h1 className="text-3xl font-bold text-gradient">SyncFlow</h1>
           </div>
-          <p className="text-gray-600 dark:text-gray-400 text-sm">
+          <p className="text-gray-500 dark:text-gray-400 text-sm">
             Access your phone messages from your desktop
           </p>
-        </div>
+        </motion.div>
 
-        <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl p-6">
-          {step === 'loading' && (
-            <div className="text-center py-12">
-              <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-600 mx-auto mb-4"></div>
-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">
-                Initializing Pairing...
-              </h2>
-              <p className="text-gray-600 dark:text-gray-400">
-                Please wait while we set up your sync group
-              </p>
-            </div>
-          )}
+        <motion.div
+          variants={scaleIn}
+          initial="hidden"
+          animate="visible"
+          className="glass-elevated rounded-3xl p-6"
+        >
+          <AnimatePresence mode="wait">
+            {step === 'loading' && (
+              <motion.div
+                key="loading"
+                variants={fadeIn}
+                initial="hidden"
+                animate="visible"
+                exit="exit"
+                className="text-center py-12"
+              >
+                <div className="w-16 h-16 rounded-full border-2 border-blue-200 border-t-blue-500 animate-spin mx-auto mb-4" />
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">
+                  Initializing Pairing...
+                </h2>
+                <p className="text-gray-500 dark:text-gray-400 text-sm">
+                  Please wait while we set up your sync group
+                </p>
+              </motion.div>
+            )}
 
-          {step === 'waiting' && (
-            <div>
-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-1 text-center">
-                Scan to Pair
-              </h2>
-              <p className="text-gray-600 dark:text-gray-400 text-sm mb-4 text-center">
-                Scan this QR code with your Android device and approve pairing
-              </p>
+            {step === 'waiting' && (
+              <motion.div
+                key="waiting"
+                variants={fadeIn}
+                initial="hidden"
+                animate="visible"
+                exit="exit"
+              >
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-1 text-center">
+                  Scan to Pair
+                </h2>
+                <p className="text-gray-500 dark:text-gray-400 text-sm mb-4 text-center">
+                  Scan this QR code with your Android device and approve pairing
+                </p>
 
-              {/* QR Code and Download Section Side by Side */}
-              <div className="flex flex-col md:flex-row gap-4 items-start justify-center mb-4">
-                {/* QR Code */}
-                {pairingSession?.qrPayload && (
-                  <div className="flex-shrink-0 mx-auto md:mx-0">
-                    <div
-                      id="qr-code-section"
-                      className="bg-white p-5 rounded-xl shadow-inner border border-gray-200"
-                    >
-                      {/* Larger QR (220px) with high error correction for better scanning */}
-                      <QRCodeSVG value={pairingSession.qrPayload} size={220} level="H" includeMargin={true} />
-                      <p className="text-xs text-green-600 mt-2 font-medium text-center">Ready to scan</p>
-                    </div>
-                  </div>
-                )}
-
-                {/* Download Apps Section */}
-                <div className="flex-1 max-w-sm mx-auto md:mx-0">
-                  <div className="bg-gradient-to-r from-blue-500 to-purple-600 rounded-xl p-1 shadow-lg h-full">
-                    <div className="bg-white dark:bg-gray-800 rounded-lg p-4 h-full flex flex-col justify-between">
-                      <div>
-                        <div className="flex items-start gap-3 mb-3">
-                          <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-purple-600 rounded-xl flex items-center justify-center flex-shrink-0">
-                            <Download className="w-6 h-6 text-white" />
-                          </div>
-                          <div>
-                            <h3 className="text-base font-bold text-gray-900 dark:text-white mb-1">
-                              Download Apps
-                            </h3>
-                            <p className="text-xs text-gray-600 dark:text-gray-400">
-                              Get SyncFlow for Mac & Android
-                            </p>
-                          </div>
-                        </div>
-
-                        <div className="space-y-2 mb-4">
-                          <div className="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300">
-                            <svg className="w-4 h-4 text-blue-500" fill="currentColor" viewBox="0 0 20 20">
-                              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                            </svg>
-                            macOS 13+ (Apple Silicon & Intel)
-                          </div>
-                          <div className="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300">
-                            <svg className="w-4 h-4 text-green-500" fill="currentColor" viewBox="0 0 20 20">
-                              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                            </svg>
-                            Android 8.0+ (All devices)
-                          </div>
-                          <div className="flex items-center gap-2 text-xs text-gray-700 dark:text-gray-300">
-                            <svg className="w-4 h-4 text-purple-500" fill="currentColor" viewBox="0 0 20 20">
-                              <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                            </svg>
-                            Code signed & secure
-                          </div>
-                        </div>
-                      </div>
-
-                      <Link
-                        href="/download"
-                        className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white text-sm font-semibold rounded-lg transition-all hover:scale-105 shadow-md"
+                {/* QR Code and Download Section Side by Side */}
+                <div className="flex flex-col md:flex-row gap-4 items-start justify-center mb-4">
+                  {/* QR Code */}
+                  {pairingSession?.qrPayload && (
+                    <div className="flex-shrink-0 mx-auto md:mx-0">
+                      <motion.div
+                        variants={scaleIn}
+                        initial="hidden"
+                        animate="visible"
+                        id="qr-code-section"
+                        className="bg-white p-5 rounded-2xl shadow-lg"
                       >
-                        <Download className="w-4 h-4" />
-                        Download Now
-                      </Link>
+                        <QRCodeSVG value={pairingSession.qrPayload} size={220} level="H" includeMargin={true} />
+                        <p className="text-xs text-emerald-600 mt-2 font-medium text-center flex items-center justify-center gap-1">
+                          <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse" />
+                          Ready to scan
+                        </p>
+                      </motion.div>
+                    </div>
+                  )}
+
+                  {/* Download Apps Section */}
+                  <div className="flex-1 max-w-sm mx-auto md:mx-0">
+                    <div className="bg-gradient-to-br from-blue-500 to-violet-600 rounded-2xl p-[1px] shadow-lg h-full">
+                      <div className="bg-white dark:bg-gray-900 rounded-2xl p-4 h-full flex flex-col justify-between">
+                        <div>
+                          <div className="flex items-start gap-3 mb-3">
+                            <div className="w-12 h-12 bg-gradient-to-br from-blue-500 to-violet-600 rounded-xl flex items-center justify-center flex-shrink-0 shadow-md">
+                              <Download className="w-6 h-6 text-white" />
+                            </div>
+                            <div>
+                              <h3 className="text-base font-bold text-gray-900 dark:text-white mb-1">
+                                Download Apps
+                              </h3>
+                              <p className="text-[11px] text-gray-500 dark:text-gray-400">
+                                Get SyncFlow for Mac & Android
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="space-y-2 mb-4">
+                            <div className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
+                              <span className="text-blue-500">✓</span>
+                              macOS 13+ (Apple Silicon & Intel)
+                            </div>
+                            <div className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
+                              <span className="text-emerald-500">✓</span>
+                              Android 8.0+ (All devices)
+                            </div>
+                            <div className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
+                              <span className="text-violet-500">✓</span>
+                              Code signed & secure
+                            </div>
+                          </div>
+                        </div>
+
+                        <Link
+                          href="/download"
+                          className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-gradient-to-r from-blue-500 to-violet-600 hover:from-blue-600 hover:to-violet-700 text-white text-sm font-semibold rounded-xl transition-all shadow-md shadow-blue-500/20"
+                        >
+                          <Download className="w-4 h-4" />
+                          Download Now
+                        </Link>
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
 
-              {/* Device Info and Refresh Button */}
-              <div className="space-y-3">
-                <div className="bg-blue-50 dark:bg-blue-900/20 rounded-lg p-3">
-                  <p className="text-sm text-gray-700 dark:text-gray-300">
-                    <span className="font-semibold">{deviceCount}/{deviceLimit}</span> devices connected
-                    {deviceCount >= deviceLimit && (
-                      <span className="text-yellow-600 dark:text-yellow-400 block text-xs mt-1">
-                        Upgrade to Pro for unlimited devices
-                      </span>
-                    )}
-                  </p>
-                </div>
-
-                {syncGroupId && (
-                  <div className="bg-gray-100 dark:bg-gray-700 p-3 rounded-lg text-left">
-                    <p className="text-xs text-gray-600 dark:text-gray-400 mb-1">Sync Group ID:</p>
-                    <code className="text-xs font-mono text-gray-900 dark:text-white break-all">{syncGroupId}</code>
+                {/* Device Info and Refresh Button */}
+                <div className="space-y-3">
+                  <div className="glass-panel rounded-xl p-3">
+                    <p className="text-sm text-gray-600 dark:text-gray-300">
+                      <span className="font-semibold">{deviceCount}/{deviceLimit}</span> devices connected
+                      {deviceCount >= deviceLimit && (
+                        <span className="text-amber-600 dark:text-amber-400 block text-xs mt-1">
+                          Upgrade to Pro for unlimited devices
+                        </span>
+                      )}
+                    </p>
                   </div>
-                )}
 
-                <div className="flex justify-center pt-2">
-                  <button
+                  {syncGroupId && (
+                    <div className="glass-panel rounded-xl p-3 text-left">
+                      <p className="text-[11px] text-gray-400 dark:text-gray-500 mb-1">Sync Group ID:</p>
+                      <code className="text-[11px] font-mono text-gray-900 dark:text-white break-all">{syncGroupId}</code>
+                    </div>
+                  )}
+
+                  <div className="flex justify-center pt-2">
+                    <motion.button
+                      whileHover={{ scale: 1.03 }}
+                      whileTap={{ scale: 0.97 }}
+                      onClick={initializePairing}
+                      disabled={isInitializing}
+                      className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 disabled:from-gray-400 disabled:to-gray-500 text-white text-sm font-medium rounded-xl transition-all shadow-md shadow-blue-500/20 disabled:shadow-none"
+                    >
+                      <RefreshCw className={`w-4 h-4 ${isInitializing ? 'animate-spin' : ''}`} />
+                      {isInitializing ? 'Refreshing...' : 'Refresh Pairing'}
+                    </motion.button>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+
+            {step === 'approved' && (
+              <motion.div
+                key="approved"
+                variants={scaleIn}
+                initial="hidden"
+                animate="visible"
+                exit="exit"
+                className="text-center py-12"
+              >
+                <div className="w-16 h-16 rounded-full bg-emerald-500 flex items-center justify-center mx-auto mb-4 shadow-lg shadow-emerald-500/30">
+                  <CheckCircle className="w-8 h-8 text-white" />
+                </div>
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">
+                  Paired Successfully
+                </h2>
+                <p className="text-gray-500 dark:text-gray-400 text-sm">
+                  Redirecting to messages...
+                </p>
+              </motion.div>
+            )}
+
+            {step === 'error' && (
+              <motion.div
+                key="error"
+                variants={scaleIn}
+                initial="hidden"
+                animate="visible"
+                exit="exit"
+                className="text-center py-12"
+              >
+                <div className="w-16 h-16 rounded-2xl bg-red-500/10 flex items-center justify-center mx-auto mb-4">
+                  <AlertCircle className="w-8 h-8 text-red-500" />
+                </div>
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">
+                  Pairing Failed
+                </h2>
+                <p className="text-gray-500 dark:text-gray-400 text-sm mb-6">{errorMessage}</p>
+                <div className="space-y-3">
+                  <motion.button
+                    whileHover={{ scale: 1.03 }}
+                    whileTap={{ scale: 0.97 }}
                     onClick={initializePairing}
                     disabled={isInitializing}
-                    className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white text-sm rounded-lg transition-colors"
+                    className="inline-flex items-center gap-2 px-6 py-3 bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 disabled:from-gray-400 disabled:to-gray-500 text-white font-semibold rounded-xl transition-all shadow-md shadow-blue-500/20 disabled:shadow-none"
                   >
-                    <RefreshCw className={`w-4 h-4 ${isInitializing ? 'animate-spin' : ''}`} />
-                    {isInitializing ? 'Refreshing...' : 'Refresh Pairing'}
-                  </button>
+                    <RefreshCw className={`w-5 h-5 ${isInitializing ? 'animate-spin' : ''}`} />
+                    {isInitializing ? 'Retrying...' : 'Try Again'}
+                  </motion.button>
+                  <p className="text-[11px] text-gray-400 dark:text-gray-500">
+                    If this persists, try refreshing the page
+                  </p>
                 </div>
-              </div>
-            </div>
-          )}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </motion.div>
 
-          {step === 'approved' && (
-            <div className="text-center py-12">
-              <CheckCircle className="w-16 h-16 text-green-600 mx-auto mb-4" />
-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-2">
-                Paired Successfully
-              </h2>
-              <p className="text-gray-600 dark:text-gray-400">
-                Redirecting to messages...
-              </p>
-            </div>
-          )}
-
-          {step === 'error' && (
-            <div className="text-center py-12">
-              <AlertCircle className="w-20 h-20 text-red-500 mx-auto mb-4" />
-              <h2 className="text-2xl font-semibold text-gray-900 dark:text-white mb-2">
-                Pairing Failed
-              </h2>
-              <p className="text-gray-600 dark:text-gray-400 mb-6">{errorMessage}</p>
-              <div className="space-y-3">
-                <button
-                  onClick={initializePairing}
-                  disabled={isInitializing}
-                  className="bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white font-semibold py-3 px-6 rounded-lg transition-colors flex items-center justify-center mx-auto"
-                >
-                  <RefreshCw className={`w-5 h-5 mr-2 ${isInitializing ? 'animate-spin' : ''}`} />
-                  {isInitializing ? 'Retrying...' : 'Try Again'}
-                </button>
-                <p className="text-xs text-gray-500 dark:text-gray-400">
-                  If this persists, try refreshing the page
-                </p>
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="flex justify-center mt-4 md:hidden">
-          <div className="flex flex-col items-center text-gray-400 dark:text-gray-500">
-            <div className="w-6 h-1 bg-gray-300 dark:bg-gray-600 rounded-full mb-1"></div>
-            <div className="w-4 h-1 bg-gray-300 dark:bg-gray-600 rounded-full mb-1 opacity-60"></div>
-            <div className="w-2 h-1 bg-gray-300 dark:bg-gray-600 rounded-full opacity-40"></div>
+        <motion.div
+          variants={fadeIn}
+          initial="hidden"
+          animate="visible"
+          className="text-center mt-4 space-y-1"
+        >
+          <div className="flex items-center justify-center gap-1.5 text-gray-400 dark:text-gray-500 text-xs">
+            <Shield className="w-3.5 h-3.5" />
+            <p>Your messages are end-to-end encrypted and never leave your control</p>
           </div>
-        </div>
-
-        <div className="text-center mt-4 space-y-1">
-          <p className="text-gray-500 dark:text-gray-400 text-xs">
-            Your messages are end-to-end encrypted and never leave your control
-          </p>
           {step === 'waiting' && (
-            <p className="text-xs text-gray-500 dark:text-gray-400">
+            <p className="text-[11px] text-gray-400 dark:text-gray-500 flex items-center justify-center gap-1">
+              <span className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-pulse" />
               Waiting for phone approval...
             </p>
           )}
-        </div>
+        </motion.div>
       </div>
     </div>
   )

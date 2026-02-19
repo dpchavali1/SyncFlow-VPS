@@ -26,7 +26,7 @@ import {
 } from '@/lib/e2ee'
 import { useAppStore } from '@/lib/store'
 import { NotificationSyncSettings } from '@/components/notification-sync-settings'
-import { ArrowLeft, Bell, BarChart3, User } from 'lucide-react'
+import { ArrowLeft, Bell, BarChart3, User, Shield, Key, RefreshCw } from 'lucide-react'
 
 const formatBytes = (bytes: number) => {
   if (bytes < 1024) return `${bytes} B`
@@ -346,14 +346,20 @@ export default function SettingsPage() {
 
   if (!userId) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-600"></div>
+      <div className="flex items-center justify-center min-h-screen bg-mesh">
+        <div className="w-10 h-10 rounded-full border-2 border-blue-200 border-t-blue-500 animate-spin" />
       </div>
     )
   }
 
+  const tabs: { id: TabType; label: string; icon: React.ReactNode }[] = [
+    { id: 'notifications', label: 'Notifications', icon: <Bell className="w-4 h-4" /> },
+    { id: 'usage', label: 'Usage & Limits', icon: <BarChart3 className="w-4 h-4" /> },
+    { id: 'account', label: 'Account', icon: <User className="w-4 h-4" /> },
+  ]
+
   return (
-    <div className="flex flex-col h-screen bg-gray-100 dark:bg-gray-900">
+    <div className="flex flex-col h-screen bg-mesh">
       <Header />
 
       <main className="flex-1 overflow-auto p-6">
@@ -362,7 +368,7 @@ export default function SettingsPage() {
           <div className="mb-6">
             <button
               onClick={() => router.push('/messages')}
-              className="flex items-center gap-2 px-4 py-2 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
+              className="flex items-center gap-2 px-4 py-2 text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-white/50 dark:hover:bg-white/5 rounded-xl transition-colors text-sm"
             >
               <ArrowLeft className="w-4 h-4" />
               Back to Messages
@@ -370,15 +376,15 @@ export default function SettingsPage() {
           </div>
 
           <div className="mb-6">
-            <h2 className="text-2xl font-semibold text-gray-900 dark:text-white">Settings</h2>
+            <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Settings</h2>
           </div>
 
           {subscriptionBanner && (
-            <div className="mb-6 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 text-green-700 dark:text-green-300 px-4 py-3 rounded-lg flex items-center justify-between">
-              <span>{subscriptionBanner}</span>
+            <div className="mb-6 glass-panel rounded-2xl bg-emerald-500/10 border-emerald-200/30 dark:border-emerald-700/30 text-emerald-700 dark:text-emerald-300 px-5 py-3 flex items-center justify-between">
+              <span className="text-sm">{subscriptionBanner}</span>
               <button
                 onClick={() => setSubscriptionBanner(null)}
-                className="text-green-500 hover:text-green-700 dark:hover:text-green-200"
+                className="text-emerald-500 hover:text-emerald-700 dark:hover:text-emerald-200 ml-3"
               >
                 &times;
               </button>
@@ -387,56 +393,33 @@ export default function SettingsPage() {
 
           {isLoading && (
             <div className="flex items-center justify-center py-10">
-              <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600"></div>
+              <div className="w-10 h-10 rounded-full border-2 border-blue-200 border-t-blue-500 animate-spin" />
             </div>
           )}
 
           {!isLoading && error && (
-            <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg">
+            <div className="glass-panel rounded-2xl bg-red-500/10 border-red-200/30 dark:border-red-700/30 text-red-600 dark:text-red-400 px-5 py-3 text-sm">
               {error}
             </div>
           )}
 
-          {/* Tab Navigation */}
+          {/* Tab Navigation — Segmented Control */}
           <div className="mb-6">
-            <div className="border-b border-gray-200 dark:border-gray-700">
-              <nav className="-mb-px flex space-x-8">
+            <div className="glass-panel rounded-2xl p-1 inline-flex gap-1">
+              {tabs.map((tab) => (
                 <button
-                  onClick={() => setActiveTab('notifications')}
-                  className={`py-2 px-1 border-b-2 font-medium text-sm flex items-center gap-2 ${
-                    activeTab === 'notifications'
-                      ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all ${
+                    activeTab === tab.id
+                      ? 'bg-white dark:bg-gray-800 text-blue-600 dark:text-blue-400 shadow-sm'
+                      : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
                   }`}
                 >
-                  <Bell className="w-4 h-4" />
-                  Notifications
+                  {tab.icon}
+                  {tab.label}
                 </button>
-
-                <button
-                  onClick={() => setActiveTab('usage')}
-                  className={`py-2 px-1 border-b-2 font-medium text-sm flex items-center gap-2 ${
-                    activeTab === 'usage'
-                      ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
-                  }`}
-                >
-                  <BarChart3 className="w-4 h-4" />
-                  Usage & Limits
-                </button>
-
-                <button
-                  onClick={() => setActiveTab('account')}
-                  className={`py-2 px-1 border-b-2 font-medium text-sm flex items-center gap-2 ${
-                    activeTab === 'account'
-                      ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                      : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
-                  }`}
-                >
-                  <User className="w-4 h-4" />
-                  Account
-                </button>
-              </nav>
+              ))}
             </div>
           </div>
 
@@ -445,7 +428,7 @@ export default function SettingsPage() {
             {/* Notifications Tab */}
             {activeTab === 'notifications' && (
               <div className="space-y-6">
-                <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6">
+                <div className="glass-panel rounded-2xl p-6">
                   <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Notification Settings</h3>
                   <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
                     Configure how Android notifications appear in your browser
@@ -476,7 +459,7 @@ export default function SettingsPage() {
                       <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Usage Statistics</h3>
                       <button
                         onClick={() => userId && loadUsage(userId)}
-                        className="px-4 py-2 rounded-lg bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-200 border border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-700"
+                        className="px-4 py-2 rounded-xl glass-panel text-gray-600 dark:text-gray-300 hover:bg-white/80 dark:hover:bg-white/10 text-sm font-medium transition-all"
                         disabled={isLoading}
                       >
                         {isLoading ? 'Refreshing...' : 'Refresh'}
@@ -484,7 +467,7 @@ export default function SettingsPage() {
                     </div>
 
                     <div className="grid gap-6 md:grid-cols-2">
-                      <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6">
+                      <div className="glass-panel rounded-2xl p-6">
                         <div className="text-sm text-gray-500 dark:text-gray-400 mb-1">Plan</div>
                         <div className="text-lg font-semibold text-gray-900 dark:text-white">{usage.planLabel}</div>
                         {!usage.isPaid && (
@@ -541,14 +524,14 @@ export default function SettingsPage() {
                               }
                             }}
                             disabled={syncingPlan}
-                            className="mt-2 px-3 py-1.5 text-sm rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60"
+                            className="mt-2 px-4 py-2 text-sm rounded-xl bg-gradient-to-r from-blue-500 to-blue-600 text-white font-medium hover:from-blue-600 hover:to-blue-700 disabled:opacity-60 transition-all shadow-sm"
                           >
                             {syncingPlan ? 'Syncing...' : 'Refresh Plan'}
                           </button>
                         )}
                       </div>
 
-                      <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6">
+                      <div className="glass-panel rounded-2xl p-6">
                         <div className="text-sm text-gray-500 dark:text-gray-400 mb-2">Monthly uploads</div>
                         <div className="flex items-center justify-between mb-2">
                           <div className="text-lg font-semibold text-gray-900 dark:text-white">
@@ -558,9 +541,9 @@ export default function SettingsPage() {
                             MMS {formatBytes(usage.mmsBytes)} • Photos {formatBytes(usage.photoBytes)} • Files {formatBytes(usage.fileBytes)}
                           </div>
                         </div>
-                        <div className="w-full bg-gray-100 dark:bg-gray-700 rounded-full h-2">
+                        <div className="w-full bg-gray-200/50 dark:bg-gray-700/50 rounded-full h-2">
                           <div
-                            className="bg-blue-600 h-2 rounded-full"
+                            className="bg-gradient-to-r from-blue-500 to-blue-600 h-2 rounded-full transition-all"
                             style={{
                               width: `${Math.min(100, (usage.monthlyUsedBytes / Math.max(1, usage.monthlyLimitBytes)) * 100)}%`,
                             }}
@@ -573,14 +556,14 @@ export default function SettingsPage() {
                         )}
                       </div>
 
-                      <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6 md:col-span-2">
+                      <div className="glass-panel rounded-2xl p-6 md:col-span-2">
                         <div className="text-sm text-gray-500 dark:text-gray-400 mb-2">Storage</div>
                         <div className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
                           {formatBytes(usage.storageUsedBytes)} / {formatBytes(usage.storageLimitBytes)}
                         </div>
-                        <div className="w-full bg-gray-100 dark:bg-gray-700 rounded-full h-2">
+                        <div className="w-full bg-gray-200/50 dark:bg-gray-700/50 rounded-full h-2">
                           <div
-                            className="bg-emerald-500 h-2 rounded-full"
+                            className="bg-gradient-to-r from-emerald-500 to-emerald-600 h-2 rounded-full transition-all"
                             style={{
                               width: `${Math.min(100, (usage.storageUsedBytes / Math.max(1, usage.storageLimitBytes)) * 100)}%`,
                             }}
@@ -602,14 +585,14 @@ export default function SettingsPage() {
             {/* Account Tab */}
             {activeTab === 'account' && (
               <div className="space-y-6">
-                <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6">
+                <div className="glass-panel rounded-2xl p-6">
                   <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Account Information</h3>
                   <p className="text-sm text-gray-600 dark:text-gray-400 mb-6">
                     Your account details and pairing status
                   </p>
 
                   <div className="space-y-4">
-                    <div className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                    <div className="flex items-center justify-between p-4 bg-gray-50/50 dark:bg-white/5 rounded-xl">
                       <div>
                         <div className="text-sm text-gray-500 dark:text-gray-400 mb-1">User ID</div>
                         <div className="text-sm font-mono text-gray-700 dark:text-gray-300">
@@ -624,7 +607,7 @@ export default function SettingsPage() {
                       </div>
                     </div>
 
-                    <div className="p-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg">
+                    <div className="p-4 bg-blue-500/10 border border-blue-200/30 dark:border-blue-700/30 rounded-xl">
                       <div className="flex items-center gap-3">
                         <User className="w-5 h-5 text-blue-600 dark:text-blue-400" />
                         <div>
@@ -637,7 +620,7 @@ export default function SettingsPage() {
                     </div>
 
                     {safetyNumber && (
-                      <div className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg">
+                      <div className="p-4 bg-gray-50/50 dark:bg-white/5 rounded-xl">
                         <div className="text-sm text-gray-500 dark:text-gray-400 mb-2">Safety Number</div>
                         <div className="font-mono text-sm text-gray-900 dark:text-gray-100 tracking-wider leading-relaxed">
                           {safetyNumber}
@@ -650,7 +633,7 @@ export default function SettingsPage() {
                   </div>
                 </div>
 
-                <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6">
+                <div className="glass-panel rounded-2xl p-6">
                   <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Repair encryption</h3>
                   <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
                     If messages are still encrypted after reinstalling your apps, this clears stale keys and re-syncs everything from your phone.
@@ -658,7 +641,7 @@ export default function SettingsPage() {
                   <button
                     onClick={handleRepairEncryption}
                     disabled={repairLoading}
-                    className="inline-flex items-center justify-center px-4 py-2 rounded-lg bg-orange-600 text-white hover:bg-orange-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                    className="inline-flex items-center justify-center px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 text-white text-sm font-medium hover:from-amber-600 hover:to-orange-700 disabled:from-gray-400 disabled:to-gray-500 disabled:cursor-not-allowed transition-all shadow-md shadow-amber-500/20 disabled:shadow-none"
                   >
                     {repairLoading ? 'Repairing...' : 'Repair Encryption'}
                   </button>
@@ -669,7 +652,7 @@ export default function SettingsPage() {
                   )}
                 </div>
 
-                <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6">
+                <div className="glass-panel rounded-2xl p-6">
                   <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Restore from backup</h3>
                   <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
                     If you backed up your encryption keys on Android, enter your backup passphrase to restore them.
@@ -680,7 +663,7 @@ export default function SettingsPage() {
                       value={restorePassphrase}
                       onChange={(e) => setRestorePassphrase(e.target.value)}
                       placeholder="Backup passphrase (min 8 chars)"
-                      className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
+                      className="w-full px-4 py-2.5 glass-input rounded-xl text-gray-900 dark:text-gray-100 text-sm placeholder:text-gray-400 focus:outline-none"
                     />
                     <button
                       onClick={async () => {
@@ -707,7 +690,7 @@ export default function SettingsPage() {
                         }
                       }}
                       disabled={restoreLoading || !restorePassphrase}
-                      className="inline-flex items-center justify-center px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                      className="inline-flex items-center justify-center px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-500 to-blue-600 text-white text-sm font-medium hover:from-blue-600 hover:to-blue-700 disabled:from-gray-400 disabled:to-gray-500 disabled:cursor-not-allowed transition-all shadow-md shadow-blue-500/20 disabled:shadow-none"
                     >
                       {restoreLoading ? 'Restoring...' : 'Restore Keys'}
                     </button>
@@ -719,7 +702,7 @@ export default function SettingsPage() {
                   )}
                 </div>
 
-                <div className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-6">
+                <div className="glass-panel rounded-2xl p-6">
                   <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">Web key protection</h3>
                   <p className="text-sm text-gray-600 dark:text-gray-400 mb-4">
                     Protect your web encryption keys with a passphrase. You’ll need it after refresh to decrypt messages.
@@ -737,12 +720,12 @@ export default function SettingsPage() {
                             value={unlockPassphrase}
                             onChange={(e) => setUnlockPassphrase(e.target.value)}
                             placeholder="Enter passphrase to unlock"
-                            className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
+                            className="w-full px-4 py-2.5 glass-input rounded-xl text-gray-900 dark:text-gray-100 text-sm placeholder:text-gray-400 focus:outline-none"
                           />
                           <button
                             onClick={handleUnlockKeys}
                             disabled={keyProtectionLoading}
-                            className="inline-flex items-center justify-center px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                            className="inline-flex items-center justify-center px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-500 to-blue-600 text-white text-sm font-medium hover:from-blue-600 hover:to-blue-700 disabled:from-gray-400 disabled:to-gray-500 disabled:cursor-not-allowed transition-all shadow-md shadow-blue-500/20 disabled:shadow-none"
                           >
                             {keyProtectionLoading ? 'Unlocking…' : 'Unlock Keys'}
                           </button>
@@ -751,7 +734,7 @@ export default function SettingsPage() {
                       {keyProtectionState.unlocked && (
                         <button
                           onClick={handleLockKeys}
-                          className="inline-flex items-center justify-center px-4 py-2 rounded-lg bg-gray-700 text-white hover:bg-gray-800 transition-colors"
+                          className="inline-flex items-center justify-center px-5 py-2.5 rounded-xl bg-gray-700 text-white text-sm font-medium hover:bg-gray-800 transition-all"
                         >
                           Lock Keys
                         </button>
@@ -769,19 +752,19 @@ export default function SettingsPage() {
                         value={passphrase}
                         onChange={(e) => setPassphrase(e.target.value)}
                         placeholder="New passphrase (min 8 chars)"
-                        className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
+                        className="w-full px-4 py-2.5 glass-input rounded-xl text-gray-900 dark:text-gray-100 text-sm placeholder:text-gray-400 focus:outline-none"
                       />
                       <input
                         type="password"
                         value={confirmPassphrase}
                         onChange={(e) => setConfirmPassphrase(e.target.value)}
                         placeholder="Confirm passphrase"
-                        className="w-full px-3 py-2 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
+                        className="w-full px-4 py-2.5 glass-input rounded-xl text-gray-900 dark:text-gray-100 text-sm placeholder:text-gray-400 focus:outline-none"
                       />
                       <button
                         onClick={handleEnableKeyProtection}
                         disabled={keyProtectionLoading}
-                        className="inline-flex items-center justify-center px-4 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+                        className="inline-flex items-center justify-center px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-500 to-blue-600 text-white text-sm font-medium hover:from-blue-600 hover:to-blue-700 disabled:from-gray-400 disabled:to-gray-500 disabled:cursor-not-allowed transition-all shadow-md shadow-blue-500/20 disabled:shadow-none"
                       >
                         {keyProtectionLoading ? 'Enabling…' : 'Enable Key Protection'}
                       </button>

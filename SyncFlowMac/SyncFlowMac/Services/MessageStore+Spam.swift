@@ -119,9 +119,27 @@ extension MessageStore {
     func loadSpamMessagesFromVPS() {
         Task {
             do {
-                let response = try await VPSService.shared.getSpamMessages(limit: 100)
-                let mapped = response.messages.map { vpsSpam in
-                    SpamMessage(
+                // Fetch spam messages and whitelist concurrently
+                async let spamResponse = VPSService.shared.getSpamMessages(limit: 100)
+                async let whitelistResponse = try? VPSService.shared.getWhitelist()
+
+                let response = try await spamResponse
+                let whitelist = await whitelistResponse
+
+                // Build set of whitelisted addresses (normalized) so we can exclude them
+                let whitelistedAddresses: Set<String> = {
+                    guard let wl = whitelist else { return [] }
+                    return Set(wl.whitelist.map { normalizePhoneNumber($0.phoneNumber) })
+                }()
+
+                let mapped = response.messages.compactMap { vpsSpam -> SpamMessage? in
+                    // Skip spam entries for whitelisted numbers — the user marked them "not spam"
+                    // but some individual spam deletions may still be in flight
+                    let normalizedAddress = normalizePhoneNumber(vpsSpam.address)
+                    if whitelistedAddresses.contains(normalizedAddress) {
+                        return nil
+                    }
+                    return SpamMessage(
                         id: vpsSpam.id,
                         address: vpsSpam.address,
                         body: vpsSpam.body ?? "",
@@ -142,7 +160,7 @@ extension MessageStore {
                     }
                     #if DEBUG
                     if mapped.count != previousCount {
-                        print("[MessageStore VPS] Loaded \(mapped.count) spam messages")
+                        print("[MessageStore VPS] Loaded \(mapped.count) spam messages (whitelist excluded \(response.messages.count - mapped.count))")
                     }
                     #endif
                 }
@@ -157,6 +175,7 @@ extension MessageStore {
     func startSpamWebSocketListener() {
         VPSService.shared.spamUpdated
             .receive(on: DispatchQueue.main)
+            .debounce(for: .seconds(1.5), scheduler: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.loadSpamMessagesFromVPS()
             }

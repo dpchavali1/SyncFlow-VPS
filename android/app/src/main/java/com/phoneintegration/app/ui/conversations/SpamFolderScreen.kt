@@ -145,6 +145,8 @@ fun SpamFolderScreen(
                                 database.spamMessageDao().deleteByAddress(conversation.address)
                                 // Only sync to cloud if devices are paired
                                 if (com.phoneintegration.app.desktop.DesktopSyncService.hasPairedDevices(context)) {
+                                    // Sync whitelist to VPS so Mac knows this number is safe
+                                    try { syncService.addToWhitelist(conversation.address) } catch (_: Exception) {}
                                     ids.forEach { syncService.deleteSpamMessage(it) }
                                 }
                                 Toast.makeText(context, "Marked as not spam", Toast.LENGTH_SHORT).show()
@@ -253,6 +255,8 @@ fun SpamFolderScreen(
                             spamFilterService.addToWhitelist(conversation.address)
                             database.spamMessageDao().deleteByAddress(conversation.address)
                             if (com.phoneintegration.app.desktop.DesktopSyncService.hasPairedDevices(context)) {
+                                // Sync whitelist to VPS so Mac knows this number is safe
+                                try { syncService.addToWhitelist(conversation.address) } catch (_: Exception) {}
                                 ids.forEach { syncService.deleteSpamMessage(it) }
                             }
                             Toast.makeText(context, "Marked as not spam", Toast.LENGTH_SHORT).show()

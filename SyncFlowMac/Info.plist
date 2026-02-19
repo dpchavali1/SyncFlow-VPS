@@ -48,16 +48,6 @@
 		<true/>
 		<key>NSExceptionDomains</key>
 		<dict>
-			<!-- VPS Server - Allow HTTP for VPS mode -->
-			<key>5.78.188.206</key>
-			<dict>
-				<key>NSExceptionAllowsInsecureHTTPLoads</key>
-				<true/>
-				<key>NSExceptionRequiresForwardSecrecy</key>
-				<false/>
-				<key>NSIncludesSubdomains</key>
-				<false/>
-			</dict>
 			<key>firebaseio.com</key>
 			<dict>
 				<key>NSIncludesSubdomains</key>

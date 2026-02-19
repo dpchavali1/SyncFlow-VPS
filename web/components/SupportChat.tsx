@@ -154,7 +154,7 @@ export default function SupportChat() {
     return (
       <button
         onClick={() => setIsOpen(true)}
-        className="fixed bottom-6 right-6 bg-blue-600 hover:bg-blue-700 text-white rounded-full p-4 shadow-lg transition-all z-50"
+        className="fixed bottom-6 right-6 bg-gradient-to-br from-blue-500 to-violet-600 hover:from-blue-600 hover:to-violet-700 text-white rounded-2xl p-4 shadow-lg shadow-blue-500/25 transition-all z-50 hover:scale-105"
         aria-label="Open support chat"
       >
         <svg
@@ -176,9 +176,9 @@ export default function SupportChat() {
   }
 
   return (
-    <div className="fixed bottom-6 right-6 w-96 h-[500px] bg-white dark:bg-gray-900 rounded-2xl shadow-2xl flex flex-col z-50 border border-gray-200 dark:border-gray-700">
+    <div className="fixed bottom-6 right-6 w-96 h-[500px] glass-elevated rounded-3xl flex flex-col z-50 shadow-2xl overflow-hidden">
       {/* Header */}
-      <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700 bg-blue-600 rounded-t-2xl">
+      <div className="flex items-center justify-between p-4 bg-gradient-to-r from-blue-500 to-violet-600">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 bg-white/20 rounded-full flex items-center justify-center">
             <svg
@@ -232,8 +232,8 @@ export default function SupportChat() {
             <div
               className={`max-w-[80%] rounded-2xl px-4 py-2 ${
                 message.role === 'user'
-                  ? 'bg-blue-600 text-white rounded-br-md'
-                  : 'bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100 rounded-bl-md'
+                  ? 'bubble-sent rounded-br-md'
+                  : 'bubble-received rounded-bl-md'
               } group relative`}
             >
               <div className="text-sm whitespace-pre-wrap select-text">
@@ -268,7 +268,7 @@ export default function SupportChat() {
 
         {isLoading && (
           <div className="flex justify-start">
-            <div className="bg-gray-100 dark:bg-gray-800 rounded-2xl rounded-bl-md px-4 py-3">
+            <div className="bubble-received rounded-2xl rounded-bl-md px-4 py-3">
               <div className="flex space-x-2">
                 <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
                 <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
@@ -290,7 +290,7 @@ export default function SupportChat() {
               <button
                 key={i}
                 onClick={() => sendMessage(q)}
-                className="text-xs bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 px-3 py-1.5 rounded-full transition-colors"
+                className="text-xs bg-white/50 dark:bg-white/5 hover:bg-white/80 dark:hover:bg-white/10 px-3 py-1.5 rounded-full transition-colors border border-gray-200/30 dark:border-gray-700/30"
               >
                 {q}
               </button>
@@ -300,7 +300,7 @@ export default function SupportChat() {
       )}
 
       {/* Input */}
-      <div className="p-4 border-t border-gray-200 dark:border-gray-700">
+      <div className="p-3 border-t border-gray-200/20 dark:border-gray-700/20">
         <div className="flex gap-2">
           <input
             type="text"
@@ -308,13 +308,13 @@ export default function SupportChat() {
             onChange={(e) => setInput(e.target.value)}
             onKeyPress={handleKeyPress}
             placeholder="Ask a question..."
-            className="flex-1 bg-gray-100 dark:bg-gray-800 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="flex-1 glass-input rounded-full px-4 py-2 text-sm focus:outline-none"
             disabled={isLoading}
           />
           <button
             onClick={() => sendMessage()}
             disabled={!input.trim() || isLoading}
-            className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white rounded-full p-2 transition-colors"
+            className="bg-gradient-to-br from-blue-500 to-violet-600 hover:from-blue-600 hover:to-violet-700 disabled:from-gray-400 disabled:to-gray-500 text-white rounded-full p-2 transition-all shadow-sm"
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"

@@ -316,7 +316,7 @@ class VPSAuthManager private constructor(private val context: Context) {
     suspend fun initiatePairing(deviceName: String, deviceType: String = "android"): Result<VPSPairingRequest> {
         return try {
             val request = vpsClient.initiatePairing(deviceName, deviceType)
-            Log.i(TAG, "Pairing initiated: ${request.pairingToken}")
+            Log.i(TAG, "Pairing initiated: ${request.pairingToken.take(8)}...")
             Result.success(request)
         } catch (e: Exception) {
             Log.e(TAG, "Pairing initiation failed", e)

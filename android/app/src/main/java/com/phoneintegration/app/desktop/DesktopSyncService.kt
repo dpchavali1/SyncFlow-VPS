@@ -167,6 +167,16 @@ class DesktopSyncService(context: Context) {
 
     // ===================== Spam List Sync =====================
 
+    suspend fun addToWhitelist(phoneNumber: String) {
+        if (!isAuthenticated()) return
+        try {
+            vpsClient.addToWhitelist(phoneNumber)
+            Log.d(TAG, "Added $phoneNumber to VPS whitelist")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error adding to whitelist", e)
+        }
+    }
+
     suspend fun syncWhitelist(whitelist: Set<String>) {
         if (!isAuthenticated()) return
         try {
