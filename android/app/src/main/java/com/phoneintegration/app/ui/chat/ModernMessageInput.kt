@@ -49,6 +49,11 @@ import androidx.core.content.ContextCompat
 import com.phoneintegration.app.speech.VoiceRecognitionState
 import com.phoneintegration.app.speech.VoiceToTextManager
 
+data class ReplyPreview(
+    val sender: String,
+    val snippet: String
+)
+
 /**
  * Modern message input redesign inspired by iMessage/WhatsApp
  * Clean, minimal design with smooth animations

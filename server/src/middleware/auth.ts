@@ -85,16 +85,3 @@ export function requireAdmin(
   next();
 }
 
-// Validate user owns the resource
-export function validateOwnership(userIdParam: string = 'userId') {
-  return (req: Request, res: Response, next: NextFunction): void => {
-    const resourceUserId = req.params[userIdParam];
-
-    if (resourceUserId && resourceUserId !== req.userId && !req.user?.admin) {
-      res.status(403).json({ error: 'Access denied' });
-      return;
-    }
-
-    next();
-  };
-}

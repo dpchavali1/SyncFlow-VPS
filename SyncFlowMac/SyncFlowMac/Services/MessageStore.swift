@@ -307,13 +307,6 @@ class MessageStore: ObservableObject {
         // Listen for memory optimization notifications from the system
         NotificationCenter.default.addObserver(
             self,
-            selector: #selector(handleMemoryPressure),
-            name: .memoryPressureCritical,
-            object: nil
-        )
-
-        NotificationCenter.default.addObserver(
-            self,
             selector: #selector(handleClearMessageCache),
             name: .clearMessageCache,
             object: nil
@@ -330,11 +323,6 @@ class MessageStore: ObservableObject {
 
     private func handleBatteryStateChange(_ state: BatteryAwareServiceManager.ServiceState) {
         // No-op: battery optimization handled at app level (AppState)
-    }
-
-    @objc private func handleMemoryPressure() {
-        // Clear cached messages that aren't currently visible
-        clearNonVisibleMessageCache()
     }
 
     @objc private func handleClearMessageCache(_ notification: Notification) {
@@ -471,11 +459,6 @@ class MessageStore: ObservableObject {
             print("[MessageStore VPS] Repair poll timed out — some messages may still be encrypted")
             #endif
         }
-    }
-
-    private func clearNonVisibleMessageCache() {
-        // Clear messages that aren't currently displayed
-        // This is a simplified implementation
     }
 
     private func clearOldMessageCache(olderThan seconds: TimeInterval) {

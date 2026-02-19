@@ -1175,7 +1175,7 @@ class MainActivity : ComponentActivity() {
                             (callState == SyncFlowCallManager.CallState.Connected ||
                              callState == SyncFlowCallManager.CallState.Connecting ||
                              callState == SyncFlowCallManager.CallState.Ringing)) {
-                            if (currentCallManager.currentCall?.isScreenShare == true) {
+                            if (currentCallManager.currentCall.value?.isScreenShare == true) {
                                 ScreenShareViewerScreen(
                                     callManager = currentCallManager,
                                     onStopViewing = {

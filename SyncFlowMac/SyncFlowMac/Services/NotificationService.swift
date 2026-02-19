@@ -98,7 +98,21 @@ class NotificationService: NSObject, UNUserNotificationCenterDelegate {
             options: []
         )
 
-        center.setNotificationCategories([category, callCategory, videoCallCategory, phoneCallCategory])
+        // Define deal notification action
+        let viewDealAction = UNNotificationAction(
+            identifier: "VIEW_DEAL_ACTION",
+            title: "View Deal",
+            options: [.foreground]
+        )
+
+        let dealCategory = UNNotificationCategory(
+            identifier: "DEAL_CATEGORY",
+            actions: [viewDealAction],
+            intentIdentifiers: [],
+            options: []
+        )
+
+        center.setNotificationCategories([category, callCategory, videoCallCategory, phoneCallCategory, dealCategory])
     }
 
     // MARK: - Show Notification
@@ -381,6 +395,16 @@ class NotificationService: NSObject, UNUserNotificationCenterDelegate {
                             "isVideo": isVideo
                         ]
                     )
+                }
+            }
+        } else if response.actionIdentifier == "VIEW_DEAL_ACTION" ||
+                  (response.actionIdentifier == UNNotificationDefaultActionIdentifier &&
+                   (userInfo["type"] as? String) == "deal") {
+            // Deal notification tapped or "View Deal" action
+            if let dealURL = userInfo["dealURL"] as? String,
+               let url = URL(string: dealURL) {
+                DispatchQueue.main.async {
+                    NSWorkspace.shared.open(url)
                 }
             }
         } else if response.actionIdentifier == UNNotificationDefaultActionIdentifier {

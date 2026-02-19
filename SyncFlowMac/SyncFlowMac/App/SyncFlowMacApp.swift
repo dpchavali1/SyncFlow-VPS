@@ -235,6 +235,9 @@ struct SyncFlowMacApp: App {
                     if !didSetupPerformanceOptimizations {
                         didSetupPerformanceOptimizations = true
                         setupPerformanceOptimizations()
+
+                        // Start deal notification scheduler
+                        DealNotificationService.shared.scheduleDailyNotifications()
                     }
                 }
         }
