@@ -746,14 +746,19 @@ export default function MessagesPage() {
 
   if (!userId) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-600"></div>
+      <div className="flex items-center justify-center min-h-screen bg-mesh">
+        <div className="flex flex-col items-center gap-3">
+          <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-primary-500 to-accent-500 flex items-center justify-center animate-pulse-glow">
+            <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+          </div>
+          <p className="text-sm text-surface-400 font-medium">Loading SyncFlow...</p>
+        </div>
       </div>
     )
   }
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden bg-gray-100 dark:bg-gray-900">
+    <div className="h-screen flex flex-col overflow-hidden bg-mesh">
       <Header />
 
       <div className="flex-1 flex min-h-0 overflow-hidden">

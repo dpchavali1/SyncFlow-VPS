@@ -1,11 +1,13 @@
 'use client'
 
 import { useMemo, useState, useRef, useEffect, useCallback, memo } from 'react'
-import { Search, User, GripVertical, X, Lock, Unlock } from 'lucide-react'
+import { Search, User, GripVertical, X, Lock, Unlock, Inbox, ShieldAlert, Image, MessageCircle } from 'lucide-react'
+import { motion, AnimatePresence } from 'framer-motion'
 import { useAppStore } from '@/lib/store'
-import { format } from 'date-fns'
+import { format, isToday, isYesterday } from 'date-fns'
 import { ConversationListSkeleton } from './SkeletonLoaders'
 import { normalizePhoneForConversation } from '@/lib/phoneNumberNormalizer'
+import { staggerContainer, staggerItem } from '@/lib/animations'
 
 interface Conversation {
   address: string
@@ -32,6 +34,32 @@ function useDebounce<T>(value: T, delay: number): T {
   return debouncedValue
 }
 
+function formatTimestamp(timestamp: number): string {
+  const date = new Date(timestamp)
+  if (isToday(date)) return format(date, 'h:mm a')
+  if (isYesterday(date)) return 'Yesterday'
+  return format(date, 'MMM d')
+}
+
+// Avatar color generator from name
+function getAvatarGradient(name: string): string {
+  const gradients = [
+    'from-blue-400 to-blue-600',
+    'from-violet-400 to-purple-600',
+    'from-emerald-400 to-teal-600',
+    'from-orange-400 to-red-500',
+    'from-pink-400 to-rose-600',
+    'from-cyan-400 to-blue-500',
+    'from-amber-400 to-orange-500',
+    'from-indigo-400 to-violet-600',
+  ]
+  let hash = 0
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash)
+  }
+  return gradients[Math.abs(hash) % gradients.length]
+}
+
 // Memoized conversation item component
 const ConversationItem = memo(function ConversationItem({
   conv,
@@ -50,50 +78,58 @@ const ConversationItem = memo(function ConversationItem({
     ? (showDecryptWarning ? 'Encrypted (keys missing)' : 'Encrypted')
     : (showEncryptWarning ? 'Not encrypted (E2EE failed)' : 'Not encrypted')
   const encryptionClass = showEncrypted
-    ? (showDecryptWarning ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400')
-    : (showEncryptWarning ? 'text-amber-600 dark:text-amber-400' : 'text-gray-400 dark:text-gray-500')
+    ? (showDecryptWarning ? 'text-amber-500' : 'text-emerald-500')
+    : (showEncryptWarning ? 'text-amber-500' : 'text-surface-400 dark:text-surface-500')
+
+  const displayName = conv.contactName || conv.address
+  const gradient = getAvatarGradient(displayName)
 
   return (
-    <div
+    <motion.div
       onClick={onClick}
-      className={`p-4 border-b border-gray-100 dark:border-gray-700 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors ${
+      className={`group mx-2 my-0.5 px-3 py-3 rounded-xl cursor-pointer transition-all duration-200 ${
         isSelected
-          ? 'bg-blue-50 dark:bg-blue-900/20 border-l-4 border-l-blue-600'
-          : ''
+          ? 'bg-primary-500/10 dark:bg-primary-500/15 shadow-sm'
+          : 'hover:bg-surface-100/80 dark:hover:bg-surface-700/40'
       }`}
+      whileHover={{ scale: 1.005 }}
+      whileTap={{ scale: 0.995 }}
+      layout
     >
-      <div className="flex items-start gap-3">
-        <div className="w-12 h-12 rounded-full bg-gradient-to-br from-blue-400 to-blue-600 flex items-center justify-center text-white font-semibold flex-shrink-0">
-          {(conv.contactName || conv.address).charAt(0).toUpperCase()}
+      <div className="flex items-center gap-3">
+        {/* Avatar */}
+        <div className={`w-11 h-11 rounded-full bg-gradient-to-br ${gradient} flex items-center justify-center text-white font-semibold text-sm flex-shrink-0 shadow-sm ${isSelected ? 'ring-2 ring-primary-400/50 ring-offset-1 ring-offset-transparent' : ''}`}>
+          {displayName.charAt(0).toUpperCase()}
         </div>
 
         <div className="flex-1 min-w-0">
-          <div className="flex items-baseline justify-between mb-1">
-            <h3 className="font-semibold text-gray-900 dark:text-white truncate">
-              {conv.contactName || conv.address}
+          <div className="flex items-center justify-between mb-0.5">
+            <h3 className={`font-semibold text-[14px] truncate ${isSelected ? 'text-primary-700 dark:text-primary-300' : 'text-surface-900 dark:text-surface-50'}`}>
+              {displayName}
             </h3>
-            <div className="flex items-center gap-2 ml-2 flex-shrink-0">
+            <div className="flex items-center gap-1.5 ml-2 flex-shrink-0">
               <span title={encryptionTitle} className="inline-flex">
-                <EncryptionIcon className={`w-3.5 h-3.5 ${encryptionClass}`} />
+                <EncryptionIcon className={`w-3 h-3 ${encryptionClass}`} />
               </span>
-              <span className="text-xs text-gray-500 dark:text-gray-400">
-                {format(new Date(conv.timestamp), 'MMM d')}
+              <span className={`text-[11px] ${isSelected ? 'text-primary-500 dark:text-primary-400' : 'text-surface-400 dark:text-surface-500'}`}>
+                {formatTimestamp(conv.timestamp)}
               </span>
             </div>
           </div>
 
-          <p className="text-sm text-gray-600 dark:text-gray-400 truncate">
-            {conv.lastMessage}
-          </p>
-        </div>
-
-        {conv.unreadCount > 0 && (
-          <div className="w-6 h-6 rounded-full bg-blue-600 text-white text-xs flex items-center justify-center flex-shrink-0">
-            {conv.unreadCount}
+          <div className="flex items-center justify-between">
+            <p className="text-[13px] text-surface-500 dark:text-surface-400 truncate pr-2">
+              {conv.lastMessage}
+            </p>
+            {conv.unreadCount > 0 && (
+              <span className="min-w-[20px] h-5 px-1.5 rounded-full bg-primary-500 text-white text-[11px] font-bold flex items-center justify-center flex-shrink-0 shadow-glow/30">
+                {conv.unreadCount}
+              </span>
+            )}
           </div>
-        )}
+        </div>
       </div>
-    </div>
+    </motion.div>
   )
 })
 
@@ -107,42 +143,54 @@ const SpamConversationItem = memo(function SpamConversationItem({
   isSelected: boolean
   onClick: () => void
 }) {
+  const displayName = conv.contactName || conv.address
+
   return (
-    <div
+    <motion.div
       onClick={onClick}
-      className={`p-4 border-b border-gray-100 dark:border-gray-700 cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors ${
+      className={`group mx-2 my-0.5 px-3 py-3 rounded-xl cursor-pointer transition-all duration-200 ${
         isSelected
-          ? 'bg-red-50 dark:bg-red-900/20 border-l-4 border-l-red-600'
-          : ''
+          ? 'bg-red-500/10 dark:bg-red-500/15 shadow-sm'
+          : 'hover:bg-surface-100/80 dark:hover:bg-surface-700/40'
       }`}
+      whileHover={{ scale: 1.005 }}
+      whileTap={{ scale: 0.995 }}
     >
-      <div className="flex items-start gap-3">
-        <div className="w-12 h-12 rounded-full bg-red-100 dark:bg-red-900/40 flex items-center justify-center text-red-600 font-semibold flex-shrink-0">
-          {(conv.contactName || conv.address).charAt(0).toUpperCase()}
+      <div className="flex items-center gap-3">
+        <div className="w-11 h-11 rounded-full bg-gradient-to-br from-red-300 to-red-500 dark:from-red-500/60 dark:to-red-700/60 flex items-center justify-center text-white font-semibold text-sm flex-shrink-0">
+          {displayName.charAt(0).toUpperCase()}
         </div>
 
         <div className="flex-1 min-w-0">
-          <div className="flex items-baseline justify-between mb-1">
-            <h3 className="font-semibold text-gray-900 dark:text-white truncate">
-              {conv.contactName || conv.address}
+          <div className="flex items-center justify-between mb-0.5">
+            <h3 className="font-semibold text-[14px] text-surface-900 dark:text-surface-50 truncate">
+              {displayName}
             </h3>
-            <span className="text-xs text-gray-500 dark:text-gray-400 ml-2 flex-shrink-0">
-              {format(new Date(conv.timestamp), 'MMM d')}
+            <span className="text-[11px] text-surface-400 dark:text-surface-500 ml-2 flex-shrink-0">
+              {formatTimestamp(conv.timestamp)}
             </span>
           </div>
 
-          <p className="text-sm text-gray-600 dark:text-gray-400 truncate">
-            {conv.lastMessage}
-          </p>
-        </div>
-
-        <div className="text-xs text-red-600 font-semibold px-2 py-1 bg-red-50 dark:bg-red-900/30 rounded-full">
-          {conv.count}
+          <div className="flex items-center justify-between">
+            <p className="text-[13px] text-surface-500 dark:text-surface-400 truncate pr-2">
+              {conv.lastMessage}
+            </p>
+            <span className="text-[11px] text-red-600 dark:text-red-400 font-semibold px-2 py-0.5 bg-red-50 dark:bg-red-900/30 rounded-full flex-shrink-0">
+              {conv.count}
+            </span>
+          </div>
         </div>
       </div>
-    </div>
+    </motion.div>
   )
 })
+
+// Folder tab data
+const FOLDERS = [
+  { id: 'inbox' as const, label: 'Inbox', icon: Inbox, activeColor: 'bg-primary-500 text-white shadow-glow/20' },
+  { id: 'spam' as const, label: 'Spam', icon: ShieldAlert, activeColor: 'bg-red-500 text-white shadow-sm' },
+  { id: 'photos' as const, label: 'Photos', icon: Image, activeColor: 'bg-emerald-500 text-white shadow-sm' },
+]
 
 export default function ConversationList() {
   // Use selectors to minimize re-renders
@@ -159,7 +207,7 @@ export default function ConversationList() {
   const setIsConversationListVisible = useAppStore((state) => state.setIsConversationListVisible)
 
   const [searchQuery, setSearchQuery] = useState('')
-  const [width, setWidth] = useState(320)
+  const [width, setWidth] = useState(340)
   const [isResizing, setIsResizing] = useState(false)
   const [isInitialLoading, setIsInitialLoading] = useState(true)
   const resizeRef = useRef<HTMLDivElement>(null)
@@ -177,7 +225,7 @@ export default function ConversationList() {
     }
   }, [messages.length])
 
-  const MIN_WIDTH = 250
+  const MIN_WIDTH = 280
   const MAX_WIDTH = 500
 
   const readReceiptsBaseline = useMemo(() => {
@@ -340,20 +388,10 @@ export default function ConversationList() {
     setSelectedSpamAddress(address)
   }, [setSelectedSpamAddress])
 
-  const handleInboxClick = useCallback(() => {
-    setActiveFolder('inbox')
-    setSelectedSpamAddress(null)
-  }, [setActiveFolder, setSelectedSpamAddress])
-
-  const handleSpamFolderClick = useCallback(() => {
-    setActiveFolder('spam')
-    setSelectedConversation(null)
-  }, [setActiveFolder, setSelectedConversation])
-
-  const handlePhotosFolderClick = useCallback(() => {
-    setActiveFolder('photos')
-    setSelectedConversation(null)
-    setSelectedSpamAddress(null)
+  const handleFolderClick = useCallback((folder: 'inbox' | 'spam' | 'photos') => {
+    setActiveFolder(folder)
+    if (folder !== 'inbox') setSelectedConversation(null)
+    if (folder !== 'spam') setSelectedSpamAddress(null)
   }, [setActiveFolder, setSelectedConversation, setSelectedSpamAddress])
 
   if (!isSidebarOpen) {
@@ -362,108 +400,114 @@ export default function ConversationList() {
 
   return (
     <div
-      className="relative bg-white dark:bg-gray-800 border-r border-gray-200 dark:border-gray-700 flex flex-col min-h-0 overflow-hidden"
+      className="relative glass-panel border-r-0 rounded-r-none flex flex-col min-h-0 overflow-hidden"
       style={{ width: `${width}px`, minWidth: `${MIN_WIDTH}px`, maxWidth: `${MAX_WIDTH}px` }}
     >
-      {/* Search */}
-      <div className="flex-shrink-0 p-4 border-b border-gray-200 dark:border-gray-700">
-        <div className="flex justify-end mb-3">
-          <button
+      {/* Header area */}
+      <div className="flex-shrink-0 px-4 pt-4 pb-3">
+        {/* Close button */}
+        <div className="flex justify-end mb-2">
+          <motion.button
             onClick={() => setIsConversationListVisible(false)}
-            className="p-1 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+            className="p-1.5 text-surface-400 hover:text-surface-600 dark:hover:text-surface-300 rounded-lg hover:bg-surface-100 dark:hover:bg-surface-700/50 transition-colors"
+            whileTap={{ scale: 0.9 }}
             title="Hide conversation list"
           >
             <X className="w-4 h-4" />
-          </button>
+          </motion.button>
         </div>
-        <div className="flex items-center gap-2 mb-3">
-          <button
-            onClick={handleInboxClick}
-            className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-              activeFolder === 'inbox'
-                ? 'bg-blue-600 text-white'
-                : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'
-            }`}
-          >
-            Inbox
-          </button>
-          <button
-            onClick={handleSpamFolderClick}
-            className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-              activeFolder === 'spam'
-                ? 'bg-red-600 text-white'
-                : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'
-            }`}
-          >
-            Spam {spamMessages.length > 0 ? `(${spamMessages.length})` : ''}
-          </button>
-          <button
-            onClick={handlePhotosFolderClick}
-            className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-              activeFolder === 'photos'
-                ? 'bg-green-600 text-white'
-                : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'
-            }`}
-          >
-            Photos
-          </button>
+
+        {/* Folder tabs — segmented control */}
+        <div className="flex items-center gap-1 p-1 rounded-xl bg-surface-100/80 dark:bg-surface-800/60 mb-3">
+          {FOLDERS.map((folder) => {
+            const isActive = activeFolder === folder.id
+            const Icon = folder.icon
+            return (
+              <motion.button
+                key={folder.id}
+                onClick={() => handleFolderClick(folder.id)}
+                className={`relative flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                  isActive
+                    ? folder.activeColor
+                    : 'text-surface-500 dark:text-surface-400 hover:text-surface-700 dark:hover:text-surface-300'
+                }`}
+                whileTap={{ scale: 0.97 }}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                <span>{folder.label}</span>
+                {folder.id === 'spam' && spamMessages.length > 0 && !isActive && (
+                  <span className="ml-0.5 text-[10px] text-red-500 font-bold">{spamMessages.length}</span>
+                )}
+              </motion.button>
+            )
+          })}
         </div>
+
+        {/* Search */}
         <div className="relative">
-          <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" />
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-surface-400" />
           <input
             type="text"
-            placeholder="Search conversations..."
+            placeholder="Search..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full pl-10 pr-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-gray-50 dark:bg-gray-700 text-gray-900 dark:text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            className="w-full pl-9 pr-4 py-2 rounded-xl glass-input text-sm text-surface-900 dark:text-surface-50 placeholder:text-surface-400"
           />
+          {searchQuery && (
+            <motion.button
+              initial={{ opacity: 0, scale: 0.8 }}
+              animate={{ opacity: 1, scale: 1 }}
+              onClick={() => setSearchQuery('')}
+              className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 rounded-full hover:bg-surface-200 dark:hover:bg-surface-600 transition-colors"
+            >
+              <X className="w-3.5 h-3.5 text-surface-400" />
+            </motion.button>
+          )}
         </div>
       </div>
 
-      {/* Conversations */}
-      <div className="flex-1 min-h-0 h-0 overflow-y-auto">
+      {/* Conversation list */}
+      <div className="flex-1 min-h-0 h-0 overflow-y-auto py-1">
         {isInitialLoading ? (
           <ConversationListSkeleton />
         ) : activeFolder === 'spam' ? (
           filteredSpamConversations.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full p-8 text-center">
-              <User className="w-16 h-16 text-gray-300 dark:text-gray-600 mb-4" />
-              <p className="text-gray-500 dark:text-gray-400 mb-2">
-                {debouncedSearchQuery ? 'No spam matches found' : 'No spam messages'}
-              </p>
-              <p className="text-sm text-gray-400 dark:text-gray-500">
-                Spam messages from your phone will appear here
-              </p>
-            </div>
+            <EmptyState
+              icon={ShieldAlert}
+              title={debouncedSearchQuery ? 'No spam matches' : 'No spam messages'}
+              subtitle={debouncedSearchQuery ? 'Try a different search term' : 'Spam messages from your phone will appear here'}
+            />
           ) : (
-            filteredSpamConversations.map((conv) => (
-              <SpamConversationItem
-                key={conv.address}
-                conv={conv}
-                isSelected={selectedSpamAddress === conv.address}
-                onClick={() => handleSpamClick(conv.address)}
-              />
-            ))
+            <motion.div variants={staggerContainer} initial="hidden" animate="visible">
+              {filteredSpamConversations.map((conv) => (
+                <motion.div key={conv.address} variants={staggerItem}>
+                  <SpamConversationItem
+                    conv={conv}
+                    isSelected={selectedSpamAddress === conv.address}
+                    onClick={() => handleSpamClick(conv.address)}
+                  />
+                </motion.div>
+              ))}
+            </motion.div>
           )
         ) : filteredConversations.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-full p-8 text-center">
-            <User className="w-16 h-16 text-gray-300 dark:text-gray-600 mb-4" />
-            <p className="text-gray-500 dark:text-gray-400 mb-2">
-              {debouncedSearchQuery ? 'No matches found' : 'No messages yet'}
-            </p>
-            <p className="text-sm text-gray-400 dark:text-gray-500">
-              {debouncedSearchQuery ? 'Try a different search term' : 'Messages from your phone will appear here'}
-            </p>
-          </div>
+          <EmptyState
+            icon={MessageCircle}
+            title={debouncedSearchQuery ? 'No matches found' : 'No messages yet'}
+            subtitle={debouncedSearchQuery ? 'Try a different search term' : 'Messages from your phone will appear here'}
+          />
         ) : (
-          filteredConversations.map((conv) => (
-            <ConversationItem
-              key={conv.normalizedAddress}
-              conv={conv}
-              isSelected={selectedConversation === conv.normalizedAddress}
-              onClick={() => handleConversationClick(conv.normalizedAddress)}
-            />
-          ))
+          <motion.div variants={staggerContainer} initial="hidden" animate="visible">
+            {filteredConversations.map((conv) => (
+              <motion.div key={conv.normalizedAddress} variants={staggerItem}>
+                <ConversationItem
+                  conv={conv}
+                  isSelected={selectedConversation === conv.normalizedAddress}
+                  onClick={() => handleConversationClick(conv.normalizedAddress)}
+                />
+              </motion.div>
+            ))}
+          </motion.div>
         )}
       </div>
 
@@ -471,13 +515,34 @@ export default function ConversationList() {
       <div
         ref={resizeRef}
         onMouseDown={() => setIsResizing(true)}
-        className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-blue-500 transition-colors group flex items-center justify-center"
-        style={{ backgroundColor: isResizing ? 'rgb(59, 130, 246)' : 'transparent' }}
+        className="absolute top-0 right-0 w-1.5 h-full cursor-col-resize group flex items-center justify-center z-10"
       >
+        <div className={`absolute inset-y-0 right-0 w-0.5 transition-colors duration-200 ${isResizing ? 'bg-primary-500' : 'bg-transparent group-hover:bg-primary-400/50'}`} />
         <div className="absolute right-0 top-1/2 -translate-y-1/2 w-4 h-8 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
-          <GripVertical className="w-3 h-3 text-gray-400" />
+          <GripVertical className="w-3 h-3 text-surface-400" />
         </div>
       </div>
+    </div>
+  )
+}
+
+// Empty state component
+function EmptyState({ icon: Icon, title, subtitle }: { icon: React.ElementType; title: string; subtitle: string }) {
+  return (
+    <div className="flex flex-col items-center justify-center h-full p-8 text-center">
+      <motion.div
+        className="w-16 h-16 rounded-2xl bg-surface-100 dark:bg-surface-800 flex items-center justify-center mb-4"
+        animate={{ y: [0, -4, 0] }}
+        transition={{ duration: 3, repeat: Infinity, ease: 'easeInOut' }}
+      >
+        <Icon className="w-7 h-7 text-surface-300 dark:text-surface-600" />
+      </motion.div>
+      <p className="text-sm font-medium text-surface-500 dark:text-surface-400 mb-1">
+        {title}
+      </p>
+      <p className="text-xs text-surface-400 dark:text-surface-500">
+        {subtitle}
+      </p>
     </div>
   )
 }

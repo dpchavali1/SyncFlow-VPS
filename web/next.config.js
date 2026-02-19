@@ -1,27 +1,6 @@
 /** @type {import('next').NextConfig} */
-// Content Security Policy - Allow 'unsafe-eval' in development for Next.js hot reloading
-const isDev = process.env.NODE_ENV === 'development'
-const scriptSrc = isDev
-  ? "'self' 'unsafe-inline' 'unsafe-eval' https://pagead2.googlesyndication.com https://www.googletagservices.com https://www.google.com"
-  : "'self' https://pagead2.googlesyndication.com https://www.googletagservices.com https://www.google.com"
-
-const contentSecurityPolicy = [
-  "default-src 'self'",
-  "base-uri 'self'",
-  "object-src 'none'",
-  `script-src ${scriptSrc}`,
-  `script-src-elem ${scriptSrc}`,
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob: https://firebasestorage.googleapis.com https://*.googleusercontent.com https://pagead2.googlesyndication.com https://*.doubleclick.net https://*.google.com https://*.r2.cloudflarestorage.com",
-  "font-src 'self' data:",
-  `connect-src 'self' https://*.firebaseio.com wss://*.firebaseio.com https://*.googleapis.com https://firebasestorage.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com https://*.cloudfunctions.net https://api.sfweb.app wss://api.sfweb.app https://pagead2.googlesyndication.com https://*.google.com https://*.doubleclick.net https://*.r2.cloudflarestorage.com${isDev ? ' http://localhost:4000 ws://localhost:4001 http://5.78.188.206 ws://5.78.188.206:3001' : ''}`,
-  "media-src 'self' blob: https://firebasestorage.googleapis.com",
-  "worker-src 'self' blob:",
-  "frame-src 'self' https://pagead2.googlesyndication.com https://*.doubleclick.net https://www.google.com https://tpc.googlesyndication.com",
-  "frame-ancestors 'self'",
-  "form-action 'self'",
-  "manifest-src 'self'",
-].join('; ')
+// CSP is now handled dynamically via middleware.ts with per-request nonce
+// to allow Next.js inline scripts without 'unsafe-inline'
 
 const nextConfig = {
   output: 'standalone',
@@ -46,7 +25,7 @@ const nextConfig = {
   poweredByHeader: false,
   compress: true,
 
-  // Security headers
+  // Security headers (CSP moved to middleware for nonce support)
   async headers() {
     return [
       {
@@ -71,10 +50,6 @@ const nextConfig = {
           {
             key: 'X-XSS-Protection',
             value: '1; mode=block',
-          },
-          {
-            key: 'Content-Security-Policy',
-            value: contentSecurityPolicy,
           },
           {
             key: 'Referrer-Policy',
@@ -119,7 +94,7 @@ const nextConfig = {
 
   // Experimental features for production
   experimental: {
-    optimizePackageImports: ['lucide-react', 'date-fns', 'firebase', 'zustand'],
+    optimizePackageImports: ['lucide-react', 'date-fns', 'firebase', 'zustand', 'framer-motion'],
     // optimizeCss: true, // Disabled due to critters dependency issues
   },
 

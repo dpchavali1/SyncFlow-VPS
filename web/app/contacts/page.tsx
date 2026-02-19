@@ -59,7 +59,7 @@ export default function ContactsPage() {
 
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
+      <div className="min-h-screen bg-mesh">
         <ContactsListSkeleton />
       </div>
     )
@@ -67,30 +67,30 @@ export default function ContactsPage() {
 
   if (!userId) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-gray-50 dark:bg-gray-900">
-        <p className="text-gray-600 dark:text-gray-400">Please pair your device first.</p>
+      <div className="flex items-center justify-center min-h-screen bg-mesh">
+        <p className="text-gray-500 dark:text-gray-400">Please pair your device first.</p>
       </div>
     )
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 dark:bg-gray-900">
+    <div className="min-h-screen bg-mesh">
       {/* Navigation Header */}
-      <nav className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
-        <div className="max-w-7xl mx-auto px-4">
-          <div className="flex items-center justify-between h-16">
+      <nav className="glass-panel m-3 rounded-2xl">
+        <div className="max-w-7xl mx-auto px-5">
+          <div className="flex items-center justify-between h-14">
             <div className="flex items-center gap-6">
-              <h1 className="text-xl font-bold text-blue-600">SyncFlow</h1>
-              <div className="flex items-center gap-4">
+              <h1 className="text-xl font-bold text-gradient">SyncFlow</h1>
+              <div className="flex items-center gap-1">
                 <a
                   href="/messages"
-                  className="text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors"
+                  className="px-3 py-1.5 rounded-lg text-sm text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-white/50 dark:hover:bg-white/5 transition-all"
                 >
                   Messages
                 </a>
                 <a
                   href="/contacts"
-                  className="text-blue-600 font-medium"
+                  className="px-3 py-1.5 rounded-lg text-sm text-blue-600 font-medium bg-blue-500/10"
                 >
                   Contacts
                 </a>
@@ -101,7 +101,7 @@ export default function ContactsPage() {
       </nav>
 
       {/* Contacts List */}
-      <main className="max-w-4xl mx-auto" style={{ height: 'calc(100vh - 4rem)' }}>
+      <main className="max-w-4xl mx-auto" style={{ height: 'calc(100vh - 5rem)' }}>
         <ContactsList userId={userId} onSelectContact={handleSelectContact} />
       </main>
     </div>

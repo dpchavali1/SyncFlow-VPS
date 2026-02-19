@@ -33,19 +33,19 @@ export default function DownloadPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 dark:from-slate-900 dark:to-slate-800">
+    <div className="min-h-screen bg-mesh">
       {/* Header */}
-      <header className="border-b border-slate-200 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80 backdrop-blur-sm sticky top-0 z-50">
-        <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
-          <Link href="/" className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-purple-600 bg-clip-text text-transparent">
+      <header className="glass-panel m-3 rounded-2xl sticky top-3 z-50">
+        <div className="max-w-6xl mx-auto px-5 py-3 flex items-center justify-between">
+          <Link href="/" className="text-2xl font-bold text-gradient">
             SyncFlow
           </Link>
-          <nav className="flex gap-6">
+          <nav className="flex gap-1">
             {isPaired && (
-              <Link href="/messages" className="text-blue-600 dark:text-blue-400 hover:text-blue-700 font-medium">Messages</Link>
+              <Link href="/messages" className="px-3 py-1.5 rounded-xl text-sm text-blue-600 dark:text-blue-400 hover:bg-blue-500/10 font-medium transition-all">Messages</Link>
             )}
-            <Link href="/privacy" className="text-slate-600 dark:text-slate-300 hover:text-blue-600">Privacy</Link>
-            <Link href="/terms" className="text-slate-600 dark:text-slate-300 hover:text-blue-600">Terms</Link>
+            <Link href="/privacy" className="px-3 py-1.5 rounded-xl text-sm text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-white/50 dark:hover:bg-white/5 transition-all">Privacy</Link>
+            <Link href="/terms" className="px-3 py-1.5 rounded-xl text-sm text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white hover:bg-white/50 dark:hover:bg-white/5 transition-all">Terms</Link>
           </nav>
         </div>
       </header>
@@ -64,8 +64,8 @@ export default function DownloadPage() {
         {/* Download Cards */}
         <div className="grid md:grid-cols-2 gap-8 mb-12">
           {/* macOS Download Card */}
-          <div className="bg-gradient-to-br from-blue-500 to-purple-600 rounded-3xl p-1 shadow-2xl">
-            <div className="bg-white dark:bg-slate-900 rounded-3xl p-8">
+          <div className="bg-gradient-to-br from-blue-500 to-violet-600 rounded-3xl p-[1px] shadow-2xl shadow-blue-500/10">
+            <div className="bg-white dark:bg-gray-900 rounded-3xl p-8">
               <div className="flex items-start gap-4 mb-6">
                 {/* App Icon */}
                 <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-purple-600 rounded-2xl flex items-center justify-center flex-shrink-0">
@@ -131,8 +131,8 @@ export default function DownloadPage() {
           </div>
 
           {/* Android Download Card */}
-          <div className="bg-gradient-to-br from-green-500 to-teal-600 rounded-3xl p-1 shadow-2xl">
-            <div className="bg-white dark:bg-slate-900 rounded-3xl p-8">
+          <div className="bg-gradient-to-br from-emerald-500 to-teal-600 rounded-3xl p-[1px] shadow-2xl shadow-emerald-500/10">
+            <div className="bg-white dark:bg-gray-900 rounded-3xl p-8">
               <div className="flex items-start gap-4 mb-6">
                 {/* App Icon */}
                 <div className="w-16 h-16 bg-gradient-to-br from-green-500 to-teal-600 rounded-2xl flex items-center justify-center flex-shrink-0">
@@ -206,7 +206,7 @@ export default function DownloadPage() {
         </div>
 
         {/* Installation Guide */}
-        <div className="bg-white dark:bg-slate-900 rounded-2xl p-8 mb-12 shadow-lg">
+        <div className="glass-elevated rounded-3xl p-8 mb-12 shadow-lg">
           <h2 className="text-2xl font-bold mb-6 dark:text-white">Installation Guide</h2>
 
           {/* macOS Installation */}
@@ -341,7 +341,7 @@ export default function DownloadPage() {
         </div>
 
         {/* System Requirements */}
-        <div className="bg-white dark:bg-slate-900 rounded-2xl p-8 mb-12 shadow-lg">
+        <div className="glass-elevated rounded-3xl p-8 mb-12 shadow-lg">
           <h2 className="text-2xl font-bold mb-6 dark:text-white">System Requirements</h2>
 
           <div className="grid md:grid-cols-2 gap-6">
@@ -402,7 +402,7 @@ export default function DownloadPage() {
         </div>
 
         {/* FAQs */}
-        <div className="bg-white dark:bg-slate-900 rounded-2xl p-8 shadow-lg">
+        <div className="glass-elevated rounded-3xl p-8 shadow-lg">
           <h2 className="text-2xl font-bold mb-6 dark:text-white">Frequently Asked Questions</h2>
 
           <div className="space-y-6">
