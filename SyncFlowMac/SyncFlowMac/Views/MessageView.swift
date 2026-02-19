@@ -286,7 +286,7 @@ struct MessageView: View {
             )
 
             Rectangle()
-                .fill(SyncFlowColors.glassBorder)
+                .fill(SyncFlowColors.divider)
                 .frame(height: 1)
 
             // Search bar
@@ -1471,13 +1471,13 @@ struct ConversationHeader: View {
         .padding(.vertical, 12)
         .background(
             ZStack {
-                VisualEffectBackground(material: .headerView, blendingMode: .withinWindow)
+                SyncFlowColors.chatHeaderBackground
 
-                // Subtle bottom border using glass border
+                // Subtle bottom border
                 VStack {
                     Spacer()
                     Rectangle()
-                        .fill(SyncFlowColors.glassBorder)
+                        .fill(SyncFlowColors.divider)
                         .frame(height: 1)
                 }
             }
@@ -3600,16 +3600,15 @@ struct ComposeBar: View {
         .padding(.vertical, 12)
         .background(
             ZStack {
-                // Top glass border
+                // Top border
                 VStack {
                     Rectangle()
-                        .fill(SyncFlowColors.glassBorder)
+                        .fill(SyncFlowColors.divider)
                         .frame(height: 1)
                     Spacer()
                 }
 
-                // Material background
-                VisualEffectBackground(material: .headerView, blendingMode: .withinWindow)
+                SyncFlowColors.chatHeaderBackground
             }
         )
         .onAppear {

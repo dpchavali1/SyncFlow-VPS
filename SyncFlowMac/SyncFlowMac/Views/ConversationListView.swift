@@ -659,7 +659,7 @@ struct ConversationListView: View {
                 }
             }
         }
-        .materialBackground(.sidebar)
+        .background(SyncFlowColors.sidebarBackground)
         .alert("Delete Selected Conversations?", isPresented: $showBulkDeleteConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Delete", role: .destructive) {

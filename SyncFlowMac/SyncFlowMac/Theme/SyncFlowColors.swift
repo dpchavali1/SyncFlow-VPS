@@ -195,34 +195,39 @@ struct SyncFlowColors {
     // ============================================
     // Surface Colors (Theme Aware)
     // ============================================
+    // Dark mode uses a unified teal-dark palette with minimal steps:
+    //   Base:    #111B22  (background, sidebar rail, sidebar)
+    //   Surface: #17232B  (surfaces, cards, elevated)
+    //   Raised:  #1C2930  (headers, tertiary, secondary)
+    //   Divider: #243139
 
     static var background: Color {
         currentColorScheme == .dark
-            ? Color(hex: "0B141A")
+            ? Color(hex: "111B22")
             : Color(nsColor: .windowBackgroundColor)
     }
 
     static var surface: Color {
         currentColorScheme == .dark
-            ? Color(hex: "111B21")
+            ? Color(hex: "17232B")
             : Color(nsColor: .controlBackgroundColor)
     }
 
     static var surfaceSecondary: Color {
         currentColorScheme == .dark
-            ? Color(hex: "202C33")
+            ? Color(hex: "1C2930")
             : Color(hex: "F8FAFC")
     }
 
     static var surfaceTertiary: Color {
         currentColorScheme == .dark
-            ? Color(hex: "1F2C34")
+            ? Color(hex: "1C2930")
             : Color(hex: "F1F5F9")
     }
 
     static var surfaceElevated: Color {
         currentColorScheme == .dark
-            ? Color(hex: "1F2C34")
+            ? Color(hex: "17232B")
             : Color(hex: "FFFFFF")
     }
 
@@ -231,33 +236,32 @@ struct SyncFlowColors {
             !hex.isEmpty {
             return Color(hex: hex)
         }
-        // Return theme-appropriate default instead of system windowBackgroundColor
         return currentColorScheme == .dark
-            ? Color(hex: "070E13")
+            ? Color(hex: "111B22")
             : Color(hex: "F8FAFC")
     }
 
     static var sidebarBackground: Color {
         currentColorScheme == .dark
-            ? Color(hex: "111B21")
+            ? Color(hex: "111B22")
             : Color(hex: "FFFFFF")
     }
 
     static var sidebarRailBackground: Color {
         currentColorScheme == .dark
-            ? Color(hex: "0B141A")
+            ? Color(hex: "111B22")
             : Color(hex: "F2F4F7")
     }
 
     static var chatHeaderBackground: Color {
         currentColorScheme == .dark
-            ? Color(hex: "202C33")
+            ? Color(hex: "1C2930")
             : Color(hex: "F2F4F7")
     }
 
     static var divider: Color {
         currentColorScheme == .dark
-            ? Color(hex: "26353D")
+            ? Color(hex: "243139")
             : Color(hex: "E5E7EB")
     }
 
@@ -287,7 +291,7 @@ struct SyncFlowColors {
 
     static var border: Color {
         currentColorScheme == .dark
-            ? Color(hex: "3C4E60")
+            ? Color(hex: "2D3B44")
             : Color(hex: "D0D4D8")
     }
 
@@ -425,14 +429,14 @@ struct SyncFlowColors {
     /// Glass-like surface for premium cards and overlays
     static var glassBackground: Color {
         currentColorScheme == .dark
-            ? Color.white.opacity(0.06)
+            ? Color(hex: "1C2930")
             : Color.white.opacity(0.7)
     }
 
     /// Subtle glass border for floating elements
     static var glassBorder: Color {
         currentColorScheme == .dark
-            ? Color.white.opacity(0.1)
+            ? Color(hex: "243139")
             : Color.black.opacity(0.06)
     }
 
@@ -453,7 +457,7 @@ struct SyncFlowColors {
     /// Warmer hover state than default
     static var hoverWarm: Color {
         currentColorScheme == .dark
-            ? Color.white.opacity(0.10)
+            ? Color(hex: "1F2C34")
             : Color.black.opacity(0.05)
     }
 
