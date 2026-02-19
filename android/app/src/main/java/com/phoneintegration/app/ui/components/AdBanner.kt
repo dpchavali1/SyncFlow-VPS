@@ -1,5 +1,6 @@
 package com.phoneintegration.app.ui.components
 
+import android.app.Activity
 import android.content.Context
 import android.util.Log
 import androidx.compose.foundation.background
@@ -17,16 +18,15 @@ import com.google.android.gms.ads.AdRequest
 import com.google.android.gms.ads.AdSize
 import com.google.android.gms.ads.AdView
 import com.google.android.gms.ads.LoadAdError
+import com.google.android.ump.ConsentInformation
+import com.google.android.ump.ConsentRequestParameters
+import com.google.android.ump.UserMessagingPlatform
 import com.phoneintegration.app.vps.VPSAuthManager
 
 /**
  * Ad banner component that shows ads only to free/trial users.
  * Premium subscribers don't see ads.
- *
- * VPS Backend Only - Uses VPSAuthManager for user info.
- *
- * Test Ad Unit ID: ca-app-pub-3940256099942544/6300978111
- * Replace with production ID before release.
+ * Requests GDPR consent via UMP SDK before loading personalized ads.
  */
 @Composable
 fun AdBanner(
@@ -34,11 +34,12 @@ fun AdBanner(
     adUnitId: String = "ca-app-pub-4962910048695842/4209408906" // sfads banner
 ) {
     val context = LocalContext.current
-    var showAd by remember { mutableStateOf(true) } // Default to showing ads
+    var showAd by remember { mutableStateOf(true) }
     var isLoading by remember { mutableStateOf(true) }
     var adLoaded by remember { mutableStateOf(false) }
+    var consentReady by remember { mutableStateOf(false) }
 
-    // Check if user is premium (premium users don't see ads)
+    // Check premium status and request consent
     LaunchedEffect(Unit) {
         try {
             val isPremium = isPremiumUser(context)
@@ -49,9 +50,16 @@ fun AdBanner(
             showAd = true
         }
         isLoading = false
+
+        // Request UMP consent if showing ads
+        if (showAd) {
+            requestConsent(context) { ready ->
+                consentReady = ready
+            }
+        }
     }
 
-    if (!isLoading && showAd) {
+    if (!isLoading && showAd && consentReady) {
         Column(
             modifier = modifier
                 .fillMaxWidth()
@@ -82,7 +90,6 @@ fun AdBanner(
                     }
                 }
             )
-
         }
     }
 }
@@ -101,14 +108,45 @@ fun AdBannerCompact(
 }
 
 /**
+ * Request GDPR consent using the Google UMP SDK.
+ * Shows consent form for EU users; auto-consents for others.
+ */
+private fun requestConsent(context: Context, onResult: (Boolean) -> Unit) {
+    val params = ConsentRequestParameters.Builder()
+        .setTagForUnderAgeOfConsent(false)
+        .build()
+
+    val consentInfo = UserMessagingPlatform.getConsentInformation(context)
+    consentInfo.requestConsentInfoUpdate(
+        context as? Activity ?: return onResult(true),
+        params,
+        {
+            // Consent info updated — show form if required
+            if (consentInfo.isConsentFormAvailable) {
+                UserMessagingPlatform.loadAndShowConsentFormIfRequired(
+                    context as Activity
+                ) { formError ->
+                    if (formError != null) {
+                        Log.e("AdBanner", "Consent form error: ${formError.message}")
+                    }
+                    // Can load ads regardless — UMP handles non-personalized ads for declined consent
+                    onResult(consentInfo.canRequestAds())
+                }
+            } else {
+                // No form needed (non-EU user or already consented)
+                onResult(consentInfo.canRequestAds())
+            }
+        },
+        { requestError ->
+            Log.e("AdBanner", "Consent request failed: ${requestError.message}")
+            // Load ads anyway with non-personalized fallback
+            onResult(true)
+        }
+    )
+}
+
+/**
  * Check if the current user has a premium subscription
- * VPS Backend Only - checks local preferences (VPS doesn't have usage tracking yet)
- *
- * In VPS mode, premium status would need to be implemented via:
- * - VPS API endpoint for subscription status
- * - Local SharedPreferences cache of subscription status
- *
- * For now, default to showing ads (free tier behavior)
  */
 private suspend fun isPremiumUser(context: Context): Boolean {
     return try {
@@ -116,18 +154,13 @@ private suspend fun isPremiumUser(context: Context): Boolean {
         val currentUser = authManager.getCurrentUser()
 
         if (currentUser == null) {
-            // Not authenticated, show ads
             return false
         }
 
-        // Check if user is admin (admins don't see ads)
         if (currentUser.admin) {
             return true
         }
 
-        // VPS doesn't have subscription tracking yet
-        // For now, default to free tier (show ads)
-        // TODO: Add subscription endpoint to VPS when needed
         val prefs = context.getSharedPreferences("syncflow_subscription", Context.MODE_PRIVATE)
         val plan = prefs.getString("plan", "free")?.lowercase()
         val planExpiresAt = prefs.getLong("plan_expires_at", 0L)
@@ -136,10 +169,10 @@ private suspend fun isPremiumUser(context: Context): Boolean {
         when (plan) {
             "lifetime", "3year" -> true
             "monthly", "yearly", "paid" -> planExpiresAt > now
-            else -> false // Free and trial users see ads
+            else -> false
         }
     } catch (e: Exception) {
         Log.e("AdBanner", "Error checking premium status", e)
-        false // Show ads if we can't determine status
+        false
     }
 }

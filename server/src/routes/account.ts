@@ -81,6 +81,111 @@ router.post('/delete', async (req: Request, res: Response) => {
   }
 });
 
+// GET /api/account/export-data
+// GDPR / Apple / Google privacy compliance: allow users to export all their data
+router.get('/export-data', async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId!;
+
+    // Fetch user profile
+    const user = await queryOne<Record<string, any>>(
+      `SELECT uid, phone_number, email, display_name, created_at, last_active_at,
+              plan, plan_expires_at, trial_started_at, admin
+       FROM users WHERE uid = $1`,
+      [userId]
+    );
+
+    if (!user) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    // Fetch all user data in parallel
+    const [
+      devices,
+      messages,
+      contacts,
+      callHistory,
+      scheduledMessages,
+      spamLists,
+      subscriptions,
+      fileTransfers,
+      notifications,
+    ] = await Promise.all([
+      query<Record<string, any>>(
+        `SELECT device_id, device_name, device_type, platform, last_seen_at, created_at
+         FROM user_devices WHERE user_id = $1 ORDER BY created_at DESC`,
+        [userId]
+      ),
+      query<Record<string, any>>(
+        `SELECT id, thread_id, sender, body, timestamp, read, message_type, status
+         FROM user_messages WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 10000`,
+        [userId]
+      ),
+      query<Record<string, any>>(
+        `SELECT id, display_name, phone_number, email, photo_uri, starred, created_at
+         FROM user_contacts WHERE user_id = $1 ORDER BY display_name ASC`,
+        [userId]
+      ),
+      query<Record<string, any>>(
+        `SELECT id, phone_number, contact_name, call_type, duration, timestamp
+         FROM user_call_history WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 5000`,
+        [userId]
+      ),
+      query<Record<string, any>>(
+        `SELECT id, recipient, body, scheduled_at, status, created_at
+         FROM user_scheduled_messages WHERE user_id = $1 ORDER BY created_at DESC`,
+        [userId]
+      ),
+      query<Record<string, any>>(
+        `SELECT id, phone_number, list_type, reason, created_at
+         FROM user_spam_lists WHERE user_id = $1 ORDER BY created_at DESC`,
+        [userId]
+      ),
+      query<Record<string, any>>(
+        `SELECT id, plan, status, started_at, expires_at, source
+         FROM user_subscriptions WHERE user_id = $1 ORDER BY started_at DESC`,
+        [userId]
+      ),
+      query<Record<string, any>>(
+        `SELECT id, file_name, file_size, direction, status, created_at
+         FROM user_file_transfers WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1000`,
+        [userId]
+      ),
+      query<Record<string, any>>(
+        `SELECT id, app_name, title, body, timestamp
+         FROM user_notifications WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 5000`,
+        [userId]
+      ),
+    ]);
+
+    const exportData = {
+      exportedAt: new Date().toISOString(),
+      user: {
+        ...user,
+        // Redact sensitive internal fields
+        admin: undefined,
+      },
+      devices: devices || [],
+      messages: messages || [],
+      contacts: contacts || [],
+      callHistory: callHistory || [],
+      scheduledMessages: scheduledMessages || [],
+      spamLists: spamLists || [],
+      subscriptions: subscriptions || [],
+      fileTransfers: fileTransfers || [],
+      notifications: notifications || [],
+    };
+
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename="syncflow-data-export-${Date.now()}.json"`);
+    res.json(exportData);
+  } catch (error) {
+    console.error('Data export error:', error);
+    res.status(500).json({ error: 'Failed to export data' });
+  }
+});
+
 // POST /api/account/cancel-deletion
 router.post('/cancel-deletion', async (req: Request, res: Response) => {
   try {

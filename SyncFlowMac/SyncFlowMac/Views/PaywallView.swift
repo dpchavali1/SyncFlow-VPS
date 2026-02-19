@@ -2,20 +2,21 @@
 //  PaywallView.swift
 //  SyncFlowMac
 //
-//  Subscription paywall UI with App Store and Direct Billing (Stripe) options
+//  Subscription paywall UI.
+//  • App Store build (APP_STORE flag): IAP only — no Stripe option (Apple requirement)
+//  • Direct distribution build: shows both App Store IAP and Stripe billing picker
 //
 
 import SwiftUI
 import StoreKit
 
-// MARK: - Billing Method
+// MARK: - Billing Method (direct distribution only)
 
+#if !APP_STORE
 enum BillingMethod: String, CaseIterable {
     case appStore = "App Store"
     case stripe = "Direct Billing"
 }
-
-// MARK: - Stripe Plan
 
 enum StripePlan: String, CaseIterable {
     case monthly
@@ -58,16 +59,20 @@ enum StripePlan: String, CaseIterable {
         self == .yearly
     }
 }
+#endif
 
 struct PaywallView: View {
     @StateObject private var subscriptionService = SubscriptionService.shared
     @Environment(\.dismiss) private var dismiss
     @State private var selectedProduct: Product?
-    @State private var selectedStripePlan: StripePlan = .yearly
-    @State private var billingMethod: BillingMethod = .stripe
     @State private var showError = false
     @State private var isPurchasing = false
+
+    #if !APP_STORE
+    @State private var selectedStripePlan: StripePlan = .yearly
+    @State private var billingMethod: BillingMethod = .stripe
     @State private var stripeError: String?
+    #endif
 
     var body: some View {
         VStack(spacing: 0) {
@@ -90,29 +95,27 @@ struct PaywallView: View {
 
             ScrollView {
                 VStack(spacing: 24) {
-                    // Billing method picker
+                    #if !APP_STORE
+                    // Billing method picker (direct distribution only)
                     billingMethodPicker
+                    #endif
 
                     // Features list
                     featuresSection
 
                     // Pricing options
+                    #if APP_STORE
+                    appStorePricingSection
+                    appStoreSubscribeButton
+                    restoreButton
+                    #else
                     if billingMethod == .appStore {
                         appStorePricingSection
+                        appStoreSubscribeButton
+                        restoreButton
                     } else {
                         stripePricingSection
-                    }
-
-                    // Subscribe button
-                    if billingMethod == .appStore {
-                        appStoreSubscribeButton
-                    } else {
                         stripeSubscribeButton
-                    }
-
-                    // Restore purchases (App Store only)
-                    if billingMethod == .appStore {
-                        restoreButton
                     }
 
                     // Error display for Stripe
@@ -122,6 +125,7 @@ struct PaywallView: View {
                             .foregroundColor(SyncFlowColors.adaptiveRed)
                             .multilineTextAlignment(.center)
                     }
+                    #endif
 
                     // Terms
                     termsSection
@@ -147,8 +151,9 @@ struct PaywallView: View {
         }
     }
 
-    // MARK: - Billing Method Picker
+    // MARK: - Billing Method Picker (direct distribution only)
 
+    #if !APP_STORE
     private var billingMethodPicker: some View {
         Picker("Billing", selection: $billingMethod) {
             ForEach(BillingMethod.allCases, id: \.self) { method in
@@ -157,6 +162,7 @@ struct PaywallView: View {
         }
         .pickerStyle(.segmented)
     }
+    #endif
 
     // MARK: - Header
 
@@ -240,8 +246,9 @@ struct PaywallView: View {
         }
     }
 
-    // MARK: - Stripe Pricing
+    // MARK: - Stripe Pricing (direct distribution only)
 
+    #if !APP_STORE
     private var stripePricingSection: some View {
         VStack(spacing: 12) {
             ForEach(StripePlan.allCases, id: \.self) { plan in
@@ -254,6 +261,7 @@ struct PaywallView: View {
             }
         }
     }
+    #endif
 
     // MARK: - App Store Subscribe Button
 
@@ -288,8 +296,9 @@ struct PaywallView: View {
         .disabled(selectedProduct == nil || isPurchasing)
     }
 
-    // MARK: - Stripe Subscribe Button
+    // MARK: - Stripe Subscribe Button (direct distribution only)
 
+    #if !APP_STORE
     private var stripeSubscribeButton: some View {
         Button(action: {
             Task {
@@ -321,6 +330,7 @@ struct PaywallView: View {
         .buttonStyle(.plain)
         .disabled(isPurchasing)
     }
+    #endif
 
     // MARK: - Restore Button
 
@@ -342,6 +352,12 @@ struct PaywallView: View {
 
     private var termsSection: some View {
         VStack(spacing: 8) {
+            #if APP_STORE
+            Text("Subscriptions auto-renew unless cancelled at least 24 hours before the end of the current period. Manage subscriptions in System Settings > Apple ID > Subscriptions.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+            #else
             if billingMethod == .appStore {
                 Text("Subscriptions auto-renew unless cancelled at least 24 hours before the end of the current period. Manage subscriptions in System Settings > Apple ID > Subscriptions.")
                     .font(.caption2)
@@ -353,6 +369,7 @@ struct PaywallView: View {
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
             }
+            #endif
 
             HStack(spacing: 16) {
                 Link("Terms of Service", destination: URL(string: "https://syncflow.app/terms")!)
@@ -378,6 +395,7 @@ struct PaywallView: View {
         isPurchasing = false
     }
 
+    #if !APP_STORE
     private func startStripeCheckout() async {
         isPurchasing = true
         stripeError = nil
@@ -417,6 +435,7 @@ struct PaywallView: View {
             }
         }
     }
+    #endif
 }
 
 // MARK: - Feature Row
@@ -542,8 +561,9 @@ struct PricingOptionCard: View {
     }
 }
 
-// MARK: - Stripe Pricing Card
+// MARK: - Stripe Pricing Card (direct distribution only)
 
+#if !APP_STORE
 struct StripePricingCard: View {
     let plan: StripePlan
     let isSelected: Bool
@@ -611,6 +631,7 @@ struct StripePricingCard: View {
         .buttonStyle(.plain)
     }
 }
+#endif
 
 // MARK: - Subscription Status Banner
 
