@@ -3,6 +3,7 @@ package com.phoneintegration.app.spam
 import android.content.Context
 import android.util.Log
 import androidx.work.*
+import com.phoneintegration.app.ContactHelper
 import com.phoneintegration.app.SmsRepository
 import com.phoneintegration.app.data.PreferencesManager
 import com.phoneintegration.app.data.database.SyncFlowDatabase
@@ -198,6 +199,20 @@ class SpamFilterWorker(
         val currentTime = System.currentTimeMillis()
         val scannedThreads = mutableSetOf<Long>()
 
+        // Build contact lookup cache so we can properly exempt saved contacts
+        // getAllMessages() does NOT populate contactName, so we must resolve it ourselves
+        val contactHelper = try { ContactHelper(applicationContext) } catch (_: Exception) { null }
+        val contactCache = mutableMapOf<String, Boolean>() // address -> isContact
+        fun isContactAddress(address: String): Boolean {
+            return contactCache.getOrPut(address) {
+                try {
+                    contactHelper?.getContactName(address) != null
+                } catch (_: Exception) {
+                    false
+                }
+            }
+        }
+
         // STEP 1: Scan UNREAD conversations first (these are likely ignored spam)
         // Uses thread-level read status which works on Samsung
         Log.i(TAG, "Fetching unread conversations...")
@@ -209,7 +224,7 @@ class SpamFilterWorker(
                 scannedThreads.add(conversation.threadId)
 
                 val messageAgeHours = (currentTime - conversation.timestamp) / (1000 * 60 * 60)
-                val isFromContact = conversation.contactName != null
+                val isFromContact = conversation.contactName != null || isContactAddress(conversation.address)
 
                 // Scan the conversation's last message
                 val result = spamService.checkMessage(
@@ -254,7 +269,7 @@ class SpamFilterWorker(
         for (message in receivedMessages) {
             try {
                 val messageAgeHours = (currentTime - message.date) / (1000 * 60 * 60)
-                val isFromContact = message.contactName != null
+                val isFromContact = isContactAddress(message.address)
 
                 val result = spamService.checkMessage(
                     address = message.address,
