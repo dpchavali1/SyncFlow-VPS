@@ -270,9 +270,8 @@ struct MainView: View {
                 isSyncing: appState.isSyncing
             )
 
-            // Subtle glass border instead of hard divider
             Rectangle()
-                .fill(SyncFlowColors.glassBorder)
+                .fill(SyncFlowColors.divider)
                 .frame(width: 1)
 
             VStack(spacing: 0) {
@@ -725,7 +724,7 @@ struct SideRail: View {
             .padding(.bottom, 16)
         }
         .frame(width: SyncFlowSpacing.sideRailWidth)
-        .materialBackground(.sidebar)
+        .background(SyncFlowColors.sidebarRailBackground)
     }
 }
 
@@ -1045,14 +1044,7 @@ struct UpgradeBanner: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .background(.ultraThinMaterial)
-        .overlay(
-            LinearGradient(
-                colors: [SyncFlowColors.primary.opacity(0.05), SyncFlowColors.accentPurple.opacity(0.05)],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-        )
+        .background(SyncFlowColors.surfaceElevated)
         .clipShape(RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusPremium))
         .overlay(
             RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusPremium)
