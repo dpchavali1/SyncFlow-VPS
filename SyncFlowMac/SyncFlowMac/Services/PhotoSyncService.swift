@@ -108,10 +108,12 @@ class PhotoSyncService: ObservableObject {
     private func downloadThumbnail(photo: SyncedPhoto) {
         // Check if already cached
         if FileManager.default.fileExists(atPath: photo.localPath.path) {
-            DispatchQueue.main.async { [weak self] in
-                if let index = self?.recentPhotos.firstIndex(where: { $0.id == photo.id }) {
-                    self?.recentPhotos[index].isDownloaded = true
-                    self?.recentPhotos[index].thumbnail = NSImage(contentsOf: photo.localPath)
+            Task { @MainActor in
+                if let index = self.recentPhotos.firstIndex(where: { $0.id == photo.id }) {
+                    var updated = self.recentPhotos[index]
+                    updated.isDownloaded = true
+                    updated.thumbnail = NSImage(contentsOf: photo.localPath)
+                    self.recentPhotos[index] = updated
                 }
             }
             return
@@ -128,11 +130,13 @@ class PhotoSyncService: ObservableObject {
                 // Save to cache
                 try data.write(to: photo.localPath)
 
-                // Update UI
-                await MainActor.run { [weak self] in
-                    if let index = self?.recentPhotos.firstIndex(where: { $0.id == photo.id }) {
-                        self?.recentPhotos[index].isDownloaded = true
-                        self?.recentPhotos[index].thumbnail = NSImage(data: data)
+                // Update UI — replace entire element to ensure @Published fires
+                await MainActor.run {
+                    if let index = self.recentPhotos.firstIndex(where: { $0.id == photo.id }) {
+                        var updated = self.recentPhotos[index]
+                        updated.isDownloaded = true
+                        updated.thumbnail = NSImage(data: data)
+                        self.recentPhotos[index] = updated
                     }
                 }
             } catch {

@@ -377,13 +377,6 @@ struct SyncFlowMacApp: App {
 
                 Divider()
 
-                Button("Share Screen") {
-                    appState.requestStandaloneScreenShare()
-                }
-                .keyboardShortcut("s", modifiers: [.command, .shift])
-
-                Divider()
-
                 // Hotspot control
                 if appState.hotspotControlService.isHotspotEnabled {
                     Button("Disable Hotspot") {
@@ -661,12 +654,6 @@ class AppState: ObservableObject {
 
     /// Screen capture service for screen sharing
     let screenCaptureService = ScreenCaptureService()
-
-    /// Whether to show the standalone screen share picker
-    @Published var showScreenSharePicker: Bool = false
-
-    /// Cached Android device ID for standalone screen share
-    var screenShareTargetDeviceId: String?
 
     // =========================================================================
     // MARK: - Message State
@@ -1579,29 +1566,6 @@ class AppState: ObservableObject {
 
     /// Triggers a manual sync of all services.
     /// Called from the Sync Now button in the SideRail.
-    // MARK: - Standalone Screen Share
-
-    /// Prepares and shows the screen share picker for standalone screen sharing.
-    /// Fetches the Android device ID first, then shows the picker.
-    func requestStandaloneScreenShare() {
-        Task {
-            do {
-                if let response = try? await VPSService.shared.getDevices() {
-                    if let androidDevice = response.devices.first(where: { $0.deviceType == "android" }) {
-                        await MainActor.run {
-                            self.screenShareTargetDeviceId = androidDevice.id
-                            self.showScreenSharePicker = true
-                        }
-                    } else {
-                        #if DEBUG
-                        print("[ScreenShare] No Android device found for standalone screen share")
-                        #endif
-                    }
-                }
-            }
-        }
-    }
-
     func syncNow() {
         guard !isSyncing, let userId = userId else { return }
         isSyncing = true

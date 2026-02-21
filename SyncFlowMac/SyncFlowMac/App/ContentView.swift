@@ -264,9 +264,6 @@ struct MainView: View {
                     appState.syncNow()
                     messageStore.syncNow()
                 },
-                onScreenShare: {
-                    appState.requestStandaloneScreenShare()
-                },
                 isSyncing: appState.isSyncing
             )
 
@@ -391,41 +388,6 @@ struct MainView: View {
             SupportChatView()
                 .environmentObject(appState)
         }
-        // Standalone Screen Share picker sheet
-        .sheet(isPresented: $appState.showScreenSharePicker) {
-            if #available(macOS 12.3, *) {
-                ScreenSharePicker(
-                    screenCaptureService: appState.screenCaptureService,
-                    onSelectDisplay: { display in
-                        appState.showScreenSharePicker = false
-                        Task {
-                            try? await appState.syncFlowCallManager.startScreenSharing(
-                                display: display,
-                                screenCaptureService: appState.screenCaptureService,
-                                calleeDeviceId: appState.screenShareTargetDeviceId
-                            )
-                            await MainActor.run {
-                                appState.showSyncFlowCallView = true
-                            }
-                        }
-                    },
-                    onSelectWindow: { window in
-                        appState.showScreenSharePicker = false
-                        Task {
-                            try? await appState.screenCaptureService.startSharingWindow(
-                                window,
-                                factory: SyncFlowCallManager.factory
-                            )
-                            await MainActor.run {
-                                appState.showSyncFlowCallView = true
-                            }
-                        }
-                    },
-                    onCancel: { appState.showScreenSharePicker = false }
-                )
-                .frame(minWidth: 500, minHeight: 400)
-            }
-        }
     }
 }
 
@@ -459,9 +421,6 @@ struct SideRail: View {
 
     /// Optional callback to trigger manual sync
     var onSync: (() -> Void)? = nil
-
-    /// Optional callback to share screen
-    var onScreenShare: (() -> Void)? = nil
 
     /// Whether a sync is currently in progress
     var isSyncing: Bool = false
@@ -634,28 +593,6 @@ struct SideRail: View {
                                 showSyncComplete = false
                             }
                         }
-                    }
-                }
-                .padding(.bottom, 4)
-            }
-
-            // Screen Share button
-            if let onScreenShare = onScreenShare {
-                Button(action: onScreenShare) {
-                    Image(systemName: "rectangle.on.rectangle")
-                        .font(.system(size: 16))
-                        .foregroundColor(bottomButtonHovered == "screen" ? SyncFlowColors.primary : SyncFlowColors.textSecondary)
-                        .frame(width: SyncFlowSpacing.sideRailButtonSize, height: SyncFlowSpacing.sideRailButtonSize)
-                        .background(
-                            RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd)
-                                .fill(bottomButtonHovered == "screen" ? SyncFlowColors.hoverWarm : Color.clear)
-                        )
-                }
-                .buttonStyle(.plain)
-                .help("Share Screen")
-                .onHover { hovering in
-                    withAnimation(SFAnimations.hoverIn) {
-                        bottomButtonHovered = hovering ? "screen" : (bottomButtonHovered == "screen" ? nil : bottomButtonHovered)
                     }
                 }
                 .padding(.bottom, 4)

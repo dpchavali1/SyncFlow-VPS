@@ -100,6 +100,10 @@ struct PhotoGalleryView: View {
             }
         }
         .frame(minWidth: 400, minHeight: 300)
+        .onAppear {
+            // Always fetch fresh photos when gallery opens
+            Task { await photoService.fetchPhotos() }
+        }
         .sheet(isPresented: $showingPreview) {
             if let photo = selectedPhoto {
                 PhotoPreviewView(photo: photo, photoService: photoService)
