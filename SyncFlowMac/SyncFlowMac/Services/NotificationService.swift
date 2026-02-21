@@ -290,6 +290,14 @@ class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification
     ) async -> UNNotificationPresentationOptions {
+        let userInfo = notification.request.content.userInfo
+
+        // Handle silent midnight reschedule trigger for deal notifications
+        if (userInfo["type"] as? String) == "deal_reschedule" {
+            DealNotificationService.shared.scheduleDailyNotifications()
+            return []  // Suppress — no banner/sound for this internal trigger
+        }
+
         // Show notification even when app is in foreground
         return [.banner, .sound, .badge]
     }

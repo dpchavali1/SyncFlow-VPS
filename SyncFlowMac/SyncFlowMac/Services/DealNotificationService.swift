@@ -2,8 +2,9 @@
 //  DealNotificationService.swift
 //  SyncFlowMac
 //
-//  Handles scheduled deal notifications on macOS
-//  Mirrors the Android DealNotificationScheduler / DealNotificationManager behavior
+//  Handles scheduled deal notifications on macOS.
+//  Uses UNCalendarNotificationTrigger for reliable delivery even when
+//  the app is in background or subject to App Nap.
 //
 
 import Foundation
@@ -16,209 +17,202 @@ class DealNotificationService {
     static let shared = DealNotificationService()
 
     private let priceHistory = PriceHistoryStore()
-    private var scheduledTimers: [Timer] = []
-    private var midnightTimer: Timer?
     private let affiliateTag = "syncflow-20"
+    private let notificationPrefix = "deal_scheduled_"
 
     private init() {}
 
     // MARK: - Scheduling
 
-    /// Call once at app startup to schedule deal notifications for today
+    /// Call once at app startup to schedule deal notifications for today.
+    /// Uses UNCalendarNotificationTrigger so notifications fire reliably
+    /// even when the app is napped or in the background.
     func scheduleDailyNotifications() {
+        // Remove previously scheduled deal notifications
         cancelAll()
-        scheduleNotificationsForToday()
-        scheduleMidnightReschedule()
 
-        #if DEBUG
-        print("[DealNotify] Scheduled deal notifications for today")
-        #endif
+        // Fetch deals first, then schedule with content
+        Task {
+            await DealsService.shared.fetchDeals()
+            let deals = DealsService.shared.deals
+
+            // Check for price drops
+            let priceDrop = priceHistory.detectPriceDrop(deals: deals)
+            priceHistory.updatePrices(deals: deals)
+
+            let times = notificationTimesForToday()
+
+            #if DEBUG
+            let formatter = DateFormatter()
+            formatter.dateFormat = "h:mm a"
+            print("[DealNotify] Scheduling \(times.count) notifications for today")
+            #endif
+
+            for (index, time) in times.enumerated() {
+                // First notification gets price drop if available
+                if index == 0, let drop = priceDrop {
+                    scheduleSystemNotification(
+                        at: time,
+                        title: "Price Dropped!",
+                        body: "\(drop.deal.title) \u{2014} was \(drop.oldPrice), now \(drop.deal.price)",
+                        dealURL: buildAffiliateURL(drop.deal.url),
+                        dealTitle: drop.deal.title,
+                        identifier: "\(notificationPrefix)\(index)"
+                    )
+                } else if let deal = deals.randomElement() {
+                    scheduleSystemNotification(
+                        at: time,
+                        title: "New Deal!",
+                        body: "\(deal.title) \u{2014} \(deal.price)",
+                        dealURL: buildAffiliateURL(deal.url),
+                        dealTitle: deal.title,
+                        identifier: "\(notificationPrefix)\(index)"
+                    )
+                }
+
+                #if DEBUG
+                print("[DealNotify] Scheduled notification at \(formatter.string(from: time))")
+                #endif
+            }
+
+            // Schedule a reschedule trigger at midnight for the next day
+            scheduleMidnightReschedule()
+        }
     }
 
-    /// Cancel all pending deal notification timers
+    /// Cancel all pending deal notifications
     func cancelAll() {
-        scheduledTimers.forEach { $0.invalidate() }
-        scheduledTimers.removeAll()
-        midnightTimer?.invalidate()
-        midnightTimer = nil
+        let center = UNUserNotificationCenter.current()
+        center.getPendingNotificationRequests { requests in
+            let dealIds = requests
+                .filter { $0.identifier.hasPrefix(self.notificationPrefix) || $0.identifier == "deal_midnight_reschedule" }
+                .map { $0.identifier }
+            center.removePendingNotificationRequests(withIdentifiers: dealIds)
+        }
     }
 
-    private func scheduleNotificationsForToday() {
+    // MARK: - Notification Times
+
+    private func notificationTimesForToday() -> [Date] {
         let now = Date()
-        let calendar = Calendar.current
         let timezone = TimeZone(identifier: "America/Detroit") ?? .current
         var cal = Calendar(identifier: .gregorian)
         cal.timeZone = timezone
 
-        let windows: [(Int, Int)]  // (startHour, endHour)
+        var times: [Date] = []
         let weekday = cal.component(.weekday, from: now)
         let isWeekend = weekday == 1 || weekday == 7
 
         if HolidayCalendar.isHoliday(now) {
-            // Holiday: 3 notifications at fixed times
-            let holidayTimes = [(10, 30), (14, 0), (18, 0)]
-            for (hour, minute) in holidayTimes {
-                if let fireDate = cal.date(bySettingHour: hour, minute: minute, second: 0, of: now),
-                   fireDate > now {
-                    scheduleNotification(at: fireDate)
+            // Holiday: 3 fixed times
+            for (hour, minute) in [(10, 30), (14, 0), (18, 0)] {
+                if let date = cal.date(bySettingHour: hour, minute: minute, second: 0, of: now),
+                   date > now {
+                    times.append(date)
                 }
             }
-            return
         } else if isWeekend {
             // Weekend: 4 fixed times
-            let weekendTimes = [(10, 0), (13, 0), (16, 0), (19, 0)]
-            for (hour, minute) in weekendTimes {
-                if let fireDate = cal.date(bySettingHour: hour, minute: minute, second: 0, of: now),
-                   fireDate > now {
-                    scheduleNotification(at: fireDate)
+            for (hour, minute) in [(10, 0), (13, 0), (16, 0), (19, 0)] {
+                if let date = cal.date(bySettingHour: hour, minute: minute, second: 0, of: now),
+                   date > now {
+                    times.append(date)
                 }
             }
-            return
         } else {
             // Weekday: 4 random times within windows
-            windows = [(9, 11), (12, 14), (15, 17), (18, 20)]
-        }
-
-        for (startHour, endHour) in windows {
-            let randomMinute = Int.random(in: 0...59)
-            let randomHour = Int.random(in: startHour..<endHour)
-
-            if let fireDate = cal.date(bySettingHour: randomHour, minute: randomMinute, second: 0, of: now),
-               fireDate > now {
-                scheduleNotification(at: fireDate)
+            let windows = [(9, 11), (12, 14), (15, 17), (18, 20)]
+            for (startHour, endHour) in windows {
+                let randomHour = Int.random(in: startHour..<endHour)
+                let randomMinute = Int.random(in: 0...59)
+                if let date = cal.date(bySettingHour: randomHour, minute: randomMinute, second: 0, of: now),
+                   date > now {
+                    times.append(date)
+                }
             }
         }
+
+        return times
     }
 
-    private func scheduleNotification(at date: Date) {
-        let interval = date.timeIntervalSinceNow
-        guard interval > 0 else { return }
+    // MARK: - System Notification Scheduling
 
-        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
-            self?.sendDealNotification()
+    private func scheduleSystemNotification(
+        at date: Date,
+        title: String,
+        body: String,
+        dealURL: String,
+        dealTitle: String,
+        identifier: String
+    ) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        content.categoryIdentifier = "DEAL_CATEGORY"
+        content.userInfo = [
+            "type": "deal",
+            "dealURL": dealURL,
+            "dealTitle": dealTitle
+        ]
+
+        let timezone = TimeZone(identifier: "America/Detroit") ?? .current
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timezone
+
+        let components = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
+
+        let request = UNNotificationRequest(identifier: identifier, content: content, trigger: trigger)
+
+        UNUserNotificationCenter.current().add(request) { error in
+            #if DEBUG
+            if let error = error {
+                print("[DealNotify] Error scheduling notification: \(error)")
+            }
+            #endif
         }
-        RunLoop.main.add(timer, forMode: .common)
-        scheduledTimers.append(timer)
-
-        #if DEBUG
-        let formatter = DateFormatter()
-        formatter.dateFormat = "h:mm a"
-        print("[DealNotify] Scheduled notification at \(formatter.string(from: date))")
-        #endif
     }
+
+    // MARK: - Midnight Reschedule
 
     private func scheduleMidnightReschedule() {
+        // Schedule a silent local notification at 12:01 AM to trigger rescheduling
+        // When the app receives it via the delegate, it will call scheduleDailyNotifications()
+        let timezone = TimeZone(identifier: "America/Detroit") ?? .current
         var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = TimeZone(identifier: "America/Detroit") ?? .current
+        cal.timeZone = timezone
 
         guard let tomorrow = cal.date(byAdding: .day, value: 1, to: Date()),
               let midnight = cal.date(bySettingHour: 0, minute: 1, second: 0, of: tomorrow) else {
             return
         }
 
-        let interval = midnight.timeIntervalSinceNow
-        guard interval > 0 else { return }
-
-        midnightTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
-            self?.scheduleDailyNotifications()
-        }
-        if let timer = midnightTimer {
-            RunLoop.main.add(timer, forMode: .common)
-        }
-    }
-
-    // MARK: - Send Notification
-
-    private func sendDealNotification() {
-        Task {
-            // Fetch fresh deals
-            await DealsService.shared.fetchDeals()
-            let deals = DealsService.shared.deals
-
-            guard !deals.isEmpty else {
-                #if DEBUG
-                print("[DealNotify] No deals available for notification")
-                #endif
-                return
-            }
-
-            // Check for price drops first (priority)
-            if let priceDrop = priceHistory.detectPriceDrop(deals: deals) {
-                showPriceDropNotification(deal: priceDrop.deal, oldPrice: priceDrop.oldPrice)
-                priceHistory.updatePrices(deals: deals)
-                return
-            }
-
-            // Update price history
-            priceHistory.updatePrices(deals: deals)
-
-            // Pick a random deal
-            let deal = deals.randomElement()!
-            showDealNotification(deal: deal)
-        }
-    }
-
-    private func showDealNotification(deal: Deal) {
         let content = UNMutableNotificationContent()
-        content.title = "New Deal!"
-        content.body = "\(deal.title) \u{2014} \(deal.price)"
-        content.sound = .default
-        content.categoryIdentifier = "DEAL_CATEGORY"
+        content.userInfo = ["type": "deal_reschedule"]
+        // No sound, no banner — silent trigger
 
-        let dealURL = buildAffiliateURL(deal.url)
-        content.userInfo = [
-            "type": "deal",
-            "dealURL": dealURL,
-            "dealTitle": deal.title
-        ]
+        let components = cal.dateComponents([.year, .month, .day, .hour, .minute], from: midnight)
+        let trigger = UNCalendarNotificationTrigger(dateMatching: components, repeats: false)
 
         let request = UNNotificationRequest(
-            identifier: "deal_\(deal.id)_\(Int(Date().timeIntervalSince1970))",
+            identifier: "deal_midnight_reschedule",
             content: content,
-            trigger: nil
+            trigger: trigger
         )
 
         UNUserNotificationCenter.current().add(request) { error in
             #if DEBUG
             if let error = error {
-                print("[DealNotify] Error showing notification: \(error)")
+                print("[DealNotify] Error scheduling midnight reschedule: \(error)")
             } else {
-                print("[DealNotify] Showed deal notification: \(deal.title)")
+                print("[DealNotify] Scheduled midnight reschedule")
             }
             #endif
         }
     }
 
-    private func showPriceDropNotification(deal: Deal, oldPrice: String) {
-        let content = UNMutableNotificationContent()
-        content.title = "Price Dropped!"
-        content.body = "\(deal.title) \u{2014} was \(oldPrice), now \(deal.price)"
-        content.sound = .default
-        content.categoryIdentifier = "DEAL_CATEGORY"
-
-        let dealURL = buildAffiliateURL(deal.url)
-        content.userInfo = [
-            "type": "deal",
-            "dealURL": dealURL,
-            "dealTitle": deal.title
-        ]
-
-        let request = UNNotificationRequest(
-            identifier: "pricedrop_\(deal.id)_\(Int(Date().timeIntervalSince1970))",
-            content: content,
-            trigger: nil
-        )
-
-        UNUserNotificationCenter.current().add(request) { error in
-            #if DEBUG
-            if let error = error {
-                print("[DealNotify] Error showing price drop notification: \(error)")
-            } else {
-                print("[DealNotify] Showed price drop notification: \(deal.title)")
-            }
-            #endif
-        }
-    }
+    // MARK: - Affiliate URL
 
     private func buildAffiliateURL(_ urlString: String) -> String {
         let cleaned = urlString
@@ -314,7 +308,6 @@ struct HolidayCalendar {
         let day = cal.component(.day, from: date)
         let weekday = cal.component(.weekday, from: date)
         let weekOfMonth = cal.component(.weekOfMonth, from: date)
-        let year = cal.component(.year, from: date)
 
         // New Year's Day - January 1
         if month == 1 && day == 1 { return true }
