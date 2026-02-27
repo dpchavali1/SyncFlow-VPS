@@ -93,25 +93,31 @@ echo -e "${YELLOW}[2/6] Building macOS app...${NC}"
 # Clean previous build artifacts
 rm -rf "$ARCHIVE_PATH" "$EXPORT_PATH"
 
-# Archive
-xcodebuild archive \
+# Archive (allow failure — falls back to direct build if provisioning profile unavailable)
+ARCHIVE_OK=false
+if xcodebuild archive \
     -workspace "$XCODE_WORKSPACE" \
     -scheme "$XCODE_SCHEME" \
     -configuration Release \
     -archivePath "$ARCHIVE_PATH" \
-    -quiet
-
-# Export (direct copy from archive since it's a Developer ID / direct distribution app)
-APP_PATH="$ARCHIVE_PATH/Products/Applications/SyncFlowMac.app"
-
-if [ ! -d "$APP_PATH" ]; then
-    # Fallback: check the standard archive location
-    APP_PATH="$ARCHIVE_PATH/Products/usr/local/bin/SyncFlowMac.app"
+    -allowProvisioningUpdates \
+    -quiet 2>/dev/null; then
+    ARCHIVE_OK=true
 fi
 
-if [ ! -d "$APP_PATH" ]; then
+# Export (direct copy from archive since it's a Developer ID / direct distribution app)
+APP_PATH=""
+if [ "$ARCHIVE_OK" = true ]; then
+    if [ -d "$ARCHIVE_PATH/Products/Applications/SyncFlowMac.app" ]; then
+        APP_PATH="$ARCHIVE_PATH/Products/Applications/SyncFlowMac.app"
+    elif [ -d "$ARCHIVE_PATH/Products/usr/local/bin/SyncFlowMac.app" ]; then
+        APP_PATH="$ARCHIVE_PATH/Products/usr/local/bin/SyncFlowMac.app"
+    fi
+fi
+
+if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
     # Fallback: build without archive for development signing
-    echo -e "${YELLOW}  Archive export not found, building directly...${NC}"
+    echo -e "${YELLOW}  Archive not available, building directly...${NC}"
     xcodebuild build \
         -workspace "$XCODE_WORKSPACE" \
         -scheme "$XCODE_SCHEME" \
