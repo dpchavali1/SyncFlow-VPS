@@ -352,33 +352,32 @@ router.delete('/tables/:tableName/:rowId', async (req: Request, res: Response) =
 // ── POST /query — Run SQL (SELECT-only for safety) ──────────────────────────
 
 router.post('/query', async (req: Request, res: Response) => {
+  const { sql } = req.body;
+
+  if (!sql || typeof sql !== 'string') {
+    res.status(400).json({ error: 'SQL query is required' });
+    return;
+  }
+
+  // SECURITY: Use a READ ONLY transaction so PostgreSQL itself blocks writes.
+  // This prevents CTE bypass (WITH x AS (DELETE ...) SELECT ...), semicolon
+  // stacking, and any other creative SQL injection that regex can't catch.
+  const client = await pool.connect();
   try {
-    const { sql } = req.body;
-
-    if (!sql || typeof sql !== 'string') {
-      res.status(400).json({ error: 'SQL query is required' });
-      return;
-    }
-
-    // SECURITY: Use a READ ONLY transaction so PostgreSQL itself blocks writes.
-    // This prevents CTE bypass (WITH x AS (DELETE ...) SELECT ...), semicolon
-    // stacking, and any other creative SQL injection that regex can't catch.
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN READ ONLY');
-      const result = await client.query(sql);
-      await client.query('COMMIT');
-      res.json({
-        rows: Array.isArray(result.rows) ? result.rows : [],
-        rowCount: Array.isArray(result.rows) ? result.rows.length : 0,
-        isModifying: false,
-      });
-    } catch (error: any) {
-      await client.query('ROLLBACK').catch(() => {});
-      res.status(400).json({ error: error.message || 'Query failed' });
-    } finally {
-      client.release();
-    }
+    await client.query('BEGIN READ ONLY');
+    const result = await client.query(sql);
+    await client.query('COMMIT');
+    res.json({
+      rows: Array.isArray(result.rows) ? result.rows : [],
+      rowCount: Array.isArray(result.rows) ? result.rows.length : 0,
+      isModifying: false,
+    });
+  } catch (error: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    res.status(400).json({ error: error.message || 'Query failed' });
+  } finally {
+    client.release();
+  }
 });
 
 // ── GET /db/health — Database health check ──────────────────────────────────
