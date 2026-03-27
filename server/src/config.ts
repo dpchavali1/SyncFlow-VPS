@@ -6,6 +6,21 @@ export const config = {
   port: parseInt(process.env.PORT || '3000', 10),
   wsPort: parseInt(process.env.WS_PORT || '3001', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
+  baseUrl: process.env.BASE_URL || `http://localhost:${process.env.PORT || '3000'}`,
+
+  // Self-hosted mode
+  selfHosted: process.env.SELF_HOSTED === 'true',
+
+  // Storage backend ('r2' | 'local' | 'auto')
+  storage: {
+    backend: (process.env.STORAGE_BACKEND || 'auto') as 'r2' | 'local' | 'auto',
+    localPath: process.env.LOCAL_STORAGE_PATH || './uploads',
+  },
+
+  // License (placeholder for future enforcement)
+  license: {
+    key: process.env.SYNCFLOW_LICENSE_KEY || '',
+  },
 
   // PostgreSQL
   database: {
@@ -93,4 +108,17 @@ export const config = {
 // Startup warnings for missing optional security config
 if (!config.admin.apiKey) {
   console.warn('[WARN] ADMIN_API_KEY is not set — admin API key auth will be disabled');
+}
+
+if (config.selfHosted) {
+  console.log('[Self-Hosted] Running in self-hosted mode');
+  if (!config.r2.endpoint) {
+    console.log(`[Self-Hosted] R2 not configured — files will be stored locally at ${config.storage.localPath}`);
+  }
+  if (!config.fcm.serviceAccountPath) {
+    console.log('[Self-Hosted] FCM not configured — push notifications disabled (WebSocket delivery only)');
+  }
+  if (!config.email.resendApiKey) {
+    console.log('[Self-Hosted] Resend API not configured — admin emails will be logged to console');
+  }
 }

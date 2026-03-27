@@ -11,6 +11,9 @@ import { initLogger, log } from './services/logger';
 import { initializeFCM, retryStaleOutgoingMessages } from './services/push';
 import { maintenanceMiddleware } from './middleware/maintenance';
 import { startDailyCleanup, stopDailyCleanup } from './services/dailyCleanup';
+import { storage, createFileRouter } from './services/storage';
+import { validateLicense, getLicenseStatus, startLicenseHeartbeat, stopLicenseHeartbeat } from './services/license';
+import fs from 'fs/promises';
 
 // Initialize log capture before anything else
 initLogger();
@@ -63,6 +66,12 @@ app.use(cors({
   credentials: true,
 }));
 
+// Version header on all responses
+app.use((_req, res, next) => {
+  res.setHeader('X-SyncFlow-Version', '1.0.0');
+  next();
+});
+
 // Body parsing (skip JSON parsing for Stripe webhook which needs raw body)
 app.use((req, res, next) => {
   if (req.path === '/api/usage/subscription/webhook') {
@@ -102,6 +111,18 @@ app.get('/health', async (req, res) => {
     websocket: {
       connections: getConnectionCount(),
     },
+    selfHosted: config.selfHosted,
+    storageBackend: storage.isConfigured() ? 'ready' : 'not configured',
+    license: (() => {
+      const ls = getLicenseStatus();
+      return {
+        plan: ls.plan,
+        valid: ls.valid,
+        expires: ls.expires,
+        maxUsers: ls.maxUsers,
+        maxDevices: ls.maxDevices,
+      };
+    })(),
   });
 });
 
@@ -135,6 +156,9 @@ app.use('/api/continuity', continuityRoutes);
 app.use('/api/e2ee', e2eeRoutes);
 app.use('/api/spam', spamRoutes);
 
+// Local file storage endpoints (active only when using local storage backend)
+app.use('/api/files', createFileRouter());
+
 app.use('/api/usage', usageRoutes);
 app.use('/api/account', accountRoutes);
 app.use('/api/support', supportRoutes);
@@ -160,6 +184,32 @@ app.use((err: Error, req: express.Request, res: express.Response, next: express.
 // Start servers
 async function start() {
   try {
+    // Self-hosted mode banner
+    if (config.selfHosted) {
+      log.info('=== SyncFlow Self-Hosted Mode ===');
+      log.info(`Storage backend: ${storage.isConfigured() ? 'ready' : 'not configured'}`);
+
+      // Validate license and start heartbeat
+      const license = validateLicense();
+      const licenseStatus = getLicenseStatus();
+      log.info('License status', {
+        plan: licenseStatus.plan,
+        valid: licenseStatus.valid,
+        maxUsers: licenseStatus.maxUsers,
+        maxDevices: licenseStatus.maxDevices,
+      });
+      if (license) {
+        startLicenseHeartbeat();
+      }
+    }
+
+    // Ensure local storage directory exists when using local backend
+    if (config.storage.backend === 'local' || (!config.r2.endpoint && config.storage.backend === 'auto')) {
+      const storagePath = path.resolve(config.storage.localPath);
+      await fs.mkdir(storagePath, { recursive: true });
+      log.info('Local storage directory ready', { path: storagePath });
+    }
+
     // Test database connection
     log.info('Connecting to PostgreSQL...');
     await checkDatabaseHealth();
@@ -185,6 +235,7 @@ async function start() {
     const gracefulShutdown = (signal: string) => {
       log.info('Shutdown signal received', { signal });
       stopDailyCleanup();
+      stopLicenseHeartbeat();
 
       // Stop accepting new connections
       server.close(async () => {
@@ -220,7 +271,13 @@ async function start() {
     // Retry stale pending outgoing messages every 2 minutes
     setInterval(retryStaleOutgoingMessages, 2 * 60 * 1000);
 
-    log.info('SyncFlow API Server started', { mode: config.nodeEnv, port: config.port, healthUrl: `http://localhost:${config.port}/health` });
+    log.info('SyncFlow API Server started', {
+      mode: config.nodeEnv,
+      port: config.port,
+      selfHosted: config.selfHosted,
+      storageBackend: config.storage.backend,
+      healthUrl: `http://localhost:${config.port}/health`,
+    });
 
   } catch (error) {
     log.error('Failed to start server', { error: (error as Error).message, stack: (error as Error).stack });

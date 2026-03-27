@@ -4,10 +4,19 @@ import { query } from './database';
 import { broadcastToUser } from './websocket';
 
 let fcmInitialized = false;
+let fcmDisabledWarned = false;
+
+/** Log a single warning that FCM is disabled, then stay quiet. */
+function warnFcmDisabled(context?: string): void {
+  if (!fcmDisabledWarned) {
+    fcmDisabledWarned = true;
+    console.warn('[FCM] Push notifications are disabled — FCM is not configured. WebSocket delivery will still work.');
+  }
+}
 
 export function initializeFCM(): void {
   if (!config.fcm.serviceAccountPath) {
-    console.warn('[FCM] No service account path configured — push notifications disabled');
+    warnFcmDisabled();
     return;
   }
 
@@ -19,6 +28,7 @@ export function initializeFCM(): void {
     console.log('[FCM] Firebase Admin initialized');
   } catch (error) {
     console.error('[FCM] Failed to initialize Firebase Admin:', error);
+    console.warn('[FCM] Push notifications will be unavailable — all delivery will go through WebSocket.');
   }
 }
 
@@ -32,7 +42,7 @@ export async function sendOutgoingMessageNotification(
   excludeDeviceId?: string | null
 ): Promise<void> {
   if (!fcmInitialized) {
-    console.warn('[FCM] Not initialized — cannot push outgoing message:', messageId);
+    // Silently skip — warning was already logged once at startup
     return;
   }
 
@@ -132,7 +142,7 @@ export async function sendCallNotification(
   excludeDeviceId?: string | null
 ): Promise<void> {
   if (!fcmInitialized) {
-    console.warn('[FCM] Not initialized — skipping push notification');
+    // Silently skip — warning was already logged once at startup
     return;
   }
 

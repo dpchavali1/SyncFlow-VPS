@@ -1,0 +1,127 @@
+# =============================================================================
+# SyncFlow Self-Hosted - Docker Compose
+# =============================================================================
+# Usage:
+#   cp .env.self-hosted .env   # then edit .env with your values
+#   docker compose up -d
+#   docker compose logs -f syncflow
+# =============================================================================
+
+services:
+  # ---------- SyncFlow API ----------
+  syncflow:
+    build: .
+    container_name: syncflow-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      - PG_HOST=postgres
+      - PG_PORT=5432
+      - PG_USER=syncflow
+      - PG_DATABASE=syncflow_prod
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - NODE_ENV=production
+      - PORT=3000
+    ports:
+      - "3000:3000"
+    volumes:
+      - syncflow-downloads:/app/downloads
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - syncflow-net
+
+  # ---------- PostgreSQL ----------
+  postgres:
+    image: postgres:16-alpine
+    container_name: syncflow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: syncflow
+      POSTGRES_PASSWORD: ${PG_PASSWORD:?Set PG_PASSWORD in .env}
+      POSTGRES_DB: syncflow_prod
+    volumes:
+      - syncflow-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U syncflow -d syncflow_prod"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - syncflow-net
+
+  # ---------- Redis ----------
+  redis:
+    image: redis:7-alpine
+    container_name: syncflow-redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env} --appendonly yes
+    volumes:
+      - syncflow-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    networks:
+      - syncflow-net
+
+  # ---------- Caddy (reverse proxy + automatic HTTPS) ----------
+  # Uncomment this service to expose the API with automatic TLS.
+  # Make sure DOMAIN is set in .env and DNS points to this server.
+  #
+  # caddy:
+  #   image: caddy:2-alpine
+  #   container_name: syncflow-caddy
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - syncflow
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #     - "443:443/udp"   # HTTP/3
+  #   environment:
+  #     - DOMAIN=${DOMAIN:-localhost}
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - syncflow-caddy-data:/data
+  #     - syncflow-caddy-config:/config
+  #   logging:
+  #     driver: json-file
+  #     options:
+  #       max-size: "10m"
+  #       max-file: "3"
+  #   networks:
+  #     - syncflow-net
+
+volumes:
+  syncflow-pgdata:
+  syncflow-redis:
+  syncflow-downloads:
+  # syncflow-caddy-data:
+  # syncflow-caddy-config:
+
+networks:
+  syncflow-net:
+    driver: bridge

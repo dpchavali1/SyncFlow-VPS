@@ -1,0 +1,30 @@
+# =============================================================================
+# SyncFlow Caddy Configuration
+# Automatic HTTPS via Let's Encrypt when DOMAIN is a real hostname.
+# Falls back to HTTP on localhost for local development.
+# =============================================================================
+
+{$DOMAIN:localhost} {
+    reverse_proxy syncflow:3000
+
+    # WebSocket upgrade support (already handled by default, but explicit)
+    @websocket {
+        header Connection *Upgrade*
+        header Upgrade    websocket
+    }
+    reverse_proxy @websocket syncflow:3000
+
+    # Security headers
+    header {
+        X-Content-Type-Options    nosniff
+        X-Frame-Options           DENY
+        Referrer-Policy           strict-origin-when-cross-origin
+        -Server
+    }
+
+    # Access log
+    log {
+        output stdout
+        format console
+    }
+}

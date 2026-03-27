@@ -5,9 +5,32 @@ const resend = config.email.resendApiKey
   ? new Resend(config.email.resendApiKey)
   : null;
 
+if (!resend) {
+  console.warn('[Email] Resend API key not configured — admin emails will be logged to console instead of sent');
+}
+
+/** Strip HTML tags for console-friendly plain text output. */
+function stripHtml(html: string): string {
+  return html
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/?(p|div|h[1-6]|tr|td|th|li|hr)[^>]*>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 async function sendMail(subject: string, html: string) {
   if (!resend || !config.email.adminEmail) {
-    console.log(`[Email] Skipping (not configured): ${subject}`);
+    // Log the email content to console so self-hosted operators can still see it
+    console.log(`[Email] (not configured — logging instead)`);
+    console.log(`[Email] To: ${config.email.adminEmail || '(no admin email set)'}`);
+    console.log(`[Email] Subject: ${subject}`);
+    console.log(`[Email] Body:\n${stripHtml(html)}`);
     return;
   }
   try {

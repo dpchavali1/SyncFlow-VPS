@@ -1,0 +1,16 @@
+node_modules
+dist
+.env
+.env.*
+!.env.self-hosted
+backups
+downloads
+*.log
+.git
+.gitignore
+*.md
+deploy.sh
+backup.sh
+ecosystem.config.js
+docker-compose.yml
+Caddyfile
