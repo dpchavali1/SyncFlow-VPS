@@ -64,7 +64,7 @@ export function createWebSocketServer(server: HttpServer): WebSocketServer {
     clearInterval(heartbeatInterval);
   });
 
-  wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
+  wss.on('connection', async (ws: WebSocket, req: IncomingMessage) => {
     const client = ws as AuthenticatedWebSocket;
     client.subscriptions = new Set();
     client.isAlive = true;
