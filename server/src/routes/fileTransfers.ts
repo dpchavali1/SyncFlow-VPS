@@ -150,10 +150,12 @@ router.post('/download-url', async (req: Request, res: Response) => {
 
     // Verify ownership via DB (not path prefix, which breaks after user migration)
     // Check file_transfers and MMS parts
+    // SECURITY: Use proper JSONB path query instead of LIKE to prevent wildcard injection
     const ownerCheck = await query(
       `SELECT 1 FROM user_file_transfers WHERE user_id = $1 AND r2_key = $2
        UNION ALL
-       SELECT 1 FROM user_messages WHERE user_id = $1 AND mms_parts::text LIKE '%' || $2 || '%'
+       SELECT 1 FROM user_messages m, jsonb_array_elements(m.mms_parts) AS part
+       WHERE m.user_id = $1 AND (part->>'r2Key' = $2 OR part->>'url' = $2)
        LIMIT 1`,
       [userId, fileKey]
     );

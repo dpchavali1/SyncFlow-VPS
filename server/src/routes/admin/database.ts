@@ -18,7 +18,7 @@
  */
 
 import { Router, Request, Response } from 'express';
-import { query, queryOne } from '../../services/database';
+import { query, queryOne, pool } from '../../services/database';
 
 const router = Router();
 
@@ -360,27 +360,25 @@ router.post('/query', async (req: Request, res: Response) => {
       return;
     }
 
-    // SECURITY: Only allow SELECT queries through the admin browser.
-    // For destructive operations, use psql directly on the VPS.
-    const normalized = sql.trim().toLowerCase().replace(/\/\*[\s\S]*?\*\//g, '').trim();
-    const destructivePattern = /^(update|delete|insert|drop|alter|truncate|create|grant|revoke|copy|execute|do)\b/i;
-    if (destructivePattern.test(normalized)) {
-      res.status(403).json({
-        error: 'Destructive queries are not allowed through the admin browser. Use psql on the VPS for write operations.',
+    // SECURITY: Use a READ ONLY transaction so PostgreSQL itself blocks writes.
+    // This prevents CTE bypass (WITH x AS (DELETE ...) SELECT ...), semicolon
+    // stacking, and any other creative SQL injection that regex can't catch.
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN READ ONLY');
+      const result = await client.query(sql);
+      await client.query('COMMIT');
+      res.json({
+        rows: Array.isArray(result.rows) ? result.rows : [],
+        rowCount: Array.isArray(result.rows) ? result.rows.length : 0,
+        isModifying: false,
       });
-      return;
+    } catch (error: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      res.status(400).json({ error: error.message || 'Query failed' });
+    } finally {
+      client.release();
     }
-
-    const result = await query(sql);
-
-    res.json({
-      rows: Array.isArray(result) ? result : [],
-      rowCount: Array.isArray(result) ? result.length : 0,
-      isModifying: false,
-    });
-  } catch (error: any) {
-    res.status(400).json({ error: error.message || 'Query failed' });
-  }
 });
 
 // ── GET /db/health — Database health check ──────────────────────────────────

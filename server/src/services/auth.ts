@@ -24,14 +24,14 @@ export function generateToken(
   return jwt.sign(
     { ...payload, type },
     config.jwt.secret,
-    { expiresIn } as jwt.SignOptions
+    { expiresIn, algorithm: 'HS256' } as jwt.SignOptions
   );
 }
 
-// Verify JWT token
+// Verify JWT token (pinned to HS256 to prevent algorithm confusion attacks)
 export function verifyToken(token: string): TokenPayload | null {
   try {
-    return jwt.verify(token, config.jwt.secret) as TokenPayload;
+    return jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'] }) as TokenPayload;
   } catch {
     return null;
   }

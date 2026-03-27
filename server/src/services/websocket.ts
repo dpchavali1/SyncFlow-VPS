@@ -13,6 +13,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { IncomingMessage, Server as HttpServer } from 'http';
 import { verifyToken, TokenPayload } from './auth';
+import { isDeviceBlacklisted } from './redis';
 import { pool } from './database';
 
 interface AuthenticatedWebSocket extends WebSocket {
@@ -80,6 +81,12 @@ export function createWebSocketServer(server: HttpServer): WebSocketServer {
     const payload = verifyToken(token);
     if (!payload || payload.type !== 'access') {
       client.close(4002, 'Invalid authentication token');
+      return;
+    }
+
+    // Check device blacklist (removed devices should not maintain WS connections)
+    if (payload.deviceId && await isDeviceBlacklisted(payload.deviceId)) {
+      client.close(4003, 'Device has been removed');
       return;
     }
 
