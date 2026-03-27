@@ -109,11 +109,6 @@ class MemoryOptimizer private constructor(private val context: Context) {
     private fun performCriticalCleanup() {
         Log.w(TAG, "Performing critical memory cleanup")
 
-        // Force garbage collection
-        System.gc()
-        System.runFinalization()
-        System.gc()
-
         // Clear all weak references
         cleanupWeakReferences()
 
@@ -131,9 +126,6 @@ class MemoryOptimizer private constructor(private val context: Context) {
 
         // Clear weak references
         cleanupWeakReferences()
-
-        // Request garbage collection
-        System.gc()
     }
 
     /**

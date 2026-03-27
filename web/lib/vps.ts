@@ -233,6 +233,10 @@ class VPSService {
     return !!this.accessToken && !!this.userId;
   }
 
+  get isWebSocketOpen(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
   get currentUserId(): string | null {
     return this.userId;
   }
@@ -333,17 +337,20 @@ class VPSService {
       throw new Error('No refresh token');
     }
 
-    const response = await this.request<{ accessToken: string }>(
+    const response = await this.request<{ accessToken: string; refreshToken: string }>(
       'POST',
       '/api/auth/refresh',
       { refreshToken: this.refreshToken },
       true
     );
 
+    // Save both tokens: the server rotates the refresh token on each refresh,
+    // so the old refresh token becomes invalid after this call.
     this.accessToken = response.accessToken;
+    this.refreshToken = response.refreshToken;
     if (typeof window !== 'undefined') {
-      // Persist refreshed access token to secureStorage (IndexedDB)
       secureStorage.setItem(STORAGE_KEYS.accessToken, response.accessToken).catch(() => {});
+      secureStorage.setItem(STORAGE_KEYS.refreshToken, response.refreshToken).catch(() => {});
     }
   }
 

@@ -130,11 +130,17 @@ fun MessageBubble(
                 // MMS attachments block
                 if (sms.isMms && sms.mmsAttachments.isNotEmpty()) {
 
-                    sms.mmsAttachments.take(1).forEach { attach ->
-                        when {
-                            attach.isImage() -> {
+                    val imageAttachments = sms.mmsAttachments.filter { it.isImage() }
+                    val nonImageAttachments = sms.mmsAttachments.filter { !it.isImage() }
+                    val displayImages = imageAttachments.take(4)
+                    val extraImageCount = imageAttachments.size - 4
+
+                    // Image grid layout
+                    if (displayImages.isNotEmpty()) {
+                        when (displayImages.size) {
+                            1 -> {
                                 AsyncImage(
-                                    model = attach.filePath,
+                                    model = displayImages[0].filePath,
                                     contentDescription = "MMS Image",
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -142,6 +148,103 @@ fun MessageBubble(
                                         .clip(RoundedCornerShape(18.dp))
                                 )
                             }
+                            2 -> {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    displayImages.forEach { attach ->
+                                        AsyncImage(
+                                            model = attach.filePath,
+                                            contentDescription = "MMS Image",
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(160.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                        )
+                                    }
+                                }
+                            }
+                            else -> {
+                                // 3-4 images: 2x2 grid
+                                Column(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
+                                    // First row
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                    ) {
+                                        AsyncImage(
+                                            model = displayImages[0].filePath,
+                                            contentDescription = "MMS Image",
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(120.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                        )
+                                        AsyncImage(
+                                            model = displayImages[1].filePath,
+                                            contentDescription = "MMS Image",
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(120.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                        )
+                                    }
+                                    // Second row
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(2.dp)
+                                    ) {
+                                        AsyncImage(
+                                            model = displayImages[2].filePath,
+                                            contentDescription = "MMS Image",
+                                            modifier = Modifier
+                                                .weight(1f)
+                                                .height(120.dp)
+                                                .clip(RoundedCornerShape(8.dp))
+                                        )
+                                        if (displayImages.size >= 4) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .weight(1f)
+                                                    .height(120.dp)
+                                                    .clip(RoundedCornerShape(8.dp))
+                                            ) {
+                                                AsyncImage(
+                                                    model = displayImages[3].filePath,
+                                                    contentDescription = "MMS Image",
+                                                    modifier = Modifier.matchParentSize()
+                                                )
+                                                if (extraImageCount > 0) {
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .matchParentSize()
+                                                            .background(Color.Black.copy(alpha = 0.5f)),
+                                                        contentAlignment = Alignment.Center
+                                                    ) {
+                                                        Text(
+                                                            text = "+$extraImageCount",
+                                                            color = Color.White,
+                                                            style = MaterialTheme.typography.titleLarge
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            Spacer(modifier = Modifier.weight(1f))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Non-image attachments (video, audio, vcard)
+                    nonImageAttachments.forEach { attach ->
+                        when {
                             attach.isVideo() -> {
                                 Box(
                                     modifier = Modifier
@@ -177,16 +280,6 @@ fun MessageBubble(
                                 )
                             }
                         }
-                    }
-
-                    // If more attachments exist, show "+3 more"
-                    if (sms.mmsAttachments.size > 1) {
-                        Text(
-                            text = "+${sms.mmsAttachments.size - 1} more",
-                            color = bubbleTextColor(isSent),
-                            style = MaterialTheme.typography.labelMedium,
-                            modifier = Modifier.padding(top = 6.dp)
-                        )
                     }
 
                     if (!sms.body.isNullOrBlank())
@@ -326,15 +419,15 @@ private fun bubbleColor(sms: SmsMessage, isSent: Boolean): Color {
     } else {
         when (sms.category) {
             MessageCategory.OTP ->
-                if (isDark) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFD6EAF8)
+                if (isDark) Color(0xFF1A3A5C) else Color(0xFFD6EAF8)
             MessageCategory.TRANSACTION ->
-                if (isDark) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFD1F2EB)
+                if (isDark) Color(0xFF1A3C2A) else Color(0xFFD1F2EB)
             MessageCategory.PERSONAL ->
-                if (isDark) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFFDEDEC)
+                if (isDark) Color(0xFF3C1A2E) else Color(0xFFFDEDEC)
             MessageCategory.PROMOTION ->
-                if (isDark) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFF9E79F)
+                if (isDark) Color(0xFF3C3A1A) else Color(0xFFF9E79F)
             MessageCategory.ALERT ->
-                if (isDark) MaterialTheme.colorScheme.surfaceVariant else Color(0xFFFADBD8)
+                if (isDark) Color(0xFF3C1A1A) else Color(0xFFFADBD8)
 
             else -> MaterialTheme.colorScheme.surfaceVariant
         }

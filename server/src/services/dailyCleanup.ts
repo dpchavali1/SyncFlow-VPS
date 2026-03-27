@@ -40,19 +40,19 @@ async function runAutoCleanup(): Promise<Record<string, number>> {
   const results: Record<string, number> = {};
 
   const cleanups: Array<{ name: string; sql: string }> = [
-    { name: 'expiredPairings', sql: `DELETE FROM pairing_requests WHERE expires_at < NOW() OR (status != 'pending' AND created_at < NOW() - INTERVAL '1 day') RETURNING *` },
-    { name: 'oldOutgoingMessages', sql: `DELETE FROM user_outgoing_messages WHERE status IN ('sent', 'delivered', 'failed') AND created_at < NOW() - INTERVAL '7 days' RETURNING *` },
-    { name: 'oldSpamMessages', sql: `DELETE FROM user_spam_messages WHERE created_at < NOW() - INTERVAL '30 days' RETURNING *` },
-    { name: 'oldReadReceipts', sql: `DELETE FROM user_read_receipts WHERE read_at < NOW() - INTERVAL '30 days' RETURNING *` },
-    { name: 'oldTypingIndicators', sql: `DELETE FROM user_typing_indicators WHERE created_at < NOW() - INTERVAL '1 hour' RETURNING *` },
-    { name: 'oldNotifications', sql: `DELETE FROM user_notifications WHERE created_at < NOW() - INTERVAL '30 days' RETURNING *` },
-    { name: 'oldClipboard', sql: `DELETE FROM user_clipboard WHERE created_at < NOW() - INTERVAL '7 days' RETURNING *` },
-    { name: 'oldSharedLinks', sql: `DELETE FROM user_shared_links WHERE created_at < NOW() - INTERVAL '30 days' RETURNING *` },
-    { name: 'inactiveDevices', sql: `DELETE FROM user_devices WHERE last_seen < NOW() - INTERVAL '90 days' RETURNING *` },
-    { name: 'oldCallRequests', sql: `DELETE FROM user_call_requests WHERE status != 'pending' AND created_at < NOW() - INTERVAL '7 days' RETURNING *` },
-    { name: 'oldCallCommands', sql: `DELETE FROM user_call_commands WHERE created_at < NOW() - INTERVAL '7 days' RETURNING *` },
-    { name: 'orphanedPairingUsers', sql: `DELETE FROM users WHERE uid NOT IN (SELECT DISTINCT user_id FROM user_devices) AND uid NOT IN (SELECT DISTINCT user_id FROM user_messages) AND created_at < NOW() - INTERVAL '1 hour' RETURNING *` },
-    { name: 'oldAnalyticsEvents', sql: `DELETE FROM analytics_events WHERE created_at < NOW() - INTERVAL '90 days' RETURNING *` },
+    { name: 'expiredPairings', sql: `DELETE FROM pairing_requests WHERE expires_at < NOW() OR (status != 'pending' AND created_at < NOW() - INTERVAL '1 day') RETURNING id` },
+    { name: 'oldOutgoingMessages', sql: `DELETE FROM user_outgoing_messages WHERE status IN ('sent', 'delivered', 'failed') AND created_at < NOW() - INTERVAL '7 days' RETURNING id` },
+    { name: 'oldSpamMessages', sql: `DELETE FROM user_spam_messages WHERE created_at < NOW() - INTERVAL '30 days' RETURNING id` },
+    { name: 'oldReadReceipts', sql: `DELETE FROM user_read_receipts WHERE read_at < NOW() - INTERVAL '30 days' RETURNING id` },
+    { name: 'oldTypingIndicators', sql: `DELETE FROM user_typing_indicators WHERE created_at < NOW() - INTERVAL '1 hour' RETURNING id` },
+    { name: 'oldNotifications', sql: `DELETE FROM user_notifications WHERE created_at < NOW() - INTERVAL '30 days' RETURNING id` },
+    { name: 'oldClipboard', sql: `DELETE FROM user_clipboard WHERE created_at < NOW() - INTERVAL '7 days' RETURNING id` },
+    { name: 'oldSharedLinks', sql: `DELETE FROM user_shared_links WHERE created_at < NOW() - INTERVAL '30 days' RETURNING id` },
+    { name: 'inactiveDevices', sql: `DELETE FROM user_devices WHERE last_seen < NOW() - INTERVAL '90 days' RETURNING id` },
+    { name: 'oldCallRequests', sql: `DELETE FROM user_call_requests WHERE status != 'pending' AND created_at < NOW() - INTERVAL '7 days' RETURNING id` },
+    { name: 'oldCallCommands', sql: `DELETE FROM user_call_commands WHERE created_at < NOW() - INTERVAL '7 days' RETURNING id` },
+    { name: 'orphanedPairingUsers', sql: `DELETE FROM users WHERE NOT EXISTS (SELECT 1 FROM user_devices d WHERE d.user_id = users.uid) AND NOT EXISTS (SELECT 1 FROM user_messages m WHERE m.user_id = users.uid) AND created_at < NOW() - INTERVAL '1 hour' RETURNING id` },
+    { name: 'oldAnalyticsEvents', sql: `DELETE FROM analytics_events WHERE created_at < NOW() - INTERVAL '90 days' RETURNING id` },
   ];
 
   // Auto-fail outgoing messages stuck in 'pending' for over 1 hour (Android unreachable)
@@ -161,14 +161,14 @@ async function runE2eeCleanup(): Promise<Record<string, number>> {
   const results: Record<string, number> = {};
 
   const e2eeCleanups: Array<{ name: string; sql: string }> = [
-    { name: 'staleDeviceKeys', sql: `DELETE FROM user_e2ee_keys WHERE updated_at < NOW() - INTERVAL '90 days' RETURNING *` },
-    { name: 'orphanedDeviceKeys', sql: `DELETE FROM user_e2ee_keys WHERE user_id NOT IN (SELECT uid FROM users) RETURNING *` },
-    { name: 'orphanedPublicKeys', sql: `DELETE FROM e2ee_public_keys WHERE uid NOT IN (SELECT uid FROM users) RETURNING *` },
-    { name: 'keysForMissingDevices', sql: `DELETE FROM user_e2ee_keys k WHERE NOT EXISTS (SELECT 1 FROM user_devices d WHERE d.user_id = k.user_id AND d.device_id = k.device_id) RETURNING *` },
-    { name: 'publicKeysForMissingDevices', sql: `DELETE FROM e2ee_public_keys pk WHERE NOT EXISTS (SELECT 1 FROM user_devices d WHERE d.user_id = pk.uid AND d.device_id = pk.device_id) RETURNING *` },
-    { name: 'expiredKeyRequests', sql: `DELETE FROM e2ee_key_requests WHERE created_at < NOW() - INTERVAL '24 hours' OR (expires_at IS NOT NULL AND expires_at < NOW()) RETURNING *` },
-    { name: 'expiredKeyResponses', sql: `DELETE FROM e2ee_key_responses WHERE created_at < NOW() - INTERVAL '24 hours' RETURNING *` },
-    { name: 'oldRepairLogs', sql: `DELETE FROM e2ee_repair_log WHERE created_at < NOW() - INTERVAL '30 days' RETURNING *` },
+    { name: 'staleDeviceKeys', sql: `DELETE FROM user_e2ee_keys WHERE updated_at < NOW() - INTERVAL '90 days' RETURNING id` },
+    { name: 'orphanedDeviceKeys', sql: `DELETE FROM user_e2ee_keys WHERE user_id NOT IN (SELECT uid FROM users) RETURNING id` },
+    { name: 'orphanedPublicKeys', sql: `DELETE FROM e2ee_public_keys WHERE uid NOT IN (SELECT uid FROM users) RETURNING id` },
+    { name: 'keysForMissingDevices', sql: `DELETE FROM user_e2ee_keys k WHERE NOT EXISTS (SELECT 1 FROM user_devices d WHERE d.user_id = k.user_id AND d.device_id = k.device_id) RETURNING id` },
+    { name: 'publicKeysForMissingDevices', sql: `DELETE FROM e2ee_public_keys pk WHERE NOT EXISTS (SELECT 1 FROM user_devices d WHERE d.user_id = pk.uid AND d.device_id = pk.device_id) RETURNING id` },
+    { name: 'expiredKeyRequests', sql: `DELETE FROM e2ee_key_requests WHERE created_at < NOW() - INTERVAL '24 hours' OR (expires_at IS NOT NULL AND expires_at < NOW()) RETURNING id` },
+    { name: 'expiredKeyResponses', sql: `DELETE FROM e2ee_key_responses WHERE created_at < NOW() - INTERVAL '24 hours' RETURNING id` },
+    { name: 'oldRepairLogs', sql: `DELETE FROM e2ee_repair_log WHERE created_at < NOW() - INTERVAL '30 days' RETURNING id` },
   ];
 
   for (const cleanup of e2eeCleanups) {

@@ -1,6 +1,7 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import { v4 as uuidv4 } from 'uuid';
+import { randomBytes } from 'node:crypto';
 import { config } from '../config';
 import { query, queryOne } from './database';
 import { setCache, getCache, deleteCache } from './redis';
@@ -131,7 +132,7 @@ export async function createPairingRequest(
   deviceType: string,
   tempUserId?: string
 ): Promise<string> {
-  const token = uuidv4().replace(/-/g, '').substring(0, 16).toUpperCase();
+  const token = randomBytes(16).toString('hex').substring(0, 16).toUpperCase(); // 128-bit entropy
   const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
 
   await query(

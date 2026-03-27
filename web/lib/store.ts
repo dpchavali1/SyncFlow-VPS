@@ -99,6 +99,8 @@ interface AppState {
   isConversationListVisible: boolean
   setIsConversationListVisible: (visible: boolean) => void
   initializeConversationListVisibility: () => void
+  isMobileShowingMessages: boolean
+  setIsMobileShowingMessages: (showing: boolean) => void
 
   // Notifications
   hasNewMessage: boolean
@@ -155,6 +157,8 @@ export const useAppStore = create<AppState>((set) => ({
       set({ isConversationListVisible: visible })
     }
   },
+  isMobileShowingMessages: false,
+  setIsMobileShowingMessages: (showing) => set({ isMobileShowingMessages: showing }),
 
   // Notifications
   hasNewMessage: false,

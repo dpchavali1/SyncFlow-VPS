@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, useMemo, useRef } from 'react'
+import { useEffect, useState, useMemo, useRef, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAppStore } from '@/lib/store'
 import {
@@ -139,6 +139,8 @@ export default function MessagesPage() {
     isConversationListVisible,
     setIsConversationListVisible,
     initializeConversationListVisibility,
+    isMobileShowingMessages,
+    setIsMobileShowingMessages,
   } = useAppStore()
 
   // Seed the store with the auth hook's userId when it resolves
@@ -339,19 +341,65 @@ export default function MessagesPage() {
           }
         }
 
-        // Fetch messages from VPS - show first page immediately, load rest in background
+        // Fetch messages from VPS - decrypt first batch immediately, rest progressively
+        const INITIAL_BATCH = 50
+        const BACKGROUND_BATCH = 50
+
+        const decryptBatch = async (msgs: any[]): Promise<any[]> => {
+          return Promise.all(msgs.map((msg: any) => decryptVpsMessage(msg)))
+        }
+
+        const decryptInBackground = (
+          msgs: any[],
+          existingDecrypted: any[],
+          batchSize: number
+        ) => {
+          let offset = 0
+          const scheduleNext = () => {
+            if (offset >= msgs.length) return
+            const batch = msgs.slice(offset, offset + batchSize)
+            offset += batchSize
+
+            const process = async () => {
+              const decrypted = await decryptBatch(batch)
+              const current = useAppStore.getState().messages
+              const merged = new Map(current.map((m) => [m.id, m]))
+              decrypted.forEach((m) => merged.set(m.id, m))
+              const mergedList = Array.from(merged.values()).sort((a, b) => b.date - a.date)
+              setMessages(mergedList)
+              scheduleNext()
+            }
+
+            if (typeof requestIdleCallback === 'function') {
+              requestIdleCallback(() => { process() })
+            } else {
+              setTimeout(() => { process() }, 16)
+            }
+          }
+          scheduleNext()
+        }
+
         try {
           const firstPage = await vpsService.getMessages({ limit: 500 })
-          const firstDecrypted = await Promise.all(
-            firstPage.messages.map((msg: any) => decryptVpsMessage(msg))
-          )
+          const allMessages = firstPage.messages
+
+          // Decrypt the first batch immediately for instant display
+          const firstBatch = allMessages.slice(0, INITIAL_BATCH)
+          const remainingFromPage = allMessages.slice(INITIAL_BATCH)
+
+          const firstDecrypted = await decryptBatch(firstBatch)
           setMessages(firstDecrypted)
+
+          // Decrypt remaining messages from the first page in background batches
+          if (remainingFromPage.length > 0) {
+            decryptInBackground(remainingFromPage, firstDecrypted, BACKGROUND_BATCH)
+          }
 
           // Load remaining pages in background
           if (firstPage.hasMore) {
             ;(async () => {
               try {
-                let before = firstPage.messages[firstPage.messages.length - 1]?.date
+                let before = allMessages[allMessages.length - 1]?.date
                 let allExtra: any[] = []
                 let hasMore = true
                 while (hasMore && before) {
@@ -363,14 +411,7 @@ export default function MessagesPage() {
                   }
                 }
                 if (allExtra.length > 0) {
-                  const extraDecrypted = await Promise.all(
-                    allExtra.map((msg: any) => decryptVpsMessage(msg))
-                  )
-                  const current = useAppStore.getState().messages
-                  const merged = new Map(current.map((m) => [m.id, m]))
-                  extraDecrypted.forEach((m) => merged.set(m.id, m))
-                  const mergedList = Array.from(merged.values()).sort((a, b) => b.date - a.date)
-                  setMessages(mergedList)
+                  decryptInBackground(allExtra, [], BACKGROUND_BATCH)
                 }
               } catch (err) {
                 console.error('[Messages] VPS: Failed to load older messages', err)
@@ -734,6 +775,7 @@ export default function MessagesPage() {
           setShowAI(false)
         } else if (selectedConversation) {
           setSelectedConversation(null)
+          useAppStore.getState().setIsMobileShowingMessages(false)
         }
       }
     }
@@ -741,6 +783,29 @@ export default function MessagesPage() {
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [showAI, selectedConversation, setSelectedConversation])
+
+  // Track mobile viewport for responsive layout
+  const [isMobile, setIsMobile] = useState(false)
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const mql = window.matchMedia('(max-width: 767px)')
+    setIsMobile(mql.matches)
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches)
+    mql.addEventListener('change', handler)
+    return () => mql.removeEventListener('change', handler)
+  }, [])
+
+  // When a conversation is selected on mobile, show messages
+  useEffect(() => {
+    if (isMobile && selectedConversation) {
+      setIsMobileShowingMessages(true)
+    }
+  }, [isMobile, selectedConversation, setIsMobileShowingMessages])
+
+  const handleMobileBack = useCallback(() => {
+    setIsMobileShowingMessages(false)
+    setSelectedConversation(null)
+  }, [setIsMobileShowingMessages, setSelectedConversation])
 
   if (!userId) {
     return (
@@ -760,8 +825,9 @@ export default function MessagesPage() {
       <Header />
 
       <div className="flex-1 flex min-h-0 overflow-hidden">
-        {isConversationListVisible && <ConversationList />}
-        <div className="flex-1 flex flex-col min-w-0">
+        {/* On mobile: show conversation list OR message view, not both */}
+        {isConversationListVisible && (!isMobile || !isMobileShowingMessages) && <ConversationList />}
+        <div className={`flex-1 flex flex-col min-w-0 ${isMobile && !isMobileShowingMessages ? 'hidden' : ''}`}>
           {showKeyBanner && (
             <div className="flex-shrink-0 px-4 pt-4">
               <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900 dark:border-amber-700/60 dark:bg-amber-900/20 dark:text-amber-100">
@@ -828,7 +894,7 @@ export default function MessagesPage() {
               </button>
             </div>
           )}
-          <MessageView onOpenAI={() => setShowAI(true)} />
+          <MessageView onOpenAI={() => setShowAI(true)} onMobileBack={isMobile ? handleMobileBack : undefined} />
         </div>
       </div>
 

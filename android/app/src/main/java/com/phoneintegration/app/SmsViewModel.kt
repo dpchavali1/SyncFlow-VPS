@@ -101,7 +101,7 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
     // Memory cache for instant loading
     private var cachedConversations: List<ConversationInfo>? = null
     private var lastLoadTime: Long = 0
-    private val CACHE_VALIDITY_MS = 100L // Cache valid for 100ms only - always load fresh data
+    private val CACHE_VALIDITY_MS = 2000L // Cache valid for 2 seconds to avoid redundant content provider queries
 
     /**
      * Invalidate the conversation list cache to force fresh data on next load
@@ -908,11 +908,7 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
                 loadGroupsInBackground(smsList)
             }
 
-            // Background: Sync MMS to Firebase (very low priority, delayed)
-            viewModelScope.launch(Dispatchers.IO) {
-                delay(5000) // Wait 5 seconds before starting MMS sync
-                syncMmsInBackground(smsList.take(5)) // Reduce to 5 for speed
-            }
+            // MMS sync handled by VPSSyncService - no redundant sync needed here
         }
     }
 
@@ -1044,30 +1040,6 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // Background MMS sync (non-blocking)
-    private suspend fun syncMmsInBackground(conversations: List<ConversationInfo>) {
-        try {
-            var totalMmsSynced = 0
-            for (convo in conversations) {
-                // Use related thread IDs if available for merged conversations
-                val messages = if (convo.relatedThreadIds.size > 1) {
-                    repo.getMessagesByThreadIds(convo.relatedThreadIds, limit = 5, offset = 0)
-                } else {
-                    repo.getMessagesByThreadId(convo.threadId, limit = 5, offset = 0)
-                }
-                val mmsMessages = messages.filter { it.isMms }
-                for (message in mmsMessages) {
-                    syncService.syncMessage(message)
-                    totalMmsSynced++
-                }
-            }
-            if (totalMmsSynced > 0) {
-                Log.d("SmsViewModel", "Background: Synced $totalMmsSynced MMS messages")
-            }
-        } catch (e: Exception) {
-            Log.e("SmsViewModel", "Background MMS sync failed", e)
-        }
-    }
 
     fun refreshConversations() {
         viewModelScope.launch {

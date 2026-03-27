@@ -321,15 +321,14 @@ router.post('/refresh', async (req: Request, res: Response) => {
       }
     }
 
-    // Generate new access token
-    const accessToken = generateToken({
-      sub: payload.sub,
-      deviceId: payload.deviceId,
+    // Full token pair rotation: issue both a new access token and a new refresh token.
+    // The old refresh token becomes implicitly invalid once the client stores the new pair.
+    const tokens = generateTokenPair(payload.sub, payload.deviceId, {
       admin: payload.admin,
       pairedUid: payload.pairedUid,
-    }, 'access');
+    });
 
-    res.json({ accessToken });
+    res.json({ accessToken: tokens.accessToken, refreshToken: tokens.refreshToken });
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: 'Invalid request', details: error.errors });

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { Send, MoreVertical, MessageSquare, Brain, Loader2, Info, X, Image as ImageIcon, Paperclip, AlertTriangle, Check, CheckCheck, Clock, AlertCircle, ChevronDown, ShieldAlert } from 'lucide-react'
+import { Send, MoreVertical, MessageSquare, Brain, Loader2, Info, X, Image as ImageIcon, Paperclip, AlertTriangle, Check, CheckCheck, Clock, AlertCircle, ChevronDown, ShieldAlert, ArrowLeft, Smartphone } from 'lucide-react'
 import { useAppStore } from '@/lib/store'
 import { markMessagesRead, sendSmsFromWeb, sendMmsFromWeb, uploadMmsImage, waitForAuth } from '@/lib/firebase'
 import vpsService from '@/lib/vps'
@@ -12,6 +12,7 @@ import { messageBubbleIn, fadeIn, floatingAnimation } from '@/lib/animations'
 
 interface MessageViewProps {
   onOpenAI?: () => void
+  onMobileBack?: () => void
 }
 
 interface SelectedImage {
@@ -189,7 +190,7 @@ const MessageBubble = memo(function MessageBubble({ msg, isSent, readReceipt, is
   return bubbleContent
 })
 
-export default function MessageView({ onOpenAI }: MessageViewProps) {
+export default function MessageView({ onOpenAI, onMobileBack }: MessageViewProps) {
   // Use individual selectors for better performance (prevents re-renders from unrelated store changes)
   const messages = useAppStore((state) => state.messages)
   const selectedConversation = useAppStore((state) => state.selectedConversation)
@@ -601,18 +602,26 @@ export default function MessageView({ onOpenAI }: MessageViewProps) {
   if (!selectedConversation) {
     return (
       <div className="flex-1 flex items-center justify-center min-h-0 overflow-hidden bg-mesh">
-        <div className="text-center">
+        <div className="text-center px-6">
           <motion.div {...floatingAnimation}>
-            <div className="w-20 h-20 rounded-3xl bg-gradient-to-br from-blue-500/10 to-violet-500/10 dark:from-blue-500/20 dark:to-violet-500/20 flex items-center justify-center mx-auto mb-6">
-              <MessageSquare className="w-10 h-10 text-blue-400/60 dark:text-blue-400/40" />
+            <div className="w-20 h-20 rounded-3xl bg-gradient-to-br from-primary-500/10 to-accent-500/10 dark:from-primary-500/20 dark:to-accent-500/20 flex items-center justify-center mx-auto mb-6 shadow-sm">
+              <Smartphone className="w-9 h-9 text-primary-400/60 dark:text-primary-400/40" />
             </div>
           </motion.div>
           <h3 className="text-xl font-semibold text-gray-600 dark:text-gray-400 mb-2">
-            No conversation selected
+            Select a conversation
           </h3>
-          <p className="text-sm text-gray-400 dark:text-gray-500 max-w-[240px] mx-auto">
-            Choose a conversation from the left to start messaging
+          <p className="text-sm text-gray-400 dark:text-gray-500 max-w-[260px] mx-auto mb-4">
+            Choose a conversation from the sidebar to start messaging
           </p>
+          <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-gray-100 dark:bg-gray-800/60 text-xs text-gray-400 dark:text-gray-500">
+            <kbd className="px-1.5 py-0.5 rounded bg-gray-200 dark:bg-gray-700 font-mono text-[11px]">
+              {typeof navigator !== 'undefined' && /Mac/.test(navigator.platform) ? '\u2318' : 'Ctrl'}
+            </kbd>
+            <span>+</span>
+            <kbd className="px-1.5 py-0.5 rounded bg-gray-200 dark:bg-gray-700 font-mono text-[11px]">K</kbd>
+            <span className="ml-1">to search</span>
+          </div>
         </div>
       </div>
     )
@@ -637,6 +646,16 @@ export default function MessageView({ onOpenAI }: MessageViewProps) {
       <div className="flex-shrink-0 glass-panel mx-3 mt-3 rounded-2xl px-5 py-3.5">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
+            {/* Mobile back button */}
+            {onMobileBack && (
+              <button
+                onClick={onMobileBack}
+                className="p-2 -ml-2 rounded-xl hover:bg-gray-100 dark:hover:bg-white/5 text-gray-500 dark:text-gray-400 transition-colors"
+                aria-label="Back to conversations"
+              >
+                <ArrowLeft className="w-5 h-5" />
+              </button>
+            )}
             {/* Avatar with gradient ring */}
             <div className={`w-10 h-10 rounded-xl bg-gradient-to-br ${avatarGradient} flex items-center justify-center text-white font-semibold shadow-md text-sm`}>
               {contact.charAt(0).toUpperCase()}
@@ -690,6 +709,9 @@ export default function MessageView({ onOpenAI }: MessageViewProps) {
       {/* Messages */}
       <div
         ref={scrollContainerRef}
+        role="log"
+        aria-label="Message history"
+        aria-live="polite"
         className="flex-1 min-h-0 h-0 overflow-y-auto px-6 py-4 space-y-3"
       >
         {conversationMessages.map((msg) => (
@@ -810,6 +832,7 @@ export default function MessageView({ onOpenAI }: MessageViewProps) {
             disabled={isSending || selectedImages.length >= 5}
             className="p-2.5 rounded-xl hover:bg-gray-100 dark:hover:bg-white/5 text-gray-400 dark:text-gray-500 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
             title="Attach image (max 5)"
+            aria-label="Attach image"
           >
             <Paperclip className="w-5 h-5" />
           </motion.button>
@@ -847,6 +870,7 @@ export default function MessageView({ onOpenAI }: MessageViewProps) {
             disabled={(!newMessage.trim() && selectedImages.length === 0) || isSending || !isAuthenticated}
             className="p-2.5 rounded-xl bg-gradient-to-br from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 disabled:from-gray-300 disabled:to-gray-400 dark:disabled:from-gray-600 dark:disabled:to-gray-700 disabled:cursor-not-allowed text-white shadow-md shadow-blue-500/20 disabled:shadow-none transition-all flex items-center justify-center min-w-[44px]"
             title={!isAuthenticated ? 'Not authenticated' : selectedImages.length > 0 ? 'Send MMS' : 'Send message'}
+            aria-label={selectedImages.length > 0 ? 'Send MMS' : 'Send message'}
           >
             {isSending ? (
               <Loader2 className="w-5 h-5 animate-spin" />

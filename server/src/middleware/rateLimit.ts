@@ -55,8 +55,13 @@ export function rateLimit(options: RateLimitOptions = {}) {
 
       next();
     } catch (error) {
-      // If Redis fails, allow the request but log
       console.error('Rate limit check failed:', error);
+      // Fail closed for auth endpoints (prevent brute-force when Redis is down)
+      if (keyPrefix.includes('auth')) {
+        res.status(503).json({ error: 'Service temporarily unavailable' });
+        return;
+      }
+      // Fail open for non-auth endpoints to avoid blocking legitimate users
       next();
     }
   };

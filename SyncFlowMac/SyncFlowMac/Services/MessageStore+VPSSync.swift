@@ -21,10 +21,18 @@ extension MessageStore {
     /// 1. Fetches initial messages from VPS REST API
     /// 2. Subscribes to WebSocket events for real-time updates
     func startListeningVPS(userId: String) {
-        // Cancel any existing VPS subscriptions
+        // Cancel any existing VPS subscriptions and pending rebuilds
         vpsCancellables.removeAll()
+        pendingRebuildWork?.cancel()
+        pendingRebuildWork = nil
+        pendingMessageBuffer.removeAll()
+        pendingNotificationBuffer.removeAll()
 
-        // Subscribe to VPS WebSocket events for real-time updates
+        // Subscribe to VPS WebSocket events for real-time updates.
+        // Messages are coalesced: instead of rebuilding conversations on every
+        // single incoming message (O(N) per message during sync bursts), we
+        // buffer messages and rebuild once after 200ms of silence or when the
+        // buffer reaches 50 messages.
         VPSService.shared.messageAdded
             .receive(on: DispatchQueue.main)
             .sink { [weak self] vpsMessage in
@@ -67,27 +75,33 @@ extension MessageStore {
                     }
                 }
 
-                var currentMessages = self.messages
-                currentMessages.append(message)
+                // Add message to the messages array immediately (for dedup checks
+                // on subsequent messages in the same burst) but defer the expensive
+                // conversation rebuild.
+                self.messages.append(message)
+                self.pendingMessageBuffer.append(message)
 
-                let processedMessages = self.applyReadStatus(to: currentMessages)
-                let mergeResult = self.mergeMessagesWithPendingOutgoing(remoteMessages: processedMessages)
-                let newConversations = self.buildConversations(from: mergeResult.mergedMessages)
-
-                self.messages = mergeResult.mergedMessages
-                self.conversations = newConversations
-
-                // Notify for new incoming message
+                // Track incoming messages that need notifications after rebuild
                 if message.isReceived {
-                    self.notificationService.showMessageNotification(
-                        from: message.address,
-                        contactName: message.contactName,
-                        body: message.body,
-                        messageId: message.id
-                    )
+                    self.pendingNotificationBuffer.append(message)
                 }
 
-                // Per-message logging removed to reduce log noise
+                // If buffer is full, rebuild immediately
+                if self.pendingMessageBuffer.count >= self.rebuildBufferLimit {
+                    self.flushPendingRebuild()
+                    return
+                }
+
+                // Cancel any previously scheduled rebuild and schedule a new one
+                self.pendingRebuildWork?.cancel()
+                let work = DispatchWorkItem { [weak self] in
+                    self?.flushPendingRebuild()
+                }
+                self.pendingRebuildWork = work
+                DispatchQueue.main.asyncAfter(
+                    deadline: .now() + self.rebuildDebounceDelay,
+                    execute: work
+                )
             }
             .store(in: &vpsCancellables)
 
@@ -329,6 +343,50 @@ extension MessageStore {
                 }
             }
         }
+    }
+
+    // MARK: - Coalesced Rebuild
+
+    /// Flushes the pending message buffer and rebuilds conversations once.
+    /// Called either when the debounce timer fires (200ms of silence) or
+    /// when the buffer reaches 50 messages, whichever comes first.
+    func flushPendingRebuild() {
+        pendingRebuildWork?.cancel()
+        pendingRebuildWork = nil
+
+        guard !pendingMessageBuffer.isEmpty else { return }
+
+        let bufferedCount = pendingMessageBuffer.count
+        let notificationsToSend = pendingNotificationBuffer
+
+        // Clear buffers before rebuild
+        pendingMessageBuffer.removeAll()
+        pendingNotificationBuffer.removeAll()
+
+        // Rebuild conversations from the full messages array (which already
+        // contains the buffered messages — they were appended on arrival).
+        let processedMessages = self.applyReadStatus(to: self.messages)
+        let mergeResult = self.mergeMessagesWithPendingOutgoing(remoteMessages: processedMessages)
+        let newConversations = self.buildConversations(from: mergeResult.mergedMessages)
+
+        self.messages = mergeResult.mergedMessages
+        self.conversations = newConversations
+
+        // Send notifications for all buffered incoming messages
+        for message in notificationsToSend {
+            self.notificationService.showMessageNotification(
+                from: message.address,
+                contactName: message.contactName,
+                body: message.body,
+                messageId: message.id
+            )
+        }
+
+        #if DEBUG
+        if bufferedCount > 1 {
+            print("[MessageStore VPS] Coalesced rebuild: \(bufferedCount) messages in single pass")
+        }
+        #endif
     }
 
     // MARK: - VPS Message Conversion

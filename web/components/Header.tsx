@@ -1,14 +1,40 @@
 'use client'
 
+import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { Smartphone, LogOut, Settings, Menu, Download } from 'lucide-react'
 import { motion } from 'framer-motion'
 import { useAppStore } from '@/lib/store'
 import { unpairDevice } from '@/lib/auth'
+import vpsService from '@/lib/vps'
+
+type ConnectionStatus = 'connected' | 'reconnecting' | 'disconnected'
 
 export default function Header() {
   const router = useRouter()
   const { toggleSidebar } = useAppStore()
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected')
+
+  useEffect(() => {
+    const onConnected = () => setConnectionStatus('connected')
+    const onDisconnected = () => setConnectionStatus('reconnecting')
+    const onError = () => setConnectionStatus('reconnecting')
+
+    // Check initial state
+    if (vpsService.isWebSocketOpen) {
+      setConnectionStatus('connected')
+    }
+
+    vpsService.on('connected', onConnected)
+    vpsService.on('disconnected', onDisconnected)
+    vpsService.on('error', onError)
+
+    return () => {
+      vpsService.off('connected', onConnected)
+      vpsService.off('disconnected', onDisconnected)
+      vpsService.off('error', onError)
+    }
+  }, [])
 
   const handleLogout = async () => {
     // Remove device from server (broadcasts device_removed to Android), clear tokens, disconnect WebSocket
@@ -36,6 +62,23 @@ export default function Header() {
               <Smartphone className="w-4.5 h-4.5 text-white" strokeWidth={2.5} />
             </div>
             <h1 className="text-xl font-bold text-gradient tracking-tight">SyncFlow</h1>
+            <span
+              title={
+                connectionStatus === 'connected'
+                  ? 'Connected'
+                  : connectionStatus === 'reconnecting'
+                  ? 'Reconnecting...'
+                  : 'Disconnected'
+              }
+              className={`w-2.5 h-2.5 rounded-full flex-shrink-0 transition-colors duration-300 ${
+                connectionStatus === 'connected'
+                  ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]'
+                  : connectionStatus === 'reconnecting'
+                  ? 'bg-amber-500 animate-pulse shadow-[0_0_6px_rgba(245,158,11,0.4)]'
+                  : 'bg-gray-400 dark:bg-gray-600'
+              }`}
+              aria-label={`Connection status: ${connectionStatus}`}
+            />
           </div>
         </div>
 

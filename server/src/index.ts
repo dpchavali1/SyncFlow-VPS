@@ -7,7 +7,7 @@ import { config } from './config';
 import { pool, checkDatabaseHealth } from './services/database';
 import { redis, checkRedisHealth } from './services/redis';
 import { createWebSocketServer, getConnectionCount } from './services/websocket';
-import { initLogger } from './services/logger';
+import { initLogger, log } from './services/logger';
 import { initializeFCM, retryStaleOutgoingMessages } from './services/push';
 import { maintenanceMiddleware } from './middleware/maintenance';
 import { startDailyCleanup, stopDailyCleanup } from './services/dailyCleanup';
@@ -73,13 +73,13 @@ app.use((req, res, next) => {
 });
 app.use(express.urlencoded({ extended: true }));
 
-// Request logging (simple)
+// Request logging (structured)
 app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
     const duration = Date.now() - start;
     if (config.nodeEnv === 'development' || duration > 1000) {
-      console.log(`${req.method} ${req.path} ${res.statusCode} ${duration}ms`);
+      log.info('HTTP request', { method: req.method, path: req.path, status: res.statusCode, durationMs: duration });
     }
   });
   next();
@@ -153,7 +153,7 @@ app.use((req, res) => {
 
 // Error handler
 app.use((err: Error, req: express.Request, res: express.Response, next: express.NextFunction) => {
-  console.error('Unhandled error:', err);
+  log.error('Unhandled error', { error: err.message, stack: err.stack, path: req.path, method: req.method });
   res.status(500).json({ error: 'Internal server error' });
 });
 
@@ -161,14 +161,14 @@ app.use((err: Error, req: express.Request, res: express.Response, next: express.
 async function start() {
   try {
     // Test database connection
-    console.log('Connecting to PostgreSQL...');
+    log.info('Connecting to PostgreSQL...');
     await checkDatabaseHealth();
-    console.log('PostgreSQL connected');
+    log.info('PostgreSQL connected');
 
     // Test Redis connection
-    console.log('Connecting to Redis...');
+    log.info('Connecting to Redis...');
     await checkRedisHealth();
-    console.log('Redis connected');
+    log.info('Redis connected');
 
     // Initialize FCM for push notifications
     initializeFCM();
@@ -178,17 +178,17 @@ async function start() {
     const wss = createWebSocketServer(server);
 
     server.listen(config.port, () => {
-      console.log(`HTTP + WebSocket server listening on port ${config.port}`);
+      log.info('HTTP + WebSocket server listening', { port: config.port });
     });
 
     // Register graceful shutdown handler
     const gracefulShutdown = (signal: string) => {
-      console.log(`${signal} received, shutting down gracefully...`);
+      log.info('Shutdown signal received', { signal });
       stopDailyCleanup();
 
       // Stop accepting new connections
       server.close(async () => {
-        console.log('HTTP server closed, draining remaining connections...');
+        log.info('HTTP server closed, draining remaining connections...');
         try {
           // Close WebSocket server and all active connections
           wss.clients.forEach((ws) => ws.close(1001, 'Server shutting down'));
@@ -196,17 +196,17 @@ async function start() {
           // Close database pool and Redis
           await pool.end();
           redis.disconnect();
-          console.log('All connections closed. Exiting.');
+          log.info('All connections closed. Exiting.');
           process.exit(0);
         } catch (err) {
-          console.error('Error during shutdown cleanup:', err);
+          log.error('Error during shutdown cleanup', { error: (err as Error).message });
           process.exit(1);
         }
       });
 
       // Force shutdown after 30 seconds if draining takes too long
       setTimeout(() => {
-        console.error('Graceful shutdown timed out after 30s, forcing exit.');
+        log.error('Graceful shutdown timed out after 30s, forcing exit.');
         process.exit(1);
       }, 30000);
     };
@@ -220,12 +220,10 @@ async function start() {
     // Retry stale pending outgoing messages every 2 minutes
     setInterval(retryStaleOutgoingMessages, 2 * 60 * 1000);
 
-    console.log(`\nSyncFlow API Server started in ${config.nodeEnv} mode`);
-    console.log(`- HTTP + WS: http://localhost:${config.port}`);
-    console.log(`- Health:    http://localhost:${config.port}/health`);
+    log.info('SyncFlow API Server started', { mode: config.nodeEnv, port: config.port, healthUrl: `http://localhost:${config.port}/health` });
 
   } catch (error) {
-    console.error('Failed to start server:', error);
+    log.error('Failed to start server', { error: (error as Error).message, stack: (error as Error).stack });
     process.exit(1);
   }
 }

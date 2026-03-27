@@ -1,4 +1,5 @@
 // In-memory ring buffer log capture for admin log viewer
+// + Structured JSON logger for server-side observability
 
 interface LogEntry {
   timestamp: string;
@@ -65,3 +66,61 @@ export function getLogs(
 export function clearLogs() {
   buffer.length = 0;
 }
+
+// ---------------------------------------------------------------------------
+// Structured logger
+//
+// Outputs JSON lines with { level, message, timestamp, ...context }.
+// log.debug() is suppressed in production to reduce noise.
+// ---------------------------------------------------------------------------
+
+type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+interface StructuredEntry {
+  level: LogLevel;
+  message: string;
+  timestamp: string;
+  [key: string]: unknown;
+}
+
+function emit(level: LogLevel, message: string, context?: Record<string, unknown>): void {
+  const entry: StructuredEntry = {
+    level,
+    message,
+    timestamp: new Date().toISOString(),
+    ...context,
+  };
+
+  const line = JSON.stringify(entry);
+
+  switch (level) {
+    case 'error':
+      console.error(line);
+      break;
+    case 'warn':
+      console.warn(line);
+      break;
+    default:
+      console.log(line);
+      break;
+  }
+}
+
+const isProduction = process.env.NODE_ENV === 'production';
+
+export const log = {
+  debug(message: string, context?: Record<string, unknown>): void {
+    if (!isProduction) {
+      emit('debug', message, context);
+    }
+  },
+  info(message: string, context?: Record<string, unknown>): void {
+    emit('info', message, context);
+  },
+  warn(message: string, context?: Record<string, unknown>): void {
+    emit('warn', message, context);
+  },
+  error(message: string, context?: Record<string, unknown>): void {
+    emit('error', message, context);
+  },
+};

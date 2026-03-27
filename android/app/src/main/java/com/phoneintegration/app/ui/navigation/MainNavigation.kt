@@ -2,6 +2,8 @@ package com.phoneintegration.app.ui.navigation
 
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.runtime.*
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -143,7 +145,7 @@ fun MainNavigation(
         }
     }
 
-    // Navigation with NO animations - cleanest, fastest experience
+    // Navigation with slide animations for detail screens
     NavHost(
         navController = navController,
         startDestination = "list",
@@ -249,7 +251,13 @@ fun MainNavigation(
                 )
             }
 
-            composable("chat/{threadId}/{address}/{name}") { backStackEntry ->
+            composable(
+                "chat/{threadId}/{address}/{name}",
+                enterTransition = { slideInHorizontally(initialOffsetX = { it }) },
+                exitTransition = { slideOutHorizontally(targetOffsetX = { it }) },
+                popEnterTransition = { EnterTransition.None },
+                popExitTransition = { slideOutHorizontally(targetOffsetX = { it }) }
+            ) { backStackEntry ->
                 val threadIdStr = backStackEntry.arguments?.getString("threadId") ?: "0"
                 val threadId = threadIdStr.toLongOrNull() ?: 0L
                 // URL decode the address and name to handle special characters

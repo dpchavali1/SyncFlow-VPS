@@ -235,11 +235,18 @@ router.get('/tables/:tableName', async (req: Request, res: Response) => {
 
 // ── PUT /tables/:tableName/:rowId — Update a row ────────────────────────────
 // Validates column names against information_schema, detects PK from pg_index.
+// Restricted to non-sensitive tables to prevent accidental data corruption.
+const MUTABLE_TABLES = ['user_subscriptions', 'user_usage', 'user_devices', 'pairing_requests', 'user_spam_lists'];
 
 router.put('/tables/:tableName/:rowId', async (req: Request, res: Response) => {
   try {
     const { tableName, rowId } = req.params;
     const updates = req.body;
+
+    if (!MUTABLE_TABLES.includes(tableName)) {
+      res.status(403).json({ error: `Table '${tableName}' cannot be modified through the admin browser. Use psql on the VPS.` });
+      return;
+    }
 
     // Validate table exists
     const tables = await query(
@@ -311,6 +318,11 @@ router.put('/tables/:tableName/:rowId', async (req: Request, res: Response) => {
 router.delete('/tables/:tableName/:rowId', async (req: Request, res: Response) => {
   try {
     const { tableName, rowId } = req.params;
+
+    if (!MUTABLE_TABLES.includes(tableName)) {
+      res.status(403).json({ error: `Table '${tableName}' cannot be modified through the admin browser. Use psql on the VPS.` });
+      return;
+    }
 
     // Validate table exists
     const tables = await query(

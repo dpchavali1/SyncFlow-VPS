@@ -15,6 +15,7 @@ import { IncomingMessage, Server as HttpServer } from 'http';
 import { verifyToken, TokenPayload } from './auth';
 import { isDeviceBlacklisted } from './redis';
 import { pool } from './database';
+import { log } from './logger';
 
 interface AuthenticatedWebSocket extends WebSocket {
   userId?: string;
@@ -42,10 +43,37 @@ interface BroadcastMessage {
 // Store active connections by userId
 const userConnections = new Map<string, Set<AuthenticatedWebSocket>>();
 
+// In-memory cache for WebRTC call participant lookups (avoids DB query on every signal)
+interface CallParticipants {
+  callerId: string;
+  calleeId: string | null;
+  cachedAt: number;
+}
+const CALL_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const callParticipantCache = new Map<string, CallParticipants>();
+
+function getCachedCallParticipants(callId: string): CallParticipants | null {
+  const entry = callParticipantCache.get(callId);
+  if (!entry) return null;
+  if (Date.now() - entry.cachedAt > CALL_CACHE_TTL_MS) {
+    callParticipantCache.delete(callId);
+    return null;
+  }
+  return entry;
+}
+
+function setCachedCallParticipants(callId: string, callerId: string, calleeId: string | null): void {
+  callParticipantCache.set(callId, { callerId, calleeId, cachedAt: Date.now() });
+}
+
+export function clearCallCache(callId: string): void {
+  callParticipantCache.delete(callId);
+}
+
 export function createWebSocketServer(server: HttpServer): WebSocketServer {
   const wss = new WebSocketServer({ server, maxPayload: 65536 }); // 64KB max message size
 
-  console.log(`WebSocket server attached to HTTP server`);
+  log.info('WebSocket server attached to HTTP server');
 
   // Heartbeat interval
   const heartbeatInterval = setInterval(() => {
@@ -121,7 +149,7 @@ export function createWebSocketServer(server: HttpServer): WebSocketServer {
           handleClientMessage(client, message);
         }
       } catch (error) {
-        console.error('WebSocket message parse error:', error);
+        log.error('WebSocket message parse error', { error: (error as Error).message, userId: client.userId });
       }
     });
 
@@ -140,7 +168,7 @@ export function createWebSocketServer(server: HttpServer): WebSocketServer {
 
     // Handle errors
     client.on('error', (error) => {
-      console.error(`WebSocket error for user=${client.userId}:`, error.message);
+      log.error('WebSocket connection error', { userId: client.userId, error: error.message });
     });
   });
 
@@ -225,21 +253,34 @@ async function handleWebRTCSignal(client: AuthenticatedWebSocket, message: Subsc
     },
   };
 
-  // Look up the call to find the other participant for cross-user routing
+  // Look up call participants (cached to avoid DB hit on every signal)
   try {
-    const rows = await pool.query(
-      `SELECT user_id, callee_user_id FROM user_syncflow_calls WHERE id = $1`,
-      [message.callId]
-    );
-    if (rows.rows.length > 0) {
-      const { user_id: callerId, callee_user_id: calleeId } = rows.rows[0];
-      const otherUserId = client.userId === callerId ? calleeId : callerId;
+    let participants = getCachedCallParticipants(message.callId);
+    if (!participants) {
+      const rows = await pool.query(
+        `SELECT user_id, callee_user_id FROM user_syncflow_calls WHERE id = $1`,
+        [message.callId]
+      );
+      if (rows.rows.length > 0) {
+        const { user_id: callerId, callee_user_id: calleeId } = rows.rows[0];
+        setCachedCallParticipants(message.callId, callerId, calleeId);
+        participants = getCachedCallParticipants(message.callId);
+      }
+    }
+
+    if (participants) {
+      const otherUserId = client.userId === participants.callerId ? participants.calleeId : participants.callerId;
       if (otherUserId && otherUserId !== client.userId) {
         broadcastToUser(otherUserId, 'calls', signalMessage);
       }
     }
+
+    // Clear cache on call-ending signals (bye, hangup)
+    if (message.signalType === 'bye' || message.signalType === 'hangup') {
+      clearCallCache(message.callId);
+    }
   } catch (err) {
-    console.error('[WS] Error looking up call for signaling:', err);
+    log.error('Error looking up call for WebRTC signaling', { callId: message.callId, error: (err as Error).message });
   }
 
   // Also broadcast to same-user's other devices

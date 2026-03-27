@@ -87,6 +87,10 @@ const ConversationItem = memo(function ConversationItem({
   return (
     <div
       onClick={onClick}
+      role="option"
+      aria-selected={isSelected}
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } }}
       className={`group mx-2 my-0.5 px-3 py-3 rounded-xl cursor-pointer transition-all duration-200 hover:scale-[1.005] active:scale-[0.995] ${
         isSelected
           ? 'bg-primary-500/10 dark:bg-primary-500/15 shadow-sm'
@@ -145,6 +149,10 @@ const SpamConversationItem = memo(function SpamConversationItem({
   return (
     <div
       onClick={onClick}
+      role="option"
+      aria-selected={isSelected}
+      tabIndex={0}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() } }}
       className={`group mx-2 my-0.5 px-3 py-3 rounded-xl cursor-pointer transition-all duration-200 hover:scale-[1.005] active:scale-[0.995] ${
         isSelected
           ? 'bg-red-500/10 dark:bg-red-500/15 shadow-sm'
@@ -186,7 +194,11 @@ const FOLDERS = [
   { id: 'spam' as const, label: 'Spam', icon: ShieldAlert, activeColor: 'bg-red-500 text-white shadow-sm' },
 ]
 
-export default function ConversationList() {
+interface ConversationListProps {
+  onConversationSelect?: () => void
+}
+
+export default function ConversationList({ onConversationSelect }: ConversationListProps) {
   // Use selectors to minimize re-renders
   const messages = useAppStore((state) => state.messages)
   const readReceipts = useAppStore((state) => state.readReceipts)
@@ -204,7 +216,18 @@ export default function ConversationList() {
   const [width, setWidth] = useState(340)
   const [isResizing, setIsResizing] = useState(false)
   const [isInitialLoading, setIsInitialLoading] = useState(true)
+  const [isMobile, setIsMobile] = useState(false)
   const resizeRef = useRef<HTMLDivElement>(null)
+
+  // Track mobile viewport
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const mql = window.matchMedia('(max-width: 767px)')
+    setIsMobile(mql.matches)
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches)
+    mql.addEventListener('change', handler)
+    return () => mql.removeEventListener('change', handler)
+  }, [])
 
   // Debounce search query for better performance
   const debouncedSearchQuery = useDebounce(searchQuery, 150)
@@ -376,11 +399,20 @@ export default function ConversationList() {
   // Memoized click handlers
   const handleConversationClick = useCallback((normalizedAddress: string) => {
     setSelectedConversation(normalizedAddress)
-  }, [setSelectedConversation])
+    // On mobile viewports, switch to message view
+    if (typeof window !== 'undefined' && window.innerWidth < 768) {
+      useAppStore.getState().setIsMobileShowingMessages(true)
+    }
+    onConversationSelect?.()
+  }, [setSelectedConversation, onConversationSelect])
 
   const handleSpamClick = useCallback((address: string) => {
     setSelectedSpamAddress(address)
-  }, [setSelectedSpamAddress])
+    if (typeof window !== 'undefined' && window.innerWidth < 768) {
+      useAppStore.getState().setIsMobileShowingMessages(true)
+    }
+    onConversationSelect?.()
+  }, [setSelectedSpamAddress, onConversationSelect])
 
   const handleFolderClick = useCallback((folder: 'inbox' | 'spam') => {
     setActiveFolder(folder)
@@ -394,8 +426,8 @@ export default function ConversationList() {
 
   return (
     <div
-      className="relative glass-panel border-r-0 rounded-r-none flex flex-col min-h-0 overflow-hidden"
-      style={{ width: `${width}px`, minWidth: `${MIN_WIDTH}px`, maxWidth: `${MAX_WIDTH}px` }}
+      className={`relative glass-panel border-r-0 rounded-r-none flex flex-col min-h-0 overflow-hidden ${isMobile ? 'w-full' : ''}`}
+      style={isMobile ? undefined : { width: `${width}px`, minWidth: `${MIN_WIDTH}px`, maxWidth: `${MAX_WIDTH}px` }}
     >
       {/* Header area */}
       <div className="flex-shrink-0 px-4 pt-4 pb-3">
@@ -446,6 +478,7 @@ export default function ConversationList() {
             placeholder="Search..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
+            aria-label="Search conversations"
             className="w-full pl-9 pr-4 py-2 rounded-xl glass-input text-sm text-surface-900 dark:text-surface-50 placeholder:text-surface-400"
           />
           {searchQuery && (
@@ -462,7 +495,7 @@ export default function ConversationList() {
       </div>
 
       {/* Conversation list */}
-      <div className="flex-1 min-h-0 h-0 overflow-y-auto py-1">
+      <div className="flex-1 min-h-0 h-0 overflow-y-auto py-1" role="listbox" aria-label="Conversations">
         {isInitialLoading ? (
           <ConversationListSkeleton />
         ) : activeFolder === 'spam' ? (

@@ -192,6 +192,24 @@ class MessageStore: ObservableObject {
     /// Tracks the newest message date for incremental polling
     var lastPolledMessageDate: Double = 0
 
+    // MARK: - WebSocket Message Coalescing
+
+    /// Pending rebuild work item — cancelled and rescheduled on each incoming message.
+    /// After 200ms of silence (or buffer reaching 50 messages), triggers a single rebuild.
+    var pendingRebuildWork: DispatchWorkItem?
+
+    /// Buffer of messages received since the last conversation rebuild.
+    var pendingMessageBuffer: [Message] = []
+
+    /// Buffer of incoming messages that need notification after rebuild.
+    var pendingNotificationBuffer: [Message] = []
+
+    /// Maximum number of buffered messages before forcing an immediate rebuild.
+    let rebuildBufferLimit = 50
+
+    /// Delay (in seconds) after the last incoming message before triggering a rebuild.
+    let rebuildDebounceDelay: TimeInterval = 0.2
+
     /// Serial queue for thread-safe access to pending outgoing messages.
     let pendingOutgoingQueue = DispatchQueue(label: "MessageStore.pendingOutgoingQueue")
 
@@ -535,6 +553,12 @@ class MessageStore: ObservableObject {
         repairPollTask = nil
         pollFallbackTask?.cancel()
         pollFallbackTask = nil
+
+        // Cancel any pending coalesced rebuild
+        pendingRebuildWork?.cancel()
+        pendingRebuildWork = nil
+        pendingMessageBuffer.removeAll()
+        pendingNotificationBuffer.removeAll()
 
         // Clear state
         currentUserId = nil

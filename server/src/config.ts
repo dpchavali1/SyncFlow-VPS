@@ -14,7 +14,7 @@ export const config = {
     user: process.env.PG_USER || 'syncflow',
     password: process.env.PG_PASSWORD || '',
     database: process.env.PG_DATABASE || 'syncflow_prod',
-    max: 20, // max pool size
+    max: 40, // max pool size
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 2000,
   },
@@ -43,10 +43,15 @@ export const config = {
   corsOrigins: (process.env.CORS_ORIGINS || 'http://localhost:3000,http://localhost:3001,https://sfweb.app,https://www.sfweb.app').split(','),
 
   // Admin credentials (for VPS admin API)
-  // ADMIN_PASSWORD can be plaintext or a bcrypt hash (e.g., generated via: node -e "require('bcrypt').hash('yourpass',10).then(console.log)")
+  // ADMIN_PASSWORD MUST be a bcrypt hash: node -e "require('bcrypt').hash('yourpass',12).then(console.log)"
   admin: {
     username: process.env.ADMIN_USERNAME || 'admin',
-    password: process.env.ADMIN_PASSWORD || (() => { throw new Error('ADMIN_PASSWORD environment variable is required'); })(),
+    password: (() => {
+      const pw = process.env.ADMIN_PASSWORD;
+      if (!pw) throw new Error('ADMIN_PASSWORD environment variable is required');
+      if (!pw.startsWith('$2')) console.warn('[SECURITY] ADMIN_PASSWORD should be a bcrypt hash, not plaintext. Generate one: node -e "require(\'bcrypt\').hash(\'yourpass\',12).then(console.log)"');
+      return pw;
+    })(),
     apiKey: process.env.ADMIN_API_KEY || '',
   },
 
