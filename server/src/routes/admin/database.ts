@@ -131,6 +131,12 @@ router.get('/tables/:tableName', async (req: Request, res: Response) => {
   try {
     const { tableName } = req.params;
 
+    // Validate table name: only alphanumeric and underscore allowed
+    if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
+      res.status(400).json({ error: 'Invalid table name' });
+      return;
+    }
+
     // Validate table exists
     const tableExists = await queryOne<{ exists: boolean }>(`
       SELECT EXISTS (
@@ -164,8 +170,8 @@ router.get('/tables/:tableName', async (req: Request, res: Response) => {
     // Validate sort column against actual schema columns
     const sortColumn = sort && columnNames.includes(sort) ? sort : null;
 
-    // Build query
-    let sql = `SELECT * FROM ${tableName}`;
+    // Build query — tableName is validated above (alphanumeric + underscore only, exists in pg_tables)
+    let sql = `SELECT * FROM "${tableName}"`;
     const params: any[] = [];
 
     // Search across text columns
@@ -189,7 +195,7 @@ router.get('/tables/:tableName', async (req: Request, res: Response) => {
     const rows = await query(sql, params);
 
     // Get total count (with same search filter)
-    let countSql = `SELECT COUNT(*) AS count FROM ${tableName}`;
+    let countSql = `SELECT COUNT(*) AS count FROM "${tableName}"`;
     const countParams: any[] = [];
     if (search && textColumns.length > 0) {
       const searchConditions = textColumns.map((col) => {
@@ -343,7 +349,7 @@ router.delete('/tables/:tableName/:rowId', async (req: Request, res: Response) =
   }
 });
 
-// ── POST /query — Run arbitrary SQL ─────────────────────────────────────────
+// ── POST /query — Run SQL (SELECT-only for safety) ──────────────────────────
 
 router.post('/query', async (req: Request, res: Response) => {
   try {
@@ -354,18 +360,23 @@ router.post('/query', async (req: Request, res: Response) => {
       return;
     }
 
-    // Flag destructive queries for client-side awareness
-    const normalized = sql.trim().toLowerCase();
-    const isModifying = normalized.startsWith('update') || normalized.startsWith('delete') ||
-                        normalized.startsWith('insert') || normalized.startsWith('drop') ||
-                        normalized.startsWith('alter') || normalized.startsWith('truncate');
+    // SECURITY: Only allow SELECT queries through the admin browser.
+    // For destructive operations, use psql directly on the VPS.
+    const normalized = sql.trim().toLowerCase().replace(/\/\*[\s\S]*?\*\//g, '').trim();
+    const destructivePattern = /^(update|delete|insert|drop|alter|truncate|create|grant|revoke|copy|execute|do)\b/i;
+    if (destructivePattern.test(normalized)) {
+      res.status(403).json({
+        error: 'Destructive queries are not allowed through the admin browser. Use psql on the VPS for write operations.',
+      });
+      return;
+    }
 
     const result = await query(sql);
 
     res.json({
       rows: Array.isArray(result) ? result : [],
       rowCount: Array.isArray(result) ? result.length : 0,
-      isModifying,
+      isModifying: false,
     });
   } catch (error: any) {
     res.status(400).json({ error: error.message || 'Query failed' });

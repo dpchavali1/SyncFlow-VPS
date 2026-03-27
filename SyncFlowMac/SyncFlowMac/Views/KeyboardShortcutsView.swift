@@ -59,7 +59,7 @@ struct KeyboardShortcutsView: View {
                         ])
 
                         ShortcutSection(title: "Phone Features", shortcuts: [
-                            Shortcut(keys: ["\u{2318}", "\u{21E7}", "P"], description: "View photos"),
+                            Shortcut(keys: ["\u{2318}", "\u{21E7}", "P"], description: "Quick Drop files"),
                             Shortcut(keys: ["\u{2318}", "\u{21E7}", "N"], description: "Notifications"),
                             Shortcut(keys: ["\u{2318}", "\u{21E7}", "S"], description: "Scheduled messages"),
                             Shortcut(keys: ["\u{2318}", "\u{21E7}", "V"], description: "Voicemails"),

@@ -138,7 +138,7 @@ router.post('/track', trackRateLimit, async (req: Request, res: Response) => {
 router.get('/admin/overview', authenticate, requireAdmin, async (req: Request, res: Response) => {
   try {
     const days = Math.min(Math.max(parseInt(req.query.days as string) || 30, 1), 365);
-    const since = `NOW() - INTERVAL '${days} days'`;
+    const since = days; // Used as parameterized value: NOW() - $N * INTERVAL '1 day'
 
     // Totals
     const [totals] = await query<{ page_views: string; unique_visitors: string; downloads: string }>(
@@ -146,7 +146,8 @@ router.get('/admin/overview', authenticate, requireAdmin, async (req: Request, r
         COUNT(*) FILTER (WHERE event_type = 'page_view') AS page_views,
         COUNT(DISTINCT session_id) FILTER (WHERE event_type = 'page_view') AS unique_visitors,
         COUNT(*) FILTER (WHERE event_type = 'download_click') AS downloads
-       FROM analytics_events WHERE created_at >= ${since}`
+       FROM analytics_events WHERE created_at >= NOW() - make_interval(days => $1::int)`,
+      [since]
     );
 
     // Daily trend
@@ -154,57 +155,65 @@ router.get('/admin/overview', authenticate, requireAdmin, async (req: Request, r
       `SELECT created_at::date AS date,
         COUNT(*) FILTER (WHERE event_type = 'page_view') AS page_views,
         COUNT(DISTINCT session_id) FILTER (WHERE event_type = 'page_view') AS unique_visitors
-       FROM analytics_events WHERE created_at >= ${since}
-       GROUP BY created_at::date ORDER BY date`
+       FROM analytics_events WHERE created_at >= NOW() - make_interval(days => $1::int)
+       GROUP BY created_at::date ORDER BY date`,
+      [since]
     );
 
     // Top pages
     const topPages = await query<{ page_path: string; views: string }>(
       `SELECT page_path, COUNT(*) AS views
-       FROM analytics_events WHERE event_type = 'page_view' AND created_at >= ${since} AND page_path IS NOT NULL
-       GROUP BY page_path ORDER BY views DESC LIMIT 20`
+       FROM analytics_events WHERE event_type = 'page_view' AND created_at >= NOW() - make_interval(days => $1::int) AND page_path IS NOT NULL
+       GROUP BY page_path ORDER BY views DESC LIMIT 20`,
+      [since]
     );
 
     // Top referrers
     const topReferrers = await query<{ referrer: string; count: string }>(
       `SELECT referrer, COUNT(*) AS count
-       FROM analytics_events WHERE event_type = 'page_view' AND created_at >= ${since} AND referrer IS NOT NULL AND referrer != ''
-       GROUP BY referrer ORDER BY count DESC LIMIT 20`
+       FROM analytics_events WHERE event_type = 'page_view' AND created_at >= NOW() - make_interval(days => $1::int) AND referrer IS NOT NULL AND referrer != ''
+       GROUP BY referrer ORDER BY count DESC LIMIT 20`,
+      [since]
     );
 
     // Device type breakdown
     const deviceBreakdown = await query<{ device_type: string; count: string }>(
       `SELECT device_type, COUNT(*) AS count
-       FROM analytics_events WHERE created_at >= ${since}
-       GROUP BY device_type ORDER BY count DESC`
+       FROM analytics_events WHERE created_at >= NOW() - make_interval(days => $1::int)
+       GROUP BY device_type ORDER BY count DESC`,
+      [since]
     );
 
     // OS breakdown
     const osBreakdown = await query<{ os_name: string; count: string }>(
       `SELECT os_name, COUNT(*) AS count
-       FROM analytics_events WHERE created_at >= ${since}
-       GROUP BY os_name ORDER BY count DESC`
+       FROM analytics_events WHERE created_at >= NOW() - make_interval(days => $1::int)
+       GROUP BY os_name ORDER BY count DESC`,
+      [since]
     );
 
     // Browser breakdown
     const browserBreakdown = await query<{ browser_name: string; count: string }>(
       `SELECT browser_name, COUNT(*) AS count
-       FROM analytics_events WHERE created_at >= ${since}
-       GROUP BY browser_name ORDER BY count DESC`
+       FROM analytics_events WHERE created_at >= NOW() - make_interval(days => $1::int)
+       GROUP BY browser_name ORDER BY count DESC`,
+      [since]
     );
 
     // Country breakdown
     const countryBreakdown = await query<{ country_code: string; country_name: string; count: string }>(
       `SELECT country_code, country_name, COUNT(*) AS count
-       FROM analytics_events WHERE created_at >= ${since} AND country_code IS NOT NULL
-       GROUP BY country_code, country_name ORDER BY count DESC LIMIT 20`
+       FROM analytics_events WHERE created_at >= NOW() - make_interval(days => $1::int) AND country_code IS NOT NULL
+       GROUP BY country_code, country_name ORDER BY count DESC LIMIT 20`,
+      [since]
     );
 
     // Downloads by platform
     const downloadsByPlatform = await query<{ download_platform: string; count: string }>(
       `SELECT download_platform, COUNT(*) AS count
-       FROM analytics_events WHERE event_type = 'download_click' AND created_at >= ${since} AND download_platform IS NOT NULL
-       GROUP BY download_platform ORDER BY count DESC`
+       FROM analytics_events WHERE event_type = 'download_click' AND created_at >= NOW() - make_interval(days => $1::int) AND download_platform IS NOT NULL
+       GROUP BY download_platform ORDER BY count DESC`,
+      [since]
     );
 
     res.json({
@@ -237,15 +246,16 @@ router.get('/admin/overview', authenticate, requireAdmin, async (req: Request, r
 router.get('/admin/visits', authenticate, requireAdmin, async (req: Request, res: Response) => {
   try {
     const days = Math.min(Math.max(parseInt(req.query.days as string) || 30, 1), 365);
-    const since = `NOW() - INTERVAL '${days} days'`;
+    const since = days; // Used as parameterized value: NOW() - $N * INTERVAL '1 day'
 
     const visits = await query<{ date: string; page_views: string; unique_visitors: string; downloads: string }>(
       `SELECT created_at::date AS date,
         COUNT(*) FILTER (WHERE event_type = 'page_view') AS page_views,
         COUNT(DISTINCT session_id) FILTER (WHERE event_type = 'page_view') AS unique_visitors,
         COUNT(*) FILTER (WHERE event_type = 'download_click') AS downloads
-       FROM analytics_events WHERE created_at >= ${since}
-       GROUP BY created_at::date ORDER BY date`
+       FROM analytics_events WHERE created_at >= NOW() - make_interval(days => $1::int)
+       GROUP BY created_at::date ORDER BY date`,
+      [since]
     );
 
     res.json({
@@ -267,18 +277,20 @@ router.get('/admin/visits', authenticate, requireAdmin, async (req: Request, res
 router.get('/admin/downloads', authenticate, requireAdmin, async (req: Request, res: Response) => {
   try {
     const days = Math.min(Math.max(parseInt(req.query.days as string) || 30, 1), 365);
-    const since = `NOW() - INTERVAL '${days} days'`;
+    const since = days; // Used as parameterized value: NOW() - $N * INTERVAL '1 day'
 
     const byPlatform = await query<{ download_platform: string; count: string }>(
       `SELECT download_platform, COUNT(*) AS count
-       FROM analytics_events WHERE event_type = 'download_click' AND created_at >= ${since} AND download_platform IS NOT NULL
-       GROUP BY download_platform ORDER BY count DESC`
+       FROM analytics_events WHERE event_type = 'download_click' AND created_at >= NOW() - make_interval(days => $1::int) AND download_platform IS NOT NULL
+       GROUP BY download_platform ORDER BY count DESC`,
+      [since]
     );
 
     const byDay = await query<{ date: string; download_platform: string; count: string }>(
       `SELECT created_at::date AS date, download_platform, COUNT(*) AS count
-       FROM analytics_events WHERE event_type = 'download_click' AND created_at >= ${since} AND download_platform IS NOT NULL
-       GROUP BY created_at::date, download_platform ORDER BY date`
+       FROM analytics_events WHERE event_type = 'download_click' AND created_at >= NOW() - make_interval(days => $1::int) AND download_platform IS NOT NULL
+       GROUP BY created_at::date, download_platform ORDER BY date`,
+      [since]
     );
 
     res.json({

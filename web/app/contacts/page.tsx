@@ -1,56 +1,13 @@
 'use client'
 
-import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import ContactsList from '@/components/ContactsList'
-import { waitForAuth } from '@/lib/firebase'
 import { ContactsListSkeleton } from '@/components/SkeletonLoaders'
-import vpsService from '@/lib/vps'
+import { useAuth } from '@/lib/hooks/useAuth'
 
 export default function ContactsPage() {
   const router = useRouter()
-  const [userId, setUserId] = useState<string | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
-
-  useEffect(() => {
-    const checkAuth = async () => {
-      // Check VPS mode - must match firebase.ts isVPSMode() logic
-      const isVPSMode = localStorage.getItem('useVPSMode') === 'true' ||
-                        !!process.env.NEXT_PUBLIC_VPS_URL ||
-                        !!localStorage.getItem('vps_access_token') ||
-                        vpsService.isAuthenticated ||
-                        true // Default to VPS mode
-
-      if (isVPSMode) {
-        // Wait for tokens to be restored from IndexedDB before checking auth
-        await vpsService.ensureTokensRestored()
-
-        // VPS mode: check VPS authentication
-        const storedUserId = localStorage.getItem('syncflow_user_id')
-        if (storedUserId && vpsService.isAuthenticated) {
-          setUserId(storedUserId)
-        } else if (storedUserId) {
-          // Have stored user ID but VPS not authenticated - use stored ID
-          setUserId(storedUserId)
-        } else {
-          router.push('/')
-        }
-        setIsLoading(false)
-        return
-      }
-
-      // Firebase mode (legacy)
-      const uid = await waitForAuth()
-      if (uid) {
-        setUserId(uid)
-      } else {
-        // Redirect to home if not paired
-        router.push('/')
-      }
-      setIsLoading(false)
-    }
-    checkAuth()
-  }, [router])
+  const { userId, isLoading } = useAuth()
 
   const handleSelectContact = (phoneNumber: string, contactName: string) => {
     // Navigate to messages with this contact

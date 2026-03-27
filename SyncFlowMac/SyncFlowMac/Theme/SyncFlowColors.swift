@@ -12,11 +12,29 @@ import AppKit
 
 struct SyncFlowColors {
 
-    /// Gets the current color scheme dynamically
-    /// This ensures we always check the latest appearance state
-    private static var currentColorScheme: ColorScheme {
+    /// Cached color scheme, updated when system appearance changes.
+    /// Avoids calling NSApp.effectiveAppearance.bestMatch on every property access.
+    private static var _cachedScheme: ColorScheme = {
         let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         return isDark ? .dark : .light
+    }()
+
+    private static let _observer: Void = {
+        DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("AppleInterfaceThemeChangedNotification"),
+            object: nil,
+            queue: .main
+        ) { _ in
+            let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            _cachedScheme = isDark ? .dark : .light
+        }
+    }()
+
+    /// Returns the cached color scheme (light or dark).
+    /// The cache is refreshed automatically when the system appearance changes.
+    private static var currentColorScheme: ColorScheme {
+        _ = _observer // ensure observer is registered on first access
+        return _cachedScheme
     }
 
     // ============================================
@@ -487,7 +505,7 @@ struct SyncFlowColors {
     }
 
     private static var colorScheme: ColorScheme {
-        NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+        currentColorScheme
     }
 }
 

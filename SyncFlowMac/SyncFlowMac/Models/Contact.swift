@@ -59,12 +59,18 @@ struct Contact: Identifiable, Hashable {
 
     static func from(_ data: [String: Any], id: String) -> Contact? {
         guard let displayName = data["displayName"] as? String else {
+            #if DEBUG
+            print("Contact parse failed for id=\(id): missing displayName field")
+            #endif
             return nil
         }
 
         guard let phoneMap = data["phoneNumbers"] as? [String: [String: Any]],
               let firstEntry = phoneMap.values.first,
               let phoneNumber = firstEntry["number"] as? String else {
+            #if DEBUG
+            print("Contact parse failed for id=\(id): missing or invalid phoneNumbers (displayName=\(displayName))")
+            #endif
             return nil
         }
 

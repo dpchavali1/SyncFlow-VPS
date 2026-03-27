@@ -309,6 +309,18 @@ router.post('/refresh', async (req: Request, res: Response) => {
       return;
     }
 
+    // Skip device check for admin tokens (they use synthetic device IDs)
+    if (!payload.admin && payload.deviceId) {
+      const device = await queryOne(
+        'SELECT id FROM user_devices WHERE id = $1 AND user_id = $2',
+        [payload.deviceId, payload.pairedUid || payload.sub]
+      );
+      if (!device) {
+        res.status(401).json({ error: 'Device no longer registered' });
+        return;
+      }
+    }
+
     // Generate new access token
     const accessToken = generateToken({
       sub: payload.sub,
@@ -392,20 +404,24 @@ router.post('/admin/login', authRateLimit, async (req: Request, res: Response) =
   }
 });
 
-// GET /auth/admin/login with API key (header-based auth for scripts)
-router.get('/admin/token', async (req: Request, res: Response) => {
+// GET /auth/admin/token with API key (header-based auth for scripts)
+router.get('/admin/token', authRateLimit, async (req: Request, res: Response) => {
   try {
     const apiKey = req.headers['x-api-key'] as string;
 
-    // Check API key if configured
-    if (config.admin.apiKey && apiKey === config.admin.apiKey) {
-      const tokens = generateTokenPair('admin', 'admin-api', { admin: true });
-      res.json({
-        userId: 'admin',
-        admin: true,
-        ...tokens,
-      });
-      return;
+    // Check API key if configured — use timing-safe comparison to prevent timing attacks
+    if (config.admin.apiKey && apiKey) {
+      const keyA = Buffer.from(config.admin.apiKey);
+      const keyB = Buffer.from(apiKey);
+      if (keyA.length === keyB.length && timingSafeEqual(keyA, keyB)) {
+        const tokens = generateTokenPair('admin', 'admin-api', { admin: true });
+        res.json({
+          userId: 'admin',
+          admin: true,
+          ...tokens,
+        });
+        return;
+      }
     }
 
     res.status(401).json({ error: 'Invalid API key' });

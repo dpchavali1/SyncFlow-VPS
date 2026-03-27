@@ -75,7 +75,7 @@ class BatteryAwareServiceManager private constructor(private val context: Contex
     private var findMyPhoneService: FindMyPhoneService? = null
     private var linkSharingService: LinkSharingService? = null
     private var fileTransferService: FileTransferService? = null
-    private var photoSyncService: PhotoSyncService? = null
+    // photoSyncService removed
     private var hotspotControlService: HotspotControlService? = null
     private var dndSyncService: DNDSyncService? = null
     private var mediaControlService: MediaControlService? = null
@@ -252,10 +252,7 @@ class BatteryAwareServiceManager private constructor(private val context: Contex
                 if (userEnabledServices.contains("files") && shouldStartService("files")) {
                     startFileTransferService()
                 }
-                val prefsManager = PreferencesManager(context)
-                if (prefsManager.photoSyncEnabled.value && shouldStartService("photos")) {
-                    startPhotoSyncService()
-                }
+                // Photo sync removed
             }
         }
     }
@@ -481,17 +478,6 @@ class BatteryAwareServiceManager private constructor(private val context: Contex
         updateServiceState("files", ServiceState.RUNNING)
     }
 
-    private fun startPhotoSyncService() {
-        if (!DesktopSyncService.hasPairedDevices(context)) {
-            return
-        }
-        if (photoSyncService == null) {
-            photoSyncService = PhotoSyncService(context)
-        }
-        photoSyncService?.startSync()
-        updateServiceState("photos", ServiceState.RUNNING)
-    }
-
     private fun stopService(serviceName: String) {
         when (serviceName) {
             "intelligent_sync" -> {
@@ -506,7 +492,7 @@ class BatteryAwareServiceManager private constructor(private val context: Contex
             "find_phone" -> findMyPhoneService?.stopListening()
             "links" -> linkSharingService?.stopListening()
             "files" -> fileTransferService?.stopListening()
-            "photos" -> photoSyncService?.stopSync()
+            "photos" -> { /* photo sync removed */ }
             "hotspot" -> hotspotControlService?.stopListening()
             "dnd" -> dndSyncService?.stopSync()
             "media" -> mediaControlService?.stopListening()
@@ -532,7 +518,7 @@ class BatteryAwareServiceManager private constructor(private val context: Contex
         val isOnWifi = _isOnWifi.value
 
         if (batteryLevel < PREF_LOW_BATTERY_THRESHOLD && !isCharging) {
-            recommendations.add("Low battery detected - consider disabling photo sync and file transfer")
+            recommendations.add("Low battery detected - consider disabling file transfer")
         }
 
         if (!isOnWifi) {

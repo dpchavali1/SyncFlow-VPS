@@ -10,7 +10,6 @@ import com.phoneintegration.app.SmsRepository
 import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
 import java.util.concurrent.TimeUnit
@@ -599,10 +598,7 @@ class OutgoingMessageWorker(
      */
     private suspend fun downloadAttachment(url: String): ByteArray? = withContext(Dispatchers.IO) {
         try {
-            val client = OkHttpClient.Builder()
-                .connectTimeout(30, TimeUnit.SECONDS)
-                .readTimeout(60, TimeUnit.SECONDS)
-                .build()
+            val client = VPSClient.getInstance(applicationContext).fileTransferHttpClient
 
             val request = Request.Builder()
                 .url(url)

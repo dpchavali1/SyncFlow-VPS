@@ -1257,7 +1257,6 @@ struct SubscriptionSettingsView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     featureRow("Unlimited SMS & MMS")
                     featureRow("Phone calls from Mac")
-                    featureRow("Photo sync (Premium)")
                     featureRow("2GB uploads/month")
                     featureRow("1GB cloud storage")
                     featureRow("End-to-end encryption")
@@ -1579,8 +1578,8 @@ struct AboutView: View {
                     text: "Make and receive phone calls from your desktop")
                 AboutFeatureRow(icon: "video.fill", color: .orange,
                     text: "Video and audio calls between SyncFlow users")
-                AboutFeatureRow(icon: "photo.on.rectangle.angled", color: .purple,
-                    text: "Photo sync and file transfer with private storage")
+                AboutFeatureRow(icon: "doc.on.doc.fill", color: .purple,
+                    text: "File transfer with private cloud storage")
                 AboutFeatureRow(icon: "shield.fill", color: .red,
                     text: "AI spam filtering — block junk before it reaches you")
                 AboutFeatureRow(icon: "person.2.fill", color: .cyan,

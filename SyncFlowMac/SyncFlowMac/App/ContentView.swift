@@ -43,7 +43,6 @@
 //
 // SHEET PRESENTATIONS:
 // --------------------
-// - Photo Gallery: showPhotoGallery
 // - Notifications: showNotifications
 // - Scheduled Messages: showScheduledMessages
 //
@@ -75,9 +74,6 @@ struct ContentView: View {
     /// The central application state injected from SyncFlowMacApp
     @EnvironmentObject var appState: AppState
 
-    /// VPS mode is always enabled
-    private var isVPSMode: Bool { true }
-
     // =========================================================================
     // MARK: - View Body
     // =========================================================================
@@ -94,10 +90,6 @@ struct ContentView: View {
         .animation(.spring(), value: appState.lastAnsweredCallId)
         .animation(.easeInOut, value: appState.incomingSyncFlowCall != nil)
         .animation(.easeInOut, value: appState.showSyncFlowCallView)
-        .sheet(isPresented: $appState.showPhotoGallery) {
-            PhotoGalleryView(photoService: appState.photoSyncService)
-                .frame(minWidth: 500, minHeight: 400)
-        }
         .sheet(isPresented: $appState.showNotifications) {
             NotificationListView(notificationService: appState.notificationMirrorService)
                 .frame(minWidth: 400, minHeight: 350)
@@ -112,10 +104,8 @@ struct ContentView: View {
     private var mainContent: some View {
         if appState.isPaired {
             MainView()
-        } else if isVPSMode {
-            VPSPairingView()
         } else {
-            PairingView()
+            VPSPairingView()
         }
     }
 
@@ -234,13 +224,16 @@ struct MainView: View {
     @StateObject private var messageStore = MessageStore()
 
     /// Subscription service for premium feature gating
-    @StateObject private var subscriptionService = SubscriptionService.shared
+    @ObservedObject private var subscriptionService = SubscriptionService.shared
 
     /// Usage tracking for free tier limits
     @StateObject private var usageTracker = UsageTracker.shared
 
     /// Media control service for remote playback control
     @ObservedObject private var mediaControlService = MediaControlService.shared
+
+    /// VPS service for connection status indicator
+    @ObservedObject private var vpsService = VPSService.shared
 
     /// Local search text for filtering conversations
     @State private var searchText = ""
@@ -309,10 +302,7 @@ struct MainView: View {
                     }
                 }
 
-                // Bottom upgrade banner for free/trial users
-                if !subscriptionService.isPremium {
-                    UpgradeBanner()
-                }
+                // UpgradeBanner removed - SubscriptionStatusBanner at top is sufficient
             }
         }
         .navigationTitle("SyncFlow")
@@ -324,6 +314,12 @@ struct MainView: View {
                     }
                     .help("New Message")
                 }
+            }
+            ToolbarItem(placement: .automatic) {
+                Circle()
+                    .fill(vpsService.isConnected ? Color.green : Color.orange)
+                    .frame(width: 8, height: 8)
+                    .help(vpsService.isConnected ? "Connected" : "Reconnecting...")
             }
         }
         .sheet(isPresented: $appState.showNewMessage) {
@@ -507,11 +503,6 @@ struct SideRail: View {
                     }
                     .buttonStyle(.plain)
                     .help("Discover Deals")
-                    .onAppear {
-                        withAnimation(.easeInOut(duration: 2).repeatForever(autoreverses: true)) {
-                            dealsIconPulse = true
-                        }
-                    }
                 } else {
                     Button(action: {
                         withAnimation(SFAnimations.snappy) { selectedTab = tab }
@@ -578,7 +569,7 @@ struct SideRail: View {
                         bottomButtonHovered = hovering ? "sync" : (bottomButtonHovered == "sync" ? nil : bottomButtonHovered)
                     }
                 }
-                .onChange(of: isSyncing) { newValue in
+                .onChange(of: isSyncing) { _, newValue in
                     if newValue {
                         withAnimation(.linear(duration: 1).repeatForever(autoreverses: false)) {
                             syncRotation = 360
@@ -689,6 +680,12 @@ struct MessagesTabView: View {
     /// Search text binding for filtering conversations
     @Binding var searchText: String
 
+    /// Whether to show the error alert
+    @State private var showErrorAlert = false
+
+    /// The error message text to display
+    @State private var errorMessage = ""
+
     var body: some View {
         NavigationSplitView {
             // Conversations List (Sidebar)
@@ -710,6 +707,19 @@ struct MessagesTabView: View {
             } else {
                 EmptyStateView()
             }
+        }
+        .onChange(of: messageStore.error?.localizedDescription) { _, newValue in
+            if let message = newValue {
+                errorMessage = message
+                showErrorAlert = true
+            }
+        }
+        .alert("Sync Error", isPresented: $showErrorAlert) {
+            Button("Dismiss", role: .cancel) {
+                messageStore.error = nil
+            }
+        } message: {
+            Text(errorMessage)
         }
     }
 }
@@ -938,7 +948,7 @@ struct UsageLimitWarningBanner: View {
 /// Promotional banner shown at the bottom for free tier users.
 ///
 /// Encourages upgrade to SyncFlow Pro with:
-/// - Feature highlights (photo sync, 500MB storage)
+/// - Feature highlights (1GB storage, priority support)
 /// - Current pricing
 /// - Direct upgrade button opening paywall
 struct UpgradeBanner: View {
@@ -964,13 +974,14 @@ struct UpgradeBanner: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Upgrade to SyncFlow Pro")
                     .font(SyncFlowTypography.headlineSmall)
-                Text("Unlock photo sync, 1GB storage, and remove this banner")
+                Text("Unlock 1GB storage, priority support, and remove this banner")
                     .font(SyncFlowTypography.bodySmall)
                     .foregroundColor(SyncFlowColors.textSecondary)
             }
 
             Spacer()
 
+            // Fallback price: keep in sync with SubscriptionProduct.monthly in SubscriptionService
             Text("$4.99/mo")
                 .font(SyncFlowTypography.bodySmall)
                 .foregroundColor(SyncFlowColors.textSecondary)

@@ -393,18 +393,6 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
             if (cached.isNotEmpty()) {
                 Log.d("SmsViewModel", "INSTANT: Loaded ${cached.size} conversations from persistent cache in ${System.currentTimeMillis() - startTime}ms")
 
-                // Ads conversation (always at top)
-                val adsConversation = ConversationInfo(
-                    threadId = -1L,
-                    address = "syncflow_ads",
-                    contactName = "SyncFlow Deals",
-                    lastMessage = "Tap here to explore today's best offers!",
-                    timestamp = System.currentTimeMillis(),
-                    unreadCount = 0,
-                    photoUri = null,
-                    isAdConversation = true
-                )
-
                 val conversationList = cached.map { it.toConversationInfo() }
                 cachedConversations = conversationList
                 // Mark cache as expired so it triggers a refresh on first loadConversations() call
@@ -412,7 +400,7 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
                 persistentCacheLoaded = true
 
                 withContext(Dispatchers.Main) {
-                    _conversations.value = listOf(adsConversation) + conversationList
+                    _conversations.value = conversationList
                     _isLoading.value = false // Never show loading
                 }
                 Log.d("SmsViewModel", "INSTANT: UI updated with cached data (marked as expired for refresh)")
@@ -794,27 +782,15 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
             // NEVER show loading spinner - we always have cached data or show empty
             _isLoading.value = false
 
-            // Ads conversation (always at top)
-            val adsConversation = ConversationInfo(
-                threadId = -1L,
-                address = "syncflow_ads",
-                contactName = "SyncFlow Deals",
-                lastMessage = "Tap here to explore today's best offers!",
-                timestamp = System.currentTimeMillis(),
-                unreadCount = 0,
-                photoUri = null,
-                isAdConversation = true
-            )
-
             // INSTANT: Show cached data if available AND fresh
             val cached = cachedConversations
             val cacheAge = System.currentTimeMillis() - lastLoadTime
             if (!forceReload && cached != null && cached.isNotEmpty() && cacheAge < CACHE_VALIDITY_MS) {
                 Log.d("SmsViewModel", "Using cached conversations (${cached.size} items, ${cacheAge}ms old)")
-                _conversations.value = listOf(adsConversation) + cached
+                _conversations.value = cached
 
                 // Refresh in background to get latest data
-                refreshConversationsInBackground(adsConversation)
+                refreshConversationsInBackground()
                 return@launch
             }
 
@@ -891,7 +867,7 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
             try {
                 cachedConversations = finalList
                 lastLoadTime = System.currentTimeMillis()
-                _conversations.value = listOf(adsConversation) + finalList
+                _conversations.value = finalList
                 _isLoading.value = false
                 initialLoadComplete = true
             } catch (e: Exception) {
@@ -929,7 +905,7 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
             // Background: Load groups (lowest priority, delayed)
             viewModelScope.launch(Dispatchers.IO) {
                 delay(1000) // Wait 1 second before loading groups
-                loadGroupsInBackground(smsList, adsConversation)
+                loadGroupsInBackground(smsList)
             }
 
             // Background: Sync MMS to Firebase (very low priority, delayed)
@@ -941,7 +917,7 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // Refresh conversations in background without blocking
-    private fun refreshConversationsInBackground(adsConversation: ConversationInfo) {
+    private fun refreshConversationsInBackground() {
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val conversations = repo.getConversations()
@@ -978,7 +954,7 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
                 lastLoadTime = System.currentTimeMillis()
 
                 withContext(Dispatchers.Main) {
-                    _conversations.value = listOf(adsConversation) + finalList
+                    _conversations.value = finalList
                 }
 
                 // Save to persistent cache
@@ -993,7 +969,7 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     // Load groups in background
-    private suspend fun loadGroupsInBackground(smsList: List<ConversationInfo>, adsConversation: ConversationInfo) {
+    private suspend fun loadGroupsInBackground(smsList: List<ConversationInfo>) {
         try {
             val groups = groupRepository.getAllGroupsWithMembers().first()
 
@@ -1028,7 +1004,7 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
                 lastLoadTime = System.currentTimeMillis()
 
                 withContext(Dispatchers.Main) {
-                    _conversations.value = listOf(adsConversation) + allConversations
+                    _conversations.value = allConversations
                 }
 
                 // Sync groups to Firebase (low priority)
@@ -1101,18 +1077,6 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
             val pinnedIds = withContext(Dispatchers.IO) { pinnedDao.getPinnedIds().toSet() }
             val mutedIds = withContext(Dispatchers.IO) { mutedDao.getMutedIds().toSet() }
 
-            // Ads conversation (always at top)
-            val adsConversation = ConversationInfo(
-                threadId = -1L,
-                address = "syncflow_ads",
-                contactName = "SyncFlow Deals",
-                lastMessage = "Tap here to explore today's best offers!",
-                timestamp = System.currentTimeMillis(),
-                unreadCount = 0,
-                photoUri = null,
-                isAdConversation = true
-            )
-
             // Mark pinned/muted and sort
             val list = conversations.map { conv ->
                 conv.copy(
@@ -1126,7 +1090,7 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
 
             cachedConversations = list
             lastLoadTime = System.currentTimeMillis()
-            _conversations.value = listOf(adsConversation) + list
+            _conversations.value = list
 
             resolveContactNamesBatch(list)
             resolveContactPhotos(list)
@@ -2284,7 +2248,6 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val ok = DealsRepository(getApplication()).refreshDeals()
             onDone(ok)
-            // Force reload conversations, including SyncFlow Deals
             loadConversations()
         }
     }

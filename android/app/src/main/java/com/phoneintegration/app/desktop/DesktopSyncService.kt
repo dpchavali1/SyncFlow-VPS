@@ -211,7 +211,7 @@ class DesktopSyncService(context: Context) {
                     Log.e(TAG, "Error polling whitelist", e)
                 }
             }
-            delay(60000L) // Poll every 60 seconds
+            delay(300000L) // Poll every 5 minutes
         }
     }
 
@@ -225,7 +225,7 @@ class DesktopSyncService(context: Context) {
                     Log.e(TAG, "Error polling blocklist", e)
                 }
             }
-            delay(60000L) // Poll every 60 seconds
+            delay(300000L) // Poll every 5 minutes
         }
     }
 

@@ -101,7 +101,7 @@
           "introductoryOffer" : null,
           "localizations" : [
             {
-              "description" : "Full access to all SyncFlow Pro features including photo sync",
+              "description" : "Full access to all SyncFlow Pro features",
               "displayName" : "Monthly",
               "locale" : "en_US"
             }

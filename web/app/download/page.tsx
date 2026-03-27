@@ -11,6 +11,11 @@ export default function DownloadPage() {
     setIsPaired(!!localStorage.getItem('syncflow_user_id'))
   }, [])
 
+  // TODO: These values are hardcoded and must be updated manually on each release.
+  // Ideally they should be fetched from a release manifest API endpoint
+  // (e.g. GET /api/releases/latest) or injected at build time via environment
+  // variables (NEXT_PUBLIC_APP_VERSION, NEXT_PUBLIC_MAC_SHA256, etc.) so the
+  // download page stays in sync with the actual published artifacts.
   const version = '1.0.0'
   const downloadBase = 'https://api.sfweb.app/downloads'
   const macFileSize = '19 MB'
@@ -416,7 +421,7 @@ export default function DownloadPage() {
             <div>
               <h3 className="font-semibold mb-2 dark:text-white">Do I need a subscription?</h3>
               <p className="text-slate-600 dark:text-slate-300">
-                SyncFlow offers a free tier with basic features. Premium features like photo sync and increased storage require a subscription ($4.99/month).
+                SyncFlow offers a free tier with basic features. Premium features like increased storage and priority support require a subscription ($4.99/month).
               </p>
             </div>
 

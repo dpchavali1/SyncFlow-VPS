@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [
@@ -41,6 +43,13 @@ abstract class AppDatabase : RoomDatabase() {
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
+        // Migration from version 8 to 9 — schema already matches, no SQL needed
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // No-op: schema was already at v9 when destructive migration was removed
+            }
+        }
+
         fun getInstance(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -48,7 +57,9 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "syncflow_database"
                 )
-                    .fallbackToDestructiveMigration()
+                    // Do NOT use fallbackToDestructiveMigration — it silently destroys all local data.
+                    // Write proper Room migrations for each schema version bump.
+                    .addMigrations(MIGRATION_8_9)
                     .build()
                 INSTANCE = instance
                 instance

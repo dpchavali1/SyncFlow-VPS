@@ -112,7 +112,8 @@ fun SettingsScreen(
     onNavigateToSpamFilter: () -> Unit = {},
     onNavigateToSupport: () -> Unit = {},
     onNavigateToFileTransfer: () -> Unit = {},
-    onNavigateToDeleteAccount: () -> Unit = {}
+    onNavigateToDeleteAccount: () -> Unit = {},
+    onNavigateToBlocked: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val activity = context as? MainActivity
@@ -257,7 +258,7 @@ fun SettingsScreen(
                         AboutFeatureItem(icon = Icons.Filled.Message, text = "Full SMS/MMS — send and receive from Mac or web")
                         AboutFeatureItem(icon = Icons.Filled.Phone, text = "Make and receive phone calls from your desktop")
                         AboutFeatureItem(icon = Icons.Filled.VideoCall, text = "Video & audio calls between SyncFlow users")
-                        AboutFeatureItem(icon = Icons.Filled.PhotoLibrary, text = "Photo sync and file transfer with private cloud storage")
+                        AboutFeatureItem(icon = Icons.Filled.Folder, text = "File transfer with private cloud storage")
                         AboutFeatureItem(icon = Icons.Filled.Shield, text = "AI spam filtering — block junk before it reaches you")
                         AboutFeatureItem(icon = Icons.Filled.Contacts, text = "Contacts and call history sync across all devices")
                         AboutFeatureItem(icon = Icons.Filled.Devices, text = "Native apps — built for each platform, not a web wrapper")
@@ -562,7 +563,7 @@ fun SettingsScreen(
                 icon = Icons.Filled.Block,
                 title = "Blocked Numbers",
                 subtitle = "Manage blocked numbers",
-                onClick = { /* TODO */ }
+                onClick = onNavigateToBlocked
             )
 
             SettingsItem(

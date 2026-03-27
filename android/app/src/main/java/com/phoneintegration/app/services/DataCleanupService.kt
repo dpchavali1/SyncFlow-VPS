@@ -100,7 +100,7 @@ class DataCleanupService private constructor(private val context: Context) {
                 "Old session data"
             ),
             "preserved" to listOf(
-                "User photos and documents",
+                "User documents and files",
                 "Conversation history",
                 "User preferences and settings",
                 "Contacts and address book",

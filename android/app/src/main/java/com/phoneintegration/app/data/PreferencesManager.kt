@@ -100,12 +100,11 @@ class PreferencesManager(context: Context) {
     var notificationMirrorEnabled = mutableStateOf(prefs.getBoolean("notification_mirror_enabled", false))
         private set
 
-    // Photo Sync Setting (default OFF — user must opt-in)
-    var photoSyncEnabled = mutableStateOf(prefs.getBoolean("photo_sync_enabled", false))
+    // Photo sync has been removed. Stubs kept for compatibility.
+    var photoSyncEnabled = mutableStateOf(false)
         private set
 
-    // Photo Sync Limit (how many recent photos to keep synced, default 20)
-    var photoSyncLimit = mutableStateOf(prefs.getInt("photo_sync_limit", 20))
+    var photoSyncLimit = mutableStateOf(0)
         private set
 
     // Recovery Backup Settings (enabled by default for seamless account recovery)
@@ -203,6 +202,11 @@ class PreferencesManager(context: Context) {
         private set
 
     // Message Reactions (local-only)
+    // TODO: Reactions are stored as a pipe-delimited string ("msgId=emoji|msgId=emoji|...").
+    // This format has scalability issues: the string grows unbounded as more reactions are
+    // added, and SharedPreferences blocks the UI thread when writing large strings. This
+    // should be migrated to a Room database table in a future version. Changing the storage
+    // format now would require a migration path to preserve existing user reactions.
     private val reactionsKey = "message_reactions"
 
     // Quick Reply Templates
@@ -341,16 +345,11 @@ class PreferencesManager(context: Context) {
     }
 
     fun setPhotoSyncEnabled(enabled: Boolean) {
-        photoSyncEnabled.value = enabled
-        prefs.edit().putBoolean("photo_sync_enabled", enabled).apply()
-        android.util.Log.d("PreferencesManager", "Photo sync enabled set to: $enabled")
+        // Photo sync has been removed - no-op
     }
 
     fun setPhotoSyncLimit(limit: Int) {
-        val clamped = limit.coerceIn(5, 100)
-        photoSyncLimit.value = clamped
-        prefs.edit().putInt("photo_sync_limit", clamped).apply()
-        android.util.Log.d("PreferencesManager", "Photo sync limit set to: $clamped")
+        // Photo sync has been removed - no-op
     }
 
     fun setRecoveryBackupEnabled(context: Context, enabled: Boolean) {

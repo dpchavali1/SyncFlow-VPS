@@ -16,52 +16,50 @@ import androidx.core.app.NotificationCompat
 import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.*
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import java.io.File
-import java.util.concurrent.TimeUnit
 
 /**
  * FileTransferService.kt - Cross-Platform File Transfer Service for SyncFlow
  *
  * This service enables seamless file sharing between Android devices and macOS/desktop
- * clients using Cloudflare R2 for storage and Firebase Realtime Database for coordination.
+ * clients using Cloudflare R2 for storage and the VPS API for coordination.
  *
  * ## Architecture Overview
  *
  * The file transfer system uses a three-component architecture:
  *
- * 1. **Firebase Realtime Database** - Coordinates transfers and stores metadata
- *    - Path: `users/{userId}/file_transfers/{transferId}`
+ * 1. **VPS API** - Coordinates transfers and stores metadata
+ *    - Endpoint: `/api/file-transfers`
  *    - Stores: fileName, fileSize, contentType, r2Key, status, timestamp
  *
  * 2. **Cloudflare R2 Storage** - Stores actual file content
- *    - Accessed via presigned URLs from Cloud Functions
+ *    - Accessed via presigned URLs from VPS API
  *    - No egress fees (unlike S3), enabling generous transfer limits
  *
- * 3. **Firebase Cloud Functions** - Provides secure presigned URL generation
- *    - `getR2UploadUrl` - Generate presigned PUT URL for uploads
- *    - `getR2DownloadUrl` - Generate presigned GET URL for downloads
- *    - `confirmR2Upload` - Confirm upload completion and record usage
- *    - `deleteR2File` - Clean up files after successful download
+ * 3. **VPS API Endpoints** - Provides secure presigned URL generation
+ *    - `POST /api/file-transfers/upload-url` - Generate presigned PUT URL for uploads
+ *    - `POST /api/file-transfers/download-url` - Generate presigned GET URL for downloads
+ *    - `POST /api/file-transfers/confirm-upload` - Confirm upload completion and record usage
+ *    - `DELETE /api/file-transfers/:id` - Clean up files after successful download
  *
  * ## Transfer Flow
  *
  * **Upload (Android -> Desktop):**
  * 1. App calls [uploadFile] with local file
  * 2. Service checks subscription tier limits via [canTransfer]
- * 3. Gets presigned upload URL from `getR2UploadUrl` Cloud Function
+ * 3. Gets presigned upload URL from VPS API
  * 4. Uploads file directly to R2 via HTTP PUT
- * 5. Confirms upload via `confirmR2Upload` (records usage)
- * 6. Creates transfer record in Firebase Database
- * 7. Desktop client receives transfer via Firebase listener
+ * 5. Confirms upload via VPS API (records usage)
+ * 6. Creates transfer record in VPS database
+ * 7. Desktop client receives transfer via VPS WebSocket
  *
  * **Download (Desktop -> Android):**
- * 1. Desktop creates transfer record with r2Key in Firebase
- * 2. This service's [ChildEventListener] detects new transfer
+ * 1. Desktop creates transfer record with r2Key via VPS API
+ * 2. This service polls VPS for new transfers
  * 3. Service validates transfer (source, status, age, size)
- * 4. Gets presigned download URL from Cloud Function
+ * 4. Gets presigned download URL from VPS API
  * 5. Downloads file to temp directory
  * 6. Saves to Downloads/SyncFlow via MediaStore (Android 10+) or direct file access
  * 7. Updates transfer status and cleans up R2 file
@@ -77,7 +75,7 @@ import java.util.concurrent.TimeUnit
  *
  * ## Battery Optimization Considerations
  *
- * - Uses Firebase Realtime Database listeners (efficient long-polling)
+ * - Uses VPS polling for incoming transfer detection
  * - Downloads run on [Dispatchers.IO] to avoid blocking
  * - File age check (5 minutes) prevents processing stale transfers
  * - Duplicate prevention via [processingFileIds] set
@@ -90,7 +88,6 @@ import java.util.concurrent.TimeUnit
  * - Notifications are auto-cancelled on tap
  *
  * @see ClipboardSyncService For text-based sync
- * @see PhotoSyncService For photo thumbnail sync
  */
 
 // =============================================================================
@@ -139,12 +136,8 @@ class FileTransferService(context: Context) {
     /** VPS Client for API calls */
     private val vpsClient = VPSClient.getInstance(this.context)
 
-    /** HTTP client for file downloads/uploads */
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
-        .writeTimeout(120, TimeUnit.SECONDS)
-        .build()
+    /** HTTP client for file downloads/uploads - reuses VPSClient's shared client with extended timeouts */
+    private val httpClient = vpsClient.fileTransferHttpClient
 
     /** Polling job for file transfers */
     private var pollingJob: Job? = null
@@ -170,10 +163,10 @@ class FileTransferService(context: Context) {
     companion object {
         private const val TAG = "FileTransferService"
 
-        /** Firebase Database path for file transfer records */
+        /** VPS API path for file transfer records */
         private const val FILE_TRANSFERS_PATH = "file_transfers"
 
-        /** Firebase Database root path for user data */
+        /** VPS API root path for user data */
         private const val USERS_PATH = "users"
 
         /** Notification channel ID for file transfer notifications */
@@ -310,15 +303,15 @@ class FileTransferService(context: Context) {
     /**
      * Data class representing a file transfer record.
      *
-     * Maps to Firebase Database structure at:
-     * `users/{userId}/file_transfers/{id}`
+     * Maps to VPS database structure at:
+     * `file_transfers` table (keyed by user_id + id)
      *
-     * @property id Unique transfer identifier (Firebase push key or timestamp)
+     * @property id Unique transfer identifier (UUID or timestamp)
      * @property originalId Original ID from source device (for deduplication)
      * @property fileName Display name of the file
      * @property fileSize File size in bytes
      * @property contentType MIME type (e.g., "image/jpeg", "application/pdf")
-     * @property downloadUrl Presigned download URL (legacy Firebase Storage)
+     * @property downloadUrl Presigned download URL from R2
      * @property source Origin device type ("android" or "macos")
      * @property timestamp Unix timestamp of transfer creation
      * @property status Transfer status: "pending", "downloading", "downloaded", "failed"
@@ -778,7 +771,7 @@ class FileTransferService(context: Context) {
     }
 
     // -------------------------------------------------------------------------
-    // REGION: Firebase Status Updates
+    // REGION: VPS Status Updates
     // -------------------------------------------------------------------------
 
     /**

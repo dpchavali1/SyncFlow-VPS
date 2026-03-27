@@ -9,7 +9,7 @@
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Smartphone, Monitor, Globe, Check, Download, Shield, MessageSquare, Phone, Image, FileText, RefreshCw, AlertTriangle } from 'lucide-react';
+import { Smartphone, Monitor, Globe, Check, Download, Shield, MessageSquare, Phone, FileText, RefreshCw, AlertTriangle } from 'lucide-react';
 import QRCode from 'qrcode';
 import vpsService, { VPSUser } from '@/lib/vps';
 import { scaleIn, fadeIn } from '@/lib/animations';
@@ -336,7 +336,6 @@ export default function VPSPairingScreen({ onPairingComplete, onError }: VPSPair
               <FeatureItem icon={<Smartphone className="w-3.5 h-3.5" />} text="Contacts sync" color="text-cyan-500" />
               <FeatureItem icon={<FileText className="w-3.5 h-3.5" />} text="File transfer" color="text-emerald-500" />
               <FeatureItem icon={<Shield className="w-3.5 h-3.5" />} text="E2E encrypted" color="text-amber-500" />
-              <FeatureItem icon={<Image className="w-3.5 h-3.5" />} text="Photo sync" color="text-pink-500" />
             </div>
           </div>
         </motion.div>

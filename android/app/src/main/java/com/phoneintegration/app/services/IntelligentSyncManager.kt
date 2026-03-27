@@ -412,11 +412,8 @@ class IntelligentSyncManager private constructor(private val context: Context) {
     }
 
     private suspend fun syncMediumPriorityData(userId: String) {
-        // Sync photos, media, analytics (only when conditions are good)
+        // Sync media, analytics (only when conditions are good)
         try {
-            if (shouldSyncPhotos()) {
-                syncPhotos()
-            }
             if (shouldSyncMedia()) {
                 syncMedia()
             }
@@ -447,13 +444,8 @@ class IntelligentSyncManager private constructor(private val context: Context) {
         val isOnWifi = batteryManager.isOnWifi.value
         val batteryLevel = batteryManager.batteryLevel.value
 
-        // Only sync media/photos when conditions are optimal
+        // Only sync media when conditions are optimal
         return isCharging && isOnWifi && batteryLevel > 50
-    }
-
-    private fun shouldSyncPhotos(): Boolean {
-        // Additional logic for photo sync (check if there are pending uploads, etc.)
-        return true
     }
 
     private fun shouldSyncMedia(): Boolean {
@@ -619,14 +611,6 @@ class IntelligentSyncManager private constructor(private val context: Context) {
             Log.d(TAG, "Synced ${response.messages.size} messages")
         } catch (e: Exception) {
             Log.e(TAG, "Error syncing messages", e)
-        }
-    }
-    private suspend fun syncPhotos() {
-        try {
-            val photos = vpsClient.getPhotos()
-            Log.d(TAG, "Synced ${photos.size} photos")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error syncing photos", e)
         }
     }
     private suspend fun syncMedia() { /* Implementation via VPS */ }

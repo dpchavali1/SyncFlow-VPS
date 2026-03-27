@@ -48,8 +48,8 @@ public class VPSService: NSObject, ObservableObject {
     private let keychainDeviceId = "com.syncflow.vps.deviceId"
 
     // ── Authentication state ────────────────────────────────────────────────
-    var accessToken: String?
-    var refreshToken: String?
+    private(set) var accessToken: String?
+    private(set) var refreshToken: String?
     @Published public private(set) var userId: String?
     @Published public private(set) var deviceId: String?
     @Published public private(set) var isAuthenticated: Bool = false
@@ -138,11 +138,9 @@ public class VPSService: NSObject, ObservableObject {
 
         isAuthenticated = accessToken != nil && userId != nil
 
-        #if DEBUG
         if isAuthenticated {
-            print("[VPS] Restored authentication for user \(userId ?? "unknown")")
+            Logger.info("Restored authentication for user \(userId ?? "unknown")", category: .vps)
         }
-        #endif
 
         // Connect WebSocket if we have valid tokens
         if isAuthenticated {
@@ -255,9 +253,7 @@ public class VPSService: NSObject, ObservableObject {
                 retryAfterSeconds = max(0.5, retry)
             }
 
-            #if DEBUG
-            print("[VPS] Rate limited (429). Retrying in \(retryAfterSeconds)s (attempt \(retryCount + 1))")
-            #endif
+            Logger.warning("Rate limited (429). Retrying in \(retryAfterSeconds)s (attempt \(retryCount + 1))", category: .vps)
             try await Task.sleep(nanoseconds: UInt64(retryAfterSeconds * 1_000_000_000))
             return try await self.request(method, path, body: body, skipAuth: skipAuth, retryCount: retryCount + 1)
         }

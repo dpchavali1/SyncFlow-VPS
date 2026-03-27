@@ -12,7 +12,7 @@
  * - Recovery code management for account recovery
  * - Initial data sync (messages, contacts, call history)
  * - Device limit tracking based on user plan
- * - Photo sync capability
+ * - File transfer capability
  *
  * Architecture:
  * - Uses DesktopSyncService for pairing and sync operations
@@ -56,7 +56,6 @@ import com.phoneintegration.app.desktop.PairedDevice
 import com.phoneintegration.app.data.PreferencesManager
 import com.phoneintegration.app.e2ee.SignalProtocolManager
 import com.phoneintegration.app.desktop.NotificationMirrorService
-import com.phoneintegration.app.desktop.PhotoSyncService
 import com.phoneintegration.app.SmsRepository
 import com.phoneintegration.app.vps.VPSClient
 import com.phoneintegration.app.vps.VPSSyncService
@@ -223,34 +222,14 @@ fun DesktopIntegrationScreen(
     var isBackgroundSyncEnabled by remember { mutableStateOf(preferencesManager.backgroundSyncEnabled.value) }
     var hasNotificationPermission by remember { mutableStateOf(NotificationMirrorService.isEnabled(appContext)) }
     var isNotificationMirrorEnabled by remember { mutableStateOf(preferencesManager.notificationMirrorEnabled.value) }
-    var isPhotoSyncEnabled by remember { mutableStateOf(preferencesManager.photoSyncEnabled.value) }
-
-    // Photo permission helper
-    fun hasPhotoPermission(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.checkSelfPermission(appContext, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED
-        } else {
-            ContextCompat.checkSelfPermission(appContext, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-        }
-    }
-
-    val photoPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (granted) {
-            isPhotoSyncEnabled = true
-            preferencesManager.setPhotoSyncEnabled(true)
-        } else {
-            isPhotoSyncEnabled = false
-            errorMessage = "Photo permission is required for photo sync. Please grant it in Settings."
-        }
-    }
+    // Photo sync feature has been removed - always false
+    var isPhotoSyncEnabled by remember { mutableStateOf(false) }
 
     fun refreshSettings() {
         isBackgroundSyncEnabled = preferencesManager.backgroundSyncEnabled.value
         hasNotificationPermission = NotificationMirrorService.isEnabled(appContext)
         isNotificationMirrorEnabled = preferencesManager.notificationMirrorEnabled.value
-        isPhotoSyncEnabled = preferencesManager.photoSyncEnabled.value
+        // isPhotoSyncEnabled always false - photo sync removed
         android.util.Log.d("DesktopIntegrationScreen", "Settings refreshed: notificationPermission=$hasNotificationPermission, mirrorEnabled=$isNotificationMirrorEnabled")
     }
 
@@ -708,10 +687,8 @@ fun DesktopIntegrationScreen(
                                     // Auto-enable sync toggles on first pairing
                                     preferencesManager.setBackgroundSyncEnabled(true)
                                     preferencesManager.setNotificationMirrorEnabled(true)
-                                    preferencesManager.setPhotoSyncEnabled(true)
                                     isBackgroundSyncEnabled = true
                                     isNotificationMirrorEnabled = true
-                                    isPhotoSyncEnabled = true
 
                                     // CallMonitorService is on-demand — FCM will start it when calls come in
                                     // Sync call history and SIM info as one-time operations here
@@ -889,10 +866,8 @@ fun DesktopIntegrationScreen(
                                         // Auto-enable sync toggles on pairing
                                         preferencesManager.setBackgroundSyncEnabled(true)
                                         preferencesManager.setNotificationMirrorEnabled(true)
-                                        preferencesManager.setPhotoSyncEnabled(true)
                                         isBackgroundSyncEnabled = true
                                         isNotificationMirrorEnabled = true
-                                        isPhotoSyncEnabled = true
 
                                         // CallMonitorService is on-demand — FCM will start it when calls come in
 
@@ -960,10 +935,8 @@ fun DesktopIntegrationScreen(
                                         // Auto-enable sync toggles on pairing
                                         preferencesManager.setBackgroundSyncEnabled(true)
                                         preferencesManager.setNotificationMirrorEnabled(true)
-                                        preferencesManager.setPhotoSyncEnabled(true)
                                         isBackgroundSyncEnabled = true
                                         isNotificationMirrorEnabled = true
-                                        isPhotoSyncEnabled = true
 
                                         // CallMonitorService is on-demand — FCM will start it when calls come in
                                         // Use NonCancellable so navigation away doesn't kill the sync
@@ -1781,114 +1754,7 @@ fun DesktopIntegrationScreen(
                 }
             }
 
-            // Photo Sync Setting
-            item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                Icons.Default.Photo,
-                                "Photo Sync",
-                                modifier = Modifier.size(24.dp),
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.width(16.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = "Photo Sync",
-                                    style = MaterialTheme.typography.titleMedium
-                                )
-                                Text(
-                                    text = "Auto-sync recent photos to Mac/Web",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(
-                                checked = isPhotoSyncEnabled,
-                                onCheckedChange = { enabled ->
-                                    if (enabled && !hasPhotoPermission()) {
-                                        // Request permission first — toggle will be set in the callback
-                                        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
-                                            Manifest.permission.READ_MEDIA_IMAGES
-                                        else
-                                            Manifest.permission.READ_EXTERNAL_STORAGE
-                                        photoPermissionLauncher.launch(permission)
-                                    } else {
-                                        isPhotoSyncEnabled = enabled
-                                        preferencesManager.setPhotoSyncEnabled(enabled)
-                                        android.util.Log.d("DesktopIntegrationScreen", "Photo sync ${if (enabled) "enabled" else "disabled"}")
-                                    }
-                                }
-                            )
-                        }
-                        if (isPhotoSyncEnabled) {
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            // Photo limit slider
-                            var photoLimit by remember { mutableStateOf(preferencesManager.photoSyncLimit.value.toFloat()) }
-                            Text(
-                                text = "Photos to sync: ${photoLimit.toInt()}",
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                            Slider(
-                                value = photoLimit,
-                                onValueChange = { photoLimit = it },
-                                onValueChangeFinished = {
-                                    preferencesManager.setPhotoSyncLimit(photoLimit.toInt())
-                                },
-                                valueRange = 5f..100f,
-                                steps = 18, // 5,10,15,...,100 = 20 values, 18 steps between
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Text(
-                                text = "More photos use more storage quota",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-
-                            Spacer(modifier = Modifier.height(8.dp))
-                            TextButton(
-                                onClick = {
-                                    scope.launch {
-                                        try {
-                                            isLoading = true
-                                            val photoSyncService = PhotoSyncService(appContext)
-                                            val result = photoSyncService.syncRecentPhotos()
-
-                                            result.onSuccess { message ->
-                                                successMessage = message
-                                                showSuccessDialog = true
-                                            }.onFailure { error ->
-                                                errorMessage = error.message ?: "Photo sync failed"
-                                            }
-
-                                        } catch (e: Exception) {
-                                            errorMessage = "Photo sync failed: ${e.message}"
-                                        } finally {
-                                            isLoading = false
-                                        }
-                                    }
-                                },
-                                enabled = !isLoading,
-                                modifier = Modifier.align(Alignment.End)
-                            ) {
-                                Text(if (isLoading) "Syncing..." else "Sync Now")
-                            }
-                        }
-                    }
-                }
-            }
+            // Photo Sync Setting — removed
         }
     }
 

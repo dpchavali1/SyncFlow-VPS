@@ -8,20 +8,12 @@
  *                    then removes the user record itself.
  */
 
-import { S3Client, DeleteObjectCommand } from '@aws-sdk/client-s3';
-import { config } from '../../config';
+import { DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { query, transaction } from '../../services/database';
+import { s3Client, R2_BUCKET } from '../../services/r2';
 
-// ── R2 client (only if configured) ──────────────────────────────────────────
-
-export const s3Client = config.r2.endpoint ? new S3Client({
-  region: 'auto',
-  endpoint: config.r2.endpoint,
-  credentials: {
-    accessKeyId: config.r2.accessKeyId,
-    secretAccessKey: config.r2.secretAccessKey,
-  },
-}) : null;
+// Re-export s3Client for backward compatibility with other admin sub-routers
+export { s3Client };
 
 // ── deleteR2Objects ─────────────────────────────────────────────────────────
 /**
@@ -36,7 +28,7 @@ export async function deleteR2Objects(r2Keys: string[]): Promise<number> {
     const batch = r2Keys.slice(i, i + BATCH_SIZE).filter(Boolean);
     const results = await Promise.allSettled(
       batch.map(key =>
-        s3Client!.send(new DeleteObjectCommand({ Bucket: config.r2.bucketName, Key: key }))
+        s3Client!.send(new DeleteObjectCommand({ Bucket: R2_BUCKET, Key: key }))
       )
     );
     deleted += results.filter(r => r.status === 'fulfilled').length;

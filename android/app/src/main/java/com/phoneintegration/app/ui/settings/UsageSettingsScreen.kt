@@ -77,7 +77,6 @@ private data class UsageSummary(
     val monthlyUploadBytes: Long,
     val monthlyMmsBytes: Long,
     val monthlyFileBytes: Long,
-    val monthlyPhotoBytes: Long,
     val lastUpdatedAt: Long?,
     val isPaid: Boolean,
     val monthlyUploadLimit: Long,
@@ -324,7 +323,7 @@ fun UsageSettingsScreen(onBack: () -> Unit) {
                                 progress = ratio(summary.monthlyUploadBytes, monthlyLimit)
                             )
                             Text(
-                                text = "MMS: ${formatBytes(summary.monthlyMmsBytes)} • Photos: ${formatBytes(summary.monthlyPhotoBytes)} • Files: ${formatBytes(summary.monthlyFileBytes)}",
+                                text = "MMS: ${formatBytes(summary.monthlyMmsBytes)} • Files: ${formatBytes(summary.monthlyFileBytes)}",
                                 style = MaterialTheme.typography.bodySmall
                             )
                             if (summary.monthlyResetDate != null) {
@@ -465,7 +464,6 @@ private fun parseUsageFromVPS(data: VPSUsageData): UsageSummary {
         monthlyUploadBytes = data.monthlyUploadBytes,
         monthlyMmsBytes = data.monthlyMmsBytes,
         monthlyFileBytes = data.monthlyFileBytes,
-        monthlyPhotoBytes = data.monthlyPhotoBytes,
         lastUpdatedAt = data.lastUpdatedAt,
         isPaid = isPaid,
         monthlyUploadLimit = if (data.monthlyUploadLimit > 0) data.monthlyUploadLimit
@@ -487,7 +485,6 @@ private fun defaultUsageSummary(): UsageSummary {
         monthlyUploadBytes = 0L,
         monthlyMmsBytes = 0L,
         monthlyFileBytes = 0L,
-        monthlyPhotoBytes = 0L,
         lastUpdatedAt = null,
         isPaid = false,
         monthlyUploadLimit = FREE_MONTHLY_UPLOAD_BYTES,

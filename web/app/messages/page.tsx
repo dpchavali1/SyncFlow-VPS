@@ -18,14 +18,16 @@ import {
 } from '@/lib/firebase'
 import vpsService from '@/lib/vps'
 import { decryptDataKey, decryptMessageBody, hasEncryptedKeyPair, hasLegacyKeyPair, importSyncGroupKeypair } from '@/lib/e2ee'
+import { useAuth } from '@/lib/hooks/useAuth'
 import ConversationList from '@/components/ConversationList'
 import MessageView from '@/components/MessageView'
-import { PhotoGallery } from '@/components/PhotoGallery'
 import Header from '@/components/Header'
 import AIAssistant from '@/components/AIAssistant'
 import AdBanner from '@/components/AdBanner'
 
-const mmsDownloadUrlCache = new Map<string, string>()
+const MMS_CACHE_MAX_SIZE = 500
+const MMS_CACHE_TTL_MS = 45 * 60 * 1000 // 45 minutes
+const mmsDownloadUrlCache = new Map<string, { url: string; timestamp: number }>()
 const mmsDownloadUrlInflight = new Map<string, Promise<string>>()
 
 const normalizeMmsParts = (raw: any): any[] => {
@@ -44,8 +46,13 @@ const normalizeMmsParts = (raw: any): any[] => {
 }
 
 const getCachedMmsDownloadUrl = async (fileKey: string): Promise<string | null> => {
-  if (mmsDownloadUrlCache.has(fileKey)) {
-    return mmsDownloadUrlCache.get(fileKey) || null
+  const cached = mmsDownloadUrlCache.get(fileKey)
+  if (cached) {
+    if (Date.now() - cached.timestamp < MMS_CACHE_TTL_MS) {
+      return cached.url
+    }
+    // TTL expired - remove stale entry
+    mmsDownloadUrlCache.delete(fileKey)
   }
 
   if (mmsDownloadUrlInflight.has(fileKey)) {
@@ -59,7 +66,14 @@ const getCachedMmsDownloadUrl = async (fileKey: string): Promise<string | null> 
   const request = vpsService
     .getFileDownloadUrl(fileKey)
     .then((url) => {
-      mmsDownloadUrlCache.set(fileKey, url)
+      // Evict oldest entries if cache is at capacity
+      if (mmsDownloadUrlCache.size >= MMS_CACHE_MAX_SIZE) {
+        const firstKey = mmsDownloadUrlCache.keys().next().value
+        if (firstKey !== undefined) {
+          mmsDownloadUrlCache.delete(firstKey)
+        }
+      }
+      mmsDownloadUrlCache.set(fileKey, { url, timestamp: Date.now() })
       return url
     })
     .catch((err) => {
@@ -106,6 +120,10 @@ const resolveMmsAttachments = async (rawParts: any): Promise<any[]> => {
 
 export default function MessagesPage() {
   const router = useRouter()
+  // Shared auth hook handles token restoration + redirect for unauthenticated users.
+  // The userId from useAuth seeds the store on first load; after that the store is
+  // the source of truth (setupFirebase may update it on pairing changes).
+  const { userId: authUserId, isLoading: authLoading } = useAuth()
   const {
     userId,
     setUserId,
@@ -122,9 +140,15 @@ export default function MessagesPage() {
     setIsConversationListVisible,
     initializeConversationListVisibility,
   } = useAppStore()
+
+  // Seed the store with the auth hook's userId when it resolves
+  useEffect(() => {
+    if (authUserId && !userId) {
+      setUserId(authUserId)
+      initializeConversationListVisibility()
+    }
+  }, [authUserId, userId, setUserId, initializeConversationListVisibility])
   const [showAI, setShowAI] = useState(false)
-  const [photos, setPhotos] = useState<any[]>([])
-  const [photosLoading, setPhotosLoading] = useState(false)
   const [keySyncLoading, setKeySyncLoading] = useState(false)
   const [keySyncStatus, setKeySyncStatus] = useState<string | null>(null)
   const [reloadToken, setReloadToken] = useState(0)
@@ -210,18 +234,12 @@ export default function MessagesPage() {
     let unsubscribeReadReceipts: (() => void) | null = null
 
     const setupFirebase = async () => {
-      // Check if VPS mode is enabled - MUST match firebase.ts isVPSMode() logic
-      // Default to VPS mode for new installs (no Firebase user IDs should be created)
-      const isVPSMode = localStorage.getItem('useVPSMode') === 'true' ||
-                        !!process.env.NEXT_PUBLIC_VPS_URL ||
-                        !!localStorage.getItem('vps_access_token') ||
-                        vpsService.isAuthenticated ||
-                        true // Default to VPS mode
-
-      // Check authentication
+      // Auth is handled by useAuth hook (token restoration + redirect).
+      // By the time this runs, authUserId is set and tokens are restored.
       const storedUserId = localStorage.getItem('syncflow_user_id')
 
       if (!storedUserId) {
+        // useAuth will redirect, but guard here too for safety
         router.push('/')
         return
       }
@@ -229,12 +247,12 @@ export default function MessagesPage() {
       setUserId(storedUserId)
       initializeConversationListVisibility()
 
+      // VPS mode is always enabled (Firebase legacy path removed)
+      const isVPSMode = true
+
       // VPS Mode: Skip Firebase, use VPS service
       if (isVPSMode) {
-        // Wait for tokens to be restored from IndexedDB before checking auth
-        await vpsService.ensureTokensRestored()
-
-        // Verify VPS authentication
+        // Tokens are already restored by useAuth; verify authentication
         if (!vpsService.isAuthenticated) {
           router.push('/')
           return
@@ -697,52 +715,32 @@ export default function MessagesPage() {
     userId,
   ])
 
-  // Load photos when Photos tab is selected
+  // Keyboard shortcuts: Ctrl/Cmd+K to focus search, Escape to deselect conversation
   useEffect(() => {
-    if (activeFolder !== 'photos' || !userId) return
-    let cancelled = false
-    const loadPhotos = async () => {
-      setPhotosLoading(true)
-      try {
-        const res = await vpsService.getPhotos(100)
-        if (cancelled) return
-        const photosWithUrls = await Promise.all(
-          (res.photos || []).map(async (p: any) => {
-            let downloadUrl = ''
-            if (p.r2Key) {
-              try { downloadUrl = await vpsService.getPhotoDownloadUrl(p.r2Key) } catch {}
-            }
-            return {
-              id: p.id,
-              fileName: p.fileName || 'photo.jpg',
-              dateTaken: p.takenAt || p.syncedAt || 0,
-              size: p.fileSize || 0,
-              width: p.metadata?.width || 0,
-              height: p.metadata?.height || 0,
-              mimeType: p.contentType || 'image/jpeg',
-              uploadUrl: downloadUrl,
-              base64Data: undefined,
-            }
-          })
-        )
-        setPhotos(photosWithUrls)
-      } catch (err) {
-        console.error('Failed to load photos:', err)
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ctrl/Cmd + K: focus the conversation search input
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault()
+        const searchInput = document.getElementById('conversation-search') as HTMLInputElement | null
+        if (searchInput) {
+          searchInput.focus()
+          searchInput.select()
+        }
       }
-      setPhotosLoading(false)
-    }
-    loadPhotos()
-    return () => { cancelled = true }
-  }, [activeFolder, userId])
 
-  const handleDeletePhoto = async (photoId: string) => {
-    try {
-      await vpsService.deletePhoto(photoId)
-      setPhotos(prev => prev.filter(p => p.id !== photoId))
-    } catch (err) {
-      console.error('Failed to delete photo:', err)
+      // Escape: deselect the current conversation / close AI assistant
+      if (e.key === 'Escape') {
+        if (showAI) {
+          setShowAI(false)
+        } else if (selectedConversation) {
+          setSelectedConversation(null)
+        }
+      }
     }
-  }
+
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [showAI, selectedConversation, setSelectedConversation])
 
   if (!userId) {
     return (
@@ -830,20 +828,7 @@ export default function MessagesPage() {
               </button>
             </div>
           )}
-          {activeFolder === 'photos' ? (
-            <div className="flex-1 overflow-y-auto p-4">
-              <h2 className="text-lg font-semibold mb-4 text-gray-900 dark:text-white">Synced Photos</h2>
-              {photosLoading ? (
-                <div className="flex items-center justify-center py-12">
-                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-                </div>
-              ) : (
-                <PhotoGallery photos={photos} onDelete={handleDeletePhoto} />
-              )}
-            </div>
-          ) : (
-            <MessageView onOpenAI={() => setShowAI(true)} />
-          )}
+          <MessageView onOpenAI={() => setShowAI(true)} />
         </div>
       </div>
 

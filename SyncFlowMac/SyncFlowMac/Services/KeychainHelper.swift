@@ -14,7 +14,7 @@ class KeychainHelper {
             kSecClass as String: kSecClassGenericPassword as String,
             kSecAttrService as String: service,
             kSecAttrAccount as String: key,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock as String,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String,
             kSecValueData as String: data
         ] as [String: Any]
 

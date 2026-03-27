@@ -68,7 +68,8 @@ import com.phoneintegration.app.utils.InputValidation
 import com.phoneintegration.app.vps.VPSAuthManager
 import com.phoneintegration.app.vps.VPSSecurityConfig
 import com.phoneintegration.app.vps.VPSSyncService
-import kotlinx.coroutines.CoroutineScope
+import androidx.lifecycle.ProcessLifecycleOwner
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import net.sqlcipher.database.SQLiteDatabase
@@ -149,9 +150,11 @@ class SyncFlowApp : Application(), ImageLoaderFactory {
             }
 
             // Initialize VPS authentication and sync service
+            // Uses ProcessLifecycleOwner.lifecycleScope so the coroutine is cancelled
+            // when the app process is destroyed, avoiding leaked coroutines.
             try {
                 val vpsAuth = VPSAuthManager.getInstance(this)
-                CoroutineScope(Dispatchers.IO).launch {
+                ProcessLifecycleOwner.get().lifecycleScope.launch(Dispatchers.IO) {
                     try {
                         // Use UnifiedIdentityManager for stable device-fingerprint-based auth
                         // This prevents creating orphan anonymous users

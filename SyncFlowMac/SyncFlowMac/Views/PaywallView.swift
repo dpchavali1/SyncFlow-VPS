@@ -212,7 +212,6 @@ struct PaywallView: View {
 
             FeatureRow(icon: "message.fill", text: "Unlimited SMS & MMS from Mac")
             FeatureRow(icon: "phone.fill", text: "Make & receive calls from Mac")
-            FeatureRow(icon: "photo.fill", text: "Photo sync (Premium only)")
             FeatureRow(icon: "doc.on.clipboard", text: "Universal clipboard sync")
             FeatureRow(icon: "bell.fill", text: "Notification mirroring")
             FeatureRow(icon: "lock.shield.fill", text: "End-to-end encryption")

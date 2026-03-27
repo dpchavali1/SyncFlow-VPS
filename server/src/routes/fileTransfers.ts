@@ -4,26 +4,16 @@ import { query, queryOne } from '../services/database';
 import { getEffectivePlan, getPlanLimits } from './usage';
 import { authenticate } from '../middleware/auth';
 import { apiRateLimit } from '../middleware/rateLimit';
-import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { config } from '../config';
+import { s3Client, R2_BUCKET } from '../services/r2';
 
 const router = Router();
 
 router.use(authenticate);
 router.use(apiRateLimit);
 
-// R2/S3 Client configuration
-const s3Client = new S3Client({
-  region: 'auto',
-  endpoint: config.r2.endpoint,
-  credentials: {
-    accessKeyId: config.r2.accessKeyId,
-    secretAccessKey: config.r2.secretAccessKey,
-  },
-});
-
-const BUCKET_NAME = config.r2.bucketName;
+const BUCKET_NAME = R2_BUCKET;
 
 // Validation schemas
 const uploadUrlSchema = z.object({
@@ -126,6 +116,11 @@ router.post('/upload-url', async (req: Request, res: Response) => {
       ContentType: body.contentType,
     });
 
+    if (!s3Client) {
+      res.status(503).json({ error: 'File storage not configured' });
+      return;
+    }
+
     const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 }); // 1 hour
 
     res.json({
@@ -154,11 +149,9 @@ router.post('/download-url', async (req: Request, res: Response) => {
     }
 
     // Verify ownership via DB (not path prefix, which breaks after user migration)
-    // Check file_transfers, photos, and MMS parts
+    // Check file_transfers and MMS parts
     const ownerCheck = await query(
       `SELECT 1 FROM user_file_transfers WHERE user_id = $1 AND r2_key = $2
-       UNION ALL
-       SELECT 1 FROM user_photos WHERE user_id = $1 AND r2_key = $2
        UNION ALL
        SELECT 1 FROM user_messages WHERE user_id = $1 AND mms_parts::text LIKE '%' || $2 || '%'
        LIMIT 1`,
@@ -166,6 +159,11 @@ router.post('/download-url', async (req: Request, res: Response) => {
     );
     if (ownerCheck.length === 0) {
       res.status(403).json({ error: 'Access denied' });
+      return;
+    }
+
+    if (!s3Client) {
+      res.status(503).json({ error: 'File storage not configured' });
       return;
     }
 
@@ -294,7 +292,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
       [id, userId]
     );
 
-    if (transfer?.r2_key) {
+    if (transfer?.r2_key && s3Client) {
       // Delete from R2
       try {
         const command = new DeleteObjectCommand({
@@ -335,13 +333,16 @@ router.post('/delete-file', async (req: Request, res: Response) => {
     // Verify ownership via DB (not path prefix, which breaks after user migration)
     const ownerCheck = await query(
       `SELECT 1 FROM user_file_transfers WHERE user_id = $1 AND r2_key = $2
-       UNION ALL
-       SELECT 1 FROM user_photos WHERE user_id = $1 AND r2_key = $2
        LIMIT 1`,
       [userId, fileKey]
     );
     if (ownerCheck.length === 0) {
       res.status(403).json({ error: 'Access denied' });
+      return;
+    }
+
+    if (!s3Client) {
+      res.status(503).json({ error: 'File storage not configured' });
       return;
     }
 

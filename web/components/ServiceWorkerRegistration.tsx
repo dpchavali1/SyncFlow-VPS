@@ -49,10 +49,8 @@ export function ServiceWorkerRegistration() {
             }
           });
 
-          // Request notification permission
-          if ('Notification' in window && Notification.permission === 'default') {
-            Notification.requestPermission();
-          }
+          // Notification permission is requested via the notification settings page,
+          // not auto-requested here (blocked by modern browsers without user gesture)
         })
         .catch((error) => {
           console.error('[PWA] Service worker registration failed:', error);

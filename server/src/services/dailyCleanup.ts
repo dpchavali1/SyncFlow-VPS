@@ -120,7 +120,7 @@ async function runAutoCleanup(): Promise<Record<string, number>> {
         // Delete from all user tables within a transaction so a partial
         // failure doesn't leave the account in an inconsistent state.
         const userTables = [
-          'user_messages', 'user_contacts', 'user_call_history', 'user_photos',
+          'user_messages', 'user_contacts', 'user_call_history',
           'user_file_transfers', 'user_outgoing_messages', 'user_spam_messages',
           'user_scheduled_messages', 'user_read_receipts', 'user_notifications',
           'user_typing_indicators', 'user_clipboard', 'user_voicemails',
@@ -183,6 +183,69 @@ async function runE2eeCleanup(): Promise<Record<string, number>> {
   return results;
 }
 
+// Storage reconciliation: recalculates storage_bytes in user_usage for users
+// who had uploads (MMS or file transfers) in the last 24 hours. This keeps the
+// cached counter in sync with actual R2/DB contents without the cost of scanning
+// every user.
+async function runStorageReconciliation(): Promise<{ usersReconciled: number }> {
+  let usersReconciled = 0;
+
+  try {
+    // Find users who had MMS or file transfer activity in the last 24 hours
+    const recentUploadUsers = await query<{ user_id: string }>(`
+      SELECT DISTINCT user_id FROM (
+        SELECT user_id FROM user_messages
+        WHERE is_mms = true AND mms_parts IS NOT NULL
+          AND created_at > NOW() - INTERVAL '24 hours'
+        UNION
+        SELECT user_id FROM user_file_transfers
+        WHERE created_at > NOW() - INTERVAL '24 hours'
+      ) AS recent_uploaders
+    `);
+
+    for (const { user_id } of recentUploadUsers) {
+      try {
+        // Sum MMS attachment sizes
+        const mmsBytes = await queryOne(
+          `SELECT COALESCE(SUM(
+            (SELECT COALESCE(SUM((part->>'fileSize')::bigint), 0)
+             FROM jsonb_array_elements(mms_parts) AS part
+             WHERE part->>'fileSize' IS NOT NULL)
+          ), 0) as total
+           FROM user_messages
+           WHERE user_id = $1 AND is_mms = true AND mms_parts IS NOT NULL`,
+          [user_id]
+        );
+
+        // Sum file transfer sizes (exclude MMS-related transfers to avoid double-counting)
+        const fileBytes = await queryOne(
+          `SELECT COALESCE(SUM(file_size), 0) as total
+           FROM user_file_transfers
+           WHERE user_id = $1 AND status = 'completed'`,
+          [user_id]
+        );
+
+        const totalBytes = parseInt(mmsBytes?.total || '0') + parseInt(fileBytes?.total || '0');
+
+        await query(
+          `INSERT INTO user_usage (user_id, storage_bytes, updated_at)
+           VALUES ($1, $2, NOW())
+           ON CONFLICT (user_id) DO UPDATE SET storage_bytes = $2, updated_at = NOW()`,
+          [user_id, totalBytes]
+        );
+
+        usersReconciled++;
+      } catch (e) {
+        console.error(`[DailyCleanup] Storage reconciliation failed for ${user_id}:`, e);
+      }
+    }
+  } catch (e) {
+    console.error('[DailyCleanup] Storage reconciliation query failed:', e);
+  }
+
+  return { usersReconciled };
+}
+
 async function runDailyCleanup() {
   const startTime = Date.now();
   console.log(`[DailyCleanup] Starting at ${new Date().toISOString()}`);
@@ -190,12 +253,13 @@ async function runDailyCleanup() {
   try {
     const autoResults = await runAutoCleanup();
     const e2eeResults = await runE2eeCleanup();
+    const storageResults = await runStorageReconciliation();
 
     const duration = Date.now() - startTime;
     const totalAuto = Object.values(autoResults).reduce((a, b) => a + b, 0);
     const totalE2ee = Object.values(e2eeResults).reduce((a, b) => a + b, 0);
 
-    console.log(`[DailyCleanup] Complete in ${(duration / 1000).toFixed(1)}s — ${totalAuto} general + ${totalE2ee} E2EE items removed`);
+    console.log(`[DailyCleanup] Complete in ${(duration / 1000).toFixed(1)}s — ${totalAuto} general + ${totalE2ee} E2EE items removed + ${storageResults.usersReconciled} users storage reconciled`);
 
     // Send email report
     try {

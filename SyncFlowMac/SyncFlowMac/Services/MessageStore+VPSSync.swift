@@ -255,18 +255,21 @@ extension MessageStore {
     // MARK: - Polling Fallback
 
     /// Polling fallback that fetches new messages periodically.
-    /// When WebSocket is disconnected, polls every 30 seconds (aggressive).
-    /// When WebSocket is connected, polls every 120 seconds as a safety net
-    /// to catch any messages that may have been missed during brief glitches.
+    /// Only polls when WebSocket is disconnected (every 30 seconds).
+    /// When WebSocket is healthy, polling is skipped entirely to avoid
+    /// redundant network requests and battery drain.
     func startPollingFallback() {
         pollFallbackTask?.cancel()
         pollFallbackTask = Task { [weak self] in
             while !Task.isCancelled {
                 let isWsConnected = VPSService.shared.isConnected
-                let sleepSeconds: UInt64 = isWsConnected ? 120 : 30 // 2 min if connected, 30s if not
+                let sleepSeconds: UInt64 = isWsConnected ? 120 : 30
                 try? await Task.sleep(nanoseconds: sleepSeconds * 1_000_000_000)
                 guard !Task.isCancelled else { break }
                 guard let self = self else { break }
+
+                // Skip polling when WebSocket is connected — real-time updates are sufficient
+                guard !VPSService.shared.isConnected else { continue }
 
                 #if DEBUG
                 print("[MessageStore] WebSocket disconnected — polling for new messages")

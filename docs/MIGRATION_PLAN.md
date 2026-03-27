@@ -43,7 +43,7 @@ This document outlines the complete migration strategy from Firebase Realtime Da
 | profile | user_profiles | (user_id) |
 | subscription | user_subscriptions | (user_id) |
 | usage | user_usage | (user_id) |
-| photos | user_photos | (user_id, timestamp) |
+| ~~photos~~ | ~~user_photos~~ | *(removed - photo sync feature deprecated)* |
 | voicemails | user_voicemails | (user_id, date) |
 | clipboard | user_clipboard | (user_id) |
 | mirrored_notifications | user_notifications | (user_id, timestamp) |

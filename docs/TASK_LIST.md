@@ -71,7 +71,7 @@
 
 ### 2.6 Sync & File Tables
 - [ ] **2.6.1** Create `user_file_transfers` table
-- [ ] **2.6.2** Create `user_photos` table
+- [x] **2.6.2** ~~Create `user_photos` table~~ *(removed - photo sync feature deprecated)*
 - [ ] **2.6.3** Create `user_voicemails` table
 - [ ] **2.6.4** Create `user_clipboard` table
 - [ ] **2.6.5** Create `user_continuity_state` table

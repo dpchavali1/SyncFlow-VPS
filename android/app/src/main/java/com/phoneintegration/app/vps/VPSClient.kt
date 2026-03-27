@@ -201,7 +201,6 @@ data class VPSUsageData(
     val monthlyUploadBytes: Long,
     val monthlyMmsBytes: Long,
     val monthlyFileBytes: Long,
-    val monthlyPhotoBytes: Long = 0,
     val lastUpdatedAt: Long?,
     val monthlyUploadLimit: Long = 0,
     val storageLimit: Long = 0,
@@ -458,10 +457,27 @@ class VPSClient private constructor(
     @Volatile
     private var baseUrl: String = normalizeBaseUrl(backendConfig.vpsUrl.value)
 
-    private val httpClient = OkHttpClient.Builder()
+    /**
+     * Shared OkHttpClient instance for API requests.
+     *
+     * Other services should use [VPSClient.getInstance(context).httpClient] instead
+     * of creating their own OkHttpClient to reduce memory usage and share the
+     * connection pool. For file transfer operations that need longer timeouts,
+     * use [fileTransferHttpClient] instead.
+     */
+    val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
+        .build()
+
+    /**
+     * OkHttpClient with extended timeouts for large file transfers (uploads/downloads).
+     * Shares the same connection pool as [httpClient] to avoid extra resource usage.
+     */
+    val fileTransferHttpClient: OkHttpClient = httpClient.newBuilder()
+        .readTimeout(120, TimeUnit.SECONDS)
+        .writeTimeout(120, TimeUnit.SECONDS)
         .build()
 
     private val prefs: SharedPreferences by lazy {
@@ -1811,76 +1827,6 @@ class VPSClient private constructor(
             ))
         } catch (e: Exception) {
             Log.e(TAG, "Error marking contact sync complete: ${e.message}")
-        }
-    }
-
-    // ==================== Photo Sync ====================
-
-    suspend fun getSyncedPhotoIds(): List<Long> = withContext(Dispatchers.IO) {
-        try {
-            val type = object : TypeToken<Map<String, List<Long>>>() {}.type
-            val body = executeRequestInternal(
-                Request.Builder()
-                    .url("${baseUrl}/api/photos/synced-ids")
-                    .apply { accessToken?.let { addHeader("Authorization", "Bearer $it") } }
-                    .build(),
-                allowRetry = true
-            )
-            val response: Map<String, List<Long>> = gson.fromJson(body ?: "{}", type)
-            response["ids"] ?: emptyList()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error getting synced photo IDs: ${e.message}")
-            emptyList()
-        }
-    }
-
-    suspend fun getPhotos(): List<Map<String, Any?>> = withContext(Dispatchers.IO) {
-        try {
-            val type = object : TypeToken<Map<String, List<Map<String, Any?>>>>() {}.type
-            val body = executeRequestInternal(
-                Request.Builder()
-                    .url("${baseUrl}/api/photos")
-                    .apply { accessToken?.let { addHeader("Authorization", "Bearer $it") } }
-                    .build(),
-                allowRetry = true
-            )
-            val response: Map<String, List<Map<String, Any?>>> = gson.fromJson(body ?: "{}", type)
-            response["photos"] ?: emptyList()
-        } catch (e: Exception) {
-            Log.e(TAG, "Error getting photos: ${e.message}")
-            emptyList()
-        }
-    }
-
-    suspend fun confirmPhotoUpload(
-        fileId: String,
-        r2Key: String,
-        fileName: String,
-        fileSize: Int,
-        photoMetadata: Map<String, Any>
-    ): Unit = withContext(Dispatchers.IO) {
-        try {
-            post<Map<String, Any>>("/api/photos/confirm-upload", mapOf(
-                "fileId" to fileId,
-                "r2Key" to r2Key,
-                "fileName" to fileName,
-                "fileSize" to fileSize,
-                "contentType" to "image/jpeg",
-                "transferType" to "photo",
-                "photoMetadata" to photoMetadata
-            ))
-        } catch (e: Exception) {
-            Log.e(TAG, "Error confirming photo upload: ${e.message}")
-        }
-    }
-
-    suspend fun deletePhoto(photoId: String, r2Key: String?): Unit = withContext(Dispatchers.IO) {
-        try {
-            val body = mutableMapOf<String, Any>("photoId" to photoId)
-            r2Key?.let { body["r2Key"] = it }
-            post<Map<String, Any>>("/api/photos/delete", body)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error deleting photo: ${e.message}")
         }
     }
 

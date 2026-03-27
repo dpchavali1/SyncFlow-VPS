@@ -64,7 +64,7 @@ router.get('/', async (req: Request, res: Response) => {
   }
 });
 
-// POST /contacts/sync - Sync contacts from device
+// POST /contacts/sync - Sync contacts from device (batch)
 router.post('/sync', async (req: Request, res: Response) => {
   try {
     const body = syncContactsSchema.parse(req.body);
@@ -73,12 +73,33 @@ router.post('/sync', async (req: Request, res: Response) => {
     let synced = 0;
     let skipped = 0;
 
-    for (const contact of body.contacts) {
+    // Batch upsert contacts for much better performance on large syncs.
+    // Process in groups of 50 to keep query size reasonable.
+    const batchSize = 50;
+    for (let batchStart = 0; batchStart < body.contacts.length; batchStart += batchSize) {
+      const batch = body.contacts.slice(batchStart, batchStart + batchSize);
+
+      // Build multi-row VALUES clause
+      const values: any[] = [];
+      const placeholders: string[] = [];
+      batch.forEach((contact, i) => {
+        const offset = i * 6;
+        placeholders.push(`($${offset+1}, $${offset+2}, $${offset+3}, $${offset+4}, $${offset+5}, $${offset+6})`);
+        values.push(
+          contact.id,
+          userId,
+          contact.displayName,
+          JSON.stringify((contact.phoneNumbers || []).map((p: string) => normalizePhoneNumber(p))),
+          JSON.stringify(contact.emails || []),
+          contact.photoThumbnail,
+        );
+      });
+
       try {
         await query(
           `INSERT INTO user_contacts
            (id, user_id, display_name, phone_numbers, emails, photo_thumbnail)
-           VALUES ($1, $2, $3, $4, $5, $6)
+           VALUES ${placeholders.join(', ')}
            ON CONFLICT (id) DO UPDATE SET
              user_id = EXCLUDED.user_id,
              display_name = EXCLUDED.display_name,
@@ -86,18 +107,38 @@ router.post('/sync', async (req: Request, res: Response) => {
              emails = EXCLUDED.emails,
              photo_thumbnail = EXCLUDED.photo_thumbnail,
              updated_at = NOW()`,
-          [
-            contact.id,
-            userId,
-            contact.displayName,
-            JSON.stringify((contact.phoneNumbers || []).map((p: string) => normalizePhoneNumber(p))),
-            JSON.stringify(contact.emails || []),
-            contact.photoThumbnail,
-          ]
+          values
         );
-        synced++;
+        synced += batch.length;
       } catch (e) {
-        skipped++;
+        // Fallback: try individual inserts for this batch so partial success is possible
+        for (const contact of batch) {
+          try {
+            await query(
+              `INSERT INTO user_contacts
+               (id, user_id, display_name, phone_numbers, emails, photo_thumbnail)
+               VALUES ($1, $2, $3, $4, $5, $6)
+               ON CONFLICT (id) DO UPDATE SET
+                 user_id = EXCLUDED.user_id,
+                 display_name = EXCLUDED.display_name,
+                 phone_numbers = EXCLUDED.phone_numbers,
+                 emails = EXCLUDED.emails,
+                 photo_thumbnail = EXCLUDED.photo_thumbnail,
+                 updated_at = NOW()`,
+              [
+                contact.id,
+                userId,
+                contact.displayName,
+                JSON.stringify((contact.phoneNumbers || []).map((p: string) => normalizePhoneNumber(p))),
+                JSON.stringify(contact.emails || []),
+                contact.photoThumbnail,
+              ]
+            );
+            synced++;
+          } catch (e2) {
+            skipped++;
+          }
+        }
       }
     }
 

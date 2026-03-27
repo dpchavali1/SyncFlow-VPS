@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { verifyToken, TokenPayload, updateDeviceLastSeen } from '../services/auth';
+import { isDeviceBlacklisted } from '../services/redis';
 
 // Extend Express Request type
 declare global {
@@ -13,11 +14,11 @@ declare global {
 }
 
 // Authentication middleware
-export function authenticate(
+export async function authenticate(
   req: Request,
   res: Response,
   next: NextFunction
-): void {
+): Promise<void> {
   const authHeader = req.headers.authorization;
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -35,6 +36,12 @@ export function authenticate(
 
   if (payload.type !== 'access') {
     res.status(401).json({ error: 'Invalid token type' });
+    return;
+  }
+
+  // Check if device has been removed (JWT revocation via Redis blacklist)
+  if (payload.deviceId && await isDeviceBlacklisted(payload.deviceId)) {
+    res.status(401).json({ error: 'Device has been removed' });
     return;
   }
 

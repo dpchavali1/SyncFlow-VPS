@@ -13,7 +13,6 @@
  * - Swipe gestures for archive/pin actions
  * - Long-press context menu for additional actions
  * - Continuity banner for cross-device handoff
- * - SyncFlow Deals promotional card
  * - Floating action buttons for AI, stats, and new message
  *
  * Architecture:
@@ -41,7 +40,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.filled.Analytics
-import androidx.compose.material.icons.filled.ScreenShare
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.LocalOffer
 import androidx.compose.material.icons.filled.CardGiftcard
@@ -52,7 +50,6 @@ import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Devices
-import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Unarchive
@@ -61,6 +58,7 @@ import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Report
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.foundation.ExperimentalFoundationApi
 import com.phoneintegration.app.continuity.ContinuityService
 import com.phoneintegration.app.data.DraftRepository
@@ -325,27 +323,7 @@ fun ConversationListScreen(
                                     Icon(Icons.Default.Block, contentDescription = null)
                                 }
                             )
-                            DropdownMenuItem(
-                                text = { Text("SyncFlow Downloads") },
-                                onClick = {
-                                    showMenu = false
-                                    onOpenDownloads()
-                                },
-                                leadingIcon = {
-                                    Icon(Icons.Default.FolderOpen, contentDescription = null)
-                                }
-                            )
                             HorizontalDivider()
-                            DropdownMenuItem(
-                                text = { Text("Share Screen") },
-                                onClick = {
-                                    showMenu = false
-                                    onScreenShare()
-                                },
-                                leadingIcon = {
-                                    Icon(Icons.Filled.ScreenShare, contentDescription = null)
-                                }
-                            )
                             DropdownMenuItem(
                                 text = { Text("AI Assistant") },
                                 onClick = {
@@ -353,7 +331,7 @@ fun ConversationListScreen(
                                     onOpenAI()
                                 },
                                 leadingIcon = {
-                                    Text("🧠")
+                                    Icon(Icons.Default.AutoAwesome, contentDescription = "AI Assistant")
                                 }
                             )
                             DropdownMenuItem(
@@ -562,13 +540,6 @@ fun ConversationListScreen(
                     )
                 } else {
                     LazyColumn(modifier = Modifier.weight(1f)) {
-                        // Ad banner for free/trial users (at top of list)
-                        item {
-                            AdBanner(
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                        }
-
                         if (continuityState != null) {
                             item {
                                 val state = continuityState!!
@@ -649,12 +620,7 @@ fun ConversationListScreen(
                                 conversationToDelete = convo
                                 Unit
                             }
-                            if (convo.isAdConversation) {
-                                // Use custom SyncFlow Deals card (no swipe)
-                                SyncFlowDealsCard {
-                                    onOpen("syncflow_ads", "SyncFlow Deals")
-                                }
-                            } else {
+                            if (!convo.isAdConversation) {
                                 if (swipeEnabled) {
                                     // Swipeable conversation item
                                     SwipeableConversationItem(

@@ -13,9 +13,6 @@ import './globals.css'
 
 const inter = Inter({ subsets: ['latin'] })
 
-// Force all pages to be dynamic (prevents build-time Firebase initialization)
-export const dynamic = 'force-dynamic'
-
 export const metadata: Metadata = {
   title: 'SyncFlow - Desktop SMS Integration',
   description: 'Access your phone messages from your desktop',
@@ -33,7 +30,6 @@ export const viewport: Viewport = {
   themeColor: '#3b82f6',
   width: 'device-width',
   initialScale: 1,
-  maximumScale: 1,
 }
 
 export default function RootLayout({
@@ -65,7 +61,7 @@ export default function RootLayout({
           async
           src="https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-4962910048695842"
           crossOrigin="anonymous"
-          strategy="afterInteractive"
+          strategy="lazyOnload"
           nonce={nonce}
         />
       </body>

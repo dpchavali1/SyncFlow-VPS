@@ -27,8 +27,12 @@ class SmsRepository(private val context: Context) {
     private val mmsCache = MmsAttachmentCache(context.applicationContext)
     private val memoryOptimizer = MemoryOptimizer.getInstance(context)
 
-    // Cache to avoid repeated contact lookups
-    private val contactCache = mutableMapOf<String, String?>()
+    // Cache to avoid repeated contact lookups (bounded to 500 entries, LRU eviction)
+    private val contactCache = object : LinkedHashMap<String, String?>(500, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String?>?): Boolean {
+            return size > 500
+        }
+    }
     private var contactCachePreloaded = false
 
     // Memory-efficient pagination settings

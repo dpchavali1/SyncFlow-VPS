@@ -6,7 +6,7 @@ import http from 'http';
 import { config } from './config';
 import { pool, checkDatabaseHealth } from './services/database';
 import { redis, checkRedisHealth } from './services/redis';
-import { createWebSocketServer } from './services/websocket';
+import { createWebSocketServer, getConnectionCount } from './services/websocket';
 import { initLogger } from './services/logger';
 import { initializeFCM, retryStaleOutgoingMessages } from './services/push';
 import { maintenanceMiddleware } from './middleware/maintenance';
@@ -38,11 +38,17 @@ import voicemailsRoutes from './routes/voicemails';
 import continuityRoutes from './routes/continuity';
 import e2eeRoutes from './routes/e2ee';
 import spamRoutes from './routes/spam';
-import photosRoutes from './routes/photos';
+
 import usageRoutes from './routes/usage';
 import accountRoutes from './routes/account';
 import supportRoutes from './routes/support';
 import analyticsRoutes from './routes/analytics';
+
+// API Response Convention (for new endpoints going forward):
+//   Success: { success: true, ...data }
+//   Error:   { error: 'message' }
+// Legacy endpoints may return bare data objects; do not change those to avoid
+// breaking existing clients. All new or refactored endpoints should use this format.
 
 const app = express();
 
@@ -93,6 +99,9 @@ app.get('/health', async (req, res) => {
       database: dbHealthy ? 'up' : 'down',
       redis: redisHealthy ? 'up' : 'down',
     },
+    websocket: {
+      connections: getConnectionCount(),
+    },
   });
 });
 
@@ -125,7 +134,7 @@ app.use('/api/voicemails', voicemailsRoutes);
 app.use('/api/continuity', continuityRoutes);
 app.use('/api/e2ee', e2eeRoutes);
 app.use('/api/spam', spamRoutes);
-app.use('/api/photos', photosRoutes);
+
 app.use('/api/usage', usageRoutes);
 app.use('/api/account', accountRoutes);
 app.use('/api/support', supportRoutes);

@@ -40,16 +40,12 @@ extension VPSService {
     /// On failure, triggers exponential-backoff reconnection.
     public func connectWebSocket() {
         guard let token = accessToken else {
-            #if DEBUG
-            print("[VPS Warning] Cannot connect WebSocket - not authenticated")
-            #endif
+            Logger.warning("Cannot connect WebSocket - not authenticated", category: .vps)
             return
         }
 
         guard let url = URL(string: "\(activeWsUrl)?token=\(token)") else {
-            #if DEBUG
-            print("[VPS Error] Invalid WebSocket URL")
-            #endif
+            Logger.error("Invalid WebSocket URL", category: .vps)
             return
         }
 
@@ -63,9 +59,7 @@ extension VPSService {
         task.resume()
 
         reconnectAttempts = 0
-        #if DEBUG
-        print("[VPS] WebSocket connecting...")
-        #endif
+        Logger.info("WebSocket connecting...", category: .vps)
 
         // Start receiving messages (pass task reference to ignore stale callbacks)
         // Subscriptions happen when server sends the "connected" confirmation
@@ -86,9 +80,7 @@ extension VPSService {
         subscriptions.removeAll()
         reconnectTimer?.invalidate()
         stopPlanRefreshTimer()
-        #if DEBUG
-        print("[VPS] WebSocket disconnected")
-        #endif
+        Logger.info("WebSocket disconnected", category: .vps)
     }
 
     // MARK: - Receive Loop
@@ -117,9 +109,7 @@ extension VPSService {
             case .failure(let error):
                 // Ignore errors from old tasks that were replaced
                 guard self.webSocketTask === task else { return }
-                #if DEBUG
-                print("[VPS Error] WebSocket error: \(error.localizedDescription)")
-                #endif
+                Logger.error("WebSocket error: \(error.localizedDescription)", category: .vps)
                 self.isConnected = false
                 if self.maybeFallbackToInsecureWebSocket(error: error) {
                     self.connectWebSocket()
@@ -143,9 +133,7 @@ extension VPSService {
         switch type {
         case "connected":
             // Server confirmed WebSocket auth — now safe to subscribe to channels
-            #if DEBUG
-            print("[VPS] WebSocket connected and authenticated")
-            #endif
+            Logger.info("WebSocket connected and authenticated", category: .vps)
             isConnected = true
             if let userId = userId {
                 subscribeToUser(userId)
@@ -155,34 +143,26 @@ extension VPSService {
             if let messageData = json["data"] as? [String: Any],
                let jsonData = try? JSONSerialization.data(withJSONObject: messageData),
                let message = try? decoder.decode(VPSMessage.self, from: jsonData) {
-                DispatchQueue.main.async {
-                    self.messageAdded.send(message)
-                }
+                self.messageAdded.send(message)
             }
 
         case "message_updated":
             if let messageData = json["data"] as? [String: Any],
                let jsonData = try? JSONSerialization.data(withJSONObject: messageData),
                let message = try? decoder.decode(VPSMessage.self, from: jsonData) {
-                DispatchQueue.main.async {
-                    self.messageUpdated.send(message)
-                }
+                self.messageUpdated.send(message)
             }
 
         case "message_deleted":
             if let messageId = json["messageId"] as? String {
-                DispatchQueue.main.async {
-                    self.messageDeleted.send(messageId)
-                }
+                self.messageDeleted.send(messageId)
             }
 
         case "messages_deleted":
             if let data = json["data"] as? [String: Any],
                let messageIds = data["messageIds"] as? [String] {
-                DispatchQueue.main.async {
-                    for id in messageIds {
-                        self.messageDeleted.send(id)
-                    }
+                for id in messageIds {
+                    self.messageDeleted.send(id)
                 }
             }
 
@@ -190,34 +170,26 @@ extension VPSService {
             if let contactData = json["data"] as? [String: Any],
                let jsonData = try? JSONSerialization.data(withJSONObject: contactData),
                let contact = try? decoder.decode(VPSContact.self, from: jsonData) {
-                DispatchQueue.main.async {
-                    self.contactAdded.send(contact)
-                }
+                self.contactAdded.send(contact)
             }
 
         case "call_added":
             if let callData = json["data"] as? [String: Any],
                let jsonData = try? JSONSerialization.data(withJSONObject: callData),
                let call = try? decoder.decode(VPSCallHistoryEntry.self, from: jsonData) {
-                DispatchQueue.main.async {
-                    self.callAdded.send(call)
-                }
+                self.callAdded.send(call)
             }
 
         case "contacts_synced":
             if let data = json["data"] as? [String: Any],
                let synced = data["synced"] as? Int {
-                DispatchQueue.main.async {
-                    self.contactsSynced.send(synced)
-                }
+                self.contactsSynced.send(synced)
             }
 
         case "calls_synced":
             if let data = json["data"] as? [String: Any],
                let synced = data["synced"] as? Int {
-                DispatchQueue.main.async {
-                    self.callsSynced.send(synced)
-                }
+                self.callsSynced.send(synced)
             }
 
         case "messages_synced":
@@ -227,9 +199,7 @@ extension VPSService {
                 for messageData in messagesArray {
                     if let jsonData = try? JSONSerialization.data(withJSONObject: messageData),
                        let message = try? decoder.decode(VPSMessage.self, from: jsonData) {
-                        DispatchQueue.main.async {
-                            self.messageAdded.send(message)
-                        }
+                        self.messageAdded.send(message)
                     }
                 }
             }
@@ -251,17 +221,13 @@ extension VPSService {
                     #if DEBUG
                     print("[VPS] Remote unpair detected")
                     #endif
-                    DispatchQueue.main.async {
-                        self.deviceRemoved.send(removedDeviceId)
-                    }
+                    self.deviceRemoved.send(removedDeviceId)
                 }
             } else {
                 #if DEBUG
                 print("[VPS] Remote unpair detected")
                 #endif
-                DispatchQueue.main.async {
-                    self.deviceRemoved.send("")
-                }
+                self.deviceRemoved.send("")
             }
 
         case "webrtc_signal":
@@ -324,54 +290,50 @@ extension VPSService {
 
         case "media_status_updated":
             if let data = json["data"] as? [String: Any] {
-                DispatchQueue.main.async { self.mediaStatusUpdated.send(data) }
+                self.mediaStatusUpdated.send(data)
             }
 
         case "phone_status_updated":
             if let data = json["data"] as? [String: Any] {
-                DispatchQueue.main.async { self.phoneStatusUpdated.send(data) }
+                self.phoneStatusUpdated.send(data)
             }
 
         case "clipboard_updated":
             if let data = json["data"] as? [String: Any] {
-                DispatchQueue.main.async { self.clipboardUpdated.send(data) }
+                self.clipboardUpdated.send(data)
             }
 
         case "dnd_status_updated":
             if let data = json["data"] as? [String: Any] {
-                DispatchQueue.main.async { self.dndStatusUpdated.send(data) }
+                self.dndStatusUpdated.send(data)
             }
 
         case "hotspot_status_updated":
             if let data = json["data"] as? [String: Any] {
-                DispatchQueue.main.async { self.hotspotStatusUpdated.send(data) }
+                self.hotspotStatusUpdated.send(data)
             }
 
         case "voicemail_added", "voicemail_updated", "voicemail_deleted":
             var data = json["data"] as? [String: Any] ?? [:]
             data["eventType"] = type
-            DispatchQueue.main.async { self.voicemailUpdated.send(data) }
+            self.voicemailUpdated.send(data)
 
         case "spam_updated":
             let data = json["data"] as? [String: Any] ?? [:]
-            DispatchQueue.main.async { self.spamUpdated.send(data) }
+            self.spamUpdated.send(data)
 
         case "outgoing_status_changed":
             if let data = json["data"] as? [String: Any],
                let id = data["id"] as? String,
                let status = data["status"] as? String {
-                DispatchQueue.main.async {
-                    self.deliveryStatusChanged.send((id, status))
-                }
+                self.deliveryStatusChanged.send((id, status))
             }
 
         case "delivery_status_changed":
             if let data = json["data"] as? [String: Any],
                let id = data["id"] as? String,
                let deliveryStatus = data["deliveryStatus"] as? String {
-                DispatchQueue.main.async {
-                    self.deliveryStatusChanged.send((id, deliveryStatus))
-                }
+                self.deliveryStatusChanged.send((id, deliveryStatus))
             }
 
         case "active_call":
@@ -381,13 +343,9 @@ extension VPSService {
             if let data = json["data"] as? [String: Any] {
                 #if DEBUG
                 print("[VPS DEBUG] active_call data: state=\(data["state"] ?? "nil"), phone=\(data["phoneNumber"] ?? "nil"), contact=\(data["contactName"] ?? "nil")")
+                print("[VPS DEBUG] Publishing activeCallUpdated")
                 #endif
-                DispatchQueue.main.async {
-                    #if DEBUG
-                    print("[VPS DEBUG] Publishing activeCallUpdated")
-                    #endif
-                    self.activeCallUpdated.send(data)
-                }
+                self.activeCallUpdated.send(data)
             } else {
                 #if DEBUG
                 print("[VPS DEBUG] active_call: failed to parse data from json")
@@ -419,14 +377,10 @@ extension VPSService {
                let text = String(data: data, encoding: .utf8) {
                 webSocketTask?.send(.string(text)) { error in
                     if let error = error {
-                        #if DEBUG
-                        print("[VPS Error] Failed to subscribe to \(channel): \(error.localizedDescription)")
-                        #endif
+                        Logger.error("Failed to subscribe to \(channel): \(error.localizedDescription)", category: .vps)
                     } else {
                         self.subscriptions.insert(channel)
-                        #if DEBUG
-                        print("[VPS] Subscribed to \(channel) channel")
-                        #endif
+                        Logger.debug("Subscribed to \(channel) channel", category: .vps)
                     }
                 }
             }
@@ -441,20 +395,16 @@ extension VPSService {
         reconnectAttempts += 1
 
         guard reconnectAttempts <= maxReconnectAttempts else {
-            #if DEBUG
-            print("[VPS] WebSocket max reconnect attempts (\(maxReconnectAttempts)) reached, giving up")
-            #endif
+            Logger.warning("WebSocket max reconnect attempts (\(maxReconnectAttempts)) reached, giving up", category: .vps)
             return
         }
 
         // Exponential backoff: 2, 4, 8, 16, 30, 30, 30... seconds (capped at 30s)
         let delay = min(Double(1 << min(reconnectAttempts, 5)), 30.0)
 
-        #if DEBUG
         if reconnectAttempts <= 3 || reconnectAttempts % 10 == 0 {
-            print("[VPS] WebSocket reconnect in \(Int(delay))s (attempt \(reconnectAttempts))")
+            Logger.debug("WebSocket reconnect in \(Int(delay))s (attempt \(reconnectAttempts))", category: .vps)
         }
-        #endif
 
         pendingReconnectWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
@@ -492,7 +442,7 @@ extension VPSService {
         guard shouldFallback else { return false }
         didFallbackToInsecureWebSocket = true
         activeWsUrl = fallback
-        print("[VPS] WebSocket TLS failed; falling back to insecure WebSocket: \(fallback)")
+        Logger.warning("WebSocket TLS failed; falling back to insecure WebSocket: \(fallback)", category: .vps)
         return true
         #else
         return false

@@ -72,7 +72,7 @@ fun MainNavigation(
     // Auto-register phone number from SIM, or show mandatory dialog
     LaunchedEffect(Unit) {
         // Delay to let permissions be granted on first install before reading SIM info
-        kotlinx.coroutines.delay(5000)
+        kotlinx.coroutines.delay(1500)
         val vpsClient = com.phoneintegration.app.vps.VPSClient.getInstance(context)
         if (vpsClient.userId != null) {
             // Restore from server first (covers reinstall / cleared prefs)
@@ -167,10 +167,6 @@ fun MainNavigation(
                         }
 
                         when {
-                            address == "syncflow_ads" -> {
-                                // Open Ads screen
-                                navController.navigate("ads")
-                            }
                             conversation?.isGroupConversation == true && conversation.groupId != null -> {
                                 // Open saved group chat
                                 navController.navigate("groupChat/${conversation.groupId}")
@@ -315,7 +311,8 @@ fun MainNavigation(
                     onNavigateToSpamFilter = { navController.navigate("settings/spam-filter") },
                     onNavigateToSupport = { navController.navigate("support") },
                     onNavigateToFileTransfer = { navController.navigate("filetransfer") },
-                    onNavigateToDeleteAccount = { navController.navigate("settings/delete-account") }
+                    onNavigateToDeleteAccount = { navController.navigate("settings/delete-account") },
+                    onNavigateToBlocked = { navController.navigate("blocked") }
                 )
             }
             

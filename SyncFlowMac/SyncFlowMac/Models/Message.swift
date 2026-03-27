@@ -254,6 +254,12 @@ struct Message: Identifiable, Codable, Hashable {
     /// Text content of the message. May be empty for MMS messages that contain only attachments.
     let body: String
 
+    // MARK: - Link Detection Cache (non-Codable, excluded from Hashable)
+
+    /// Thread-safe cache for link detection results keyed by message body.
+    /// Avoids recreating NSDataDetector on every access to `hasLinks`.
+    private static var linkDetectionCache = [String: Bool]()
+
     /// Timestamp when the message was sent or received, in milliseconds since Unix epoch.
     /// Use the `timestamp` computed property to get this as a Swift `Date` object.
     let date: Double
@@ -351,10 +357,16 @@ struct Message: Identifiable, Codable, Hashable {
 
     /// Detects whether the message body contains clickable links (URLs).
     /// Uses NSDataDetector for reliable link detection across various URL formats.
+    /// Results are cached per-body to avoid recreating NSDataDetector on every render.
     var hasLinks: Bool {
+        if let cached = Message.linkDetectionCache[body] {
+            return cached
+        }
         let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
         let matches = detector?.matches(in: body, range: NSRange(body.startIndex..., in: body))
-        return !(matches?.isEmpty ?? true)
+        let result = !(matches?.isEmpty ?? true)
+        Message.linkDetectionCache[body] = result
+        return result
     }
 }
 

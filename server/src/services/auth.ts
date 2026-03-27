@@ -240,23 +240,9 @@ export async function redeemPairingToken(
     }
   }
 
-  // Method 2: Clean up ANY orphaned users with no devices and no messages
-  // These are always leftover from pairing initiations
-  try {
-    const orphans = await query(
-      `DELETE FROM users
-       WHERE uid != $1
-       AND uid NOT IN (SELECT DISTINCT user_id FROM user_devices)
-       AND uid NOT IN (SELECT DISTINCT user_id FROM user_messages)
-       RETURNING uid`,
-      [request.userId]
-    );
-    if (orphans.length > 0) {
-      console.log(`[Auth] Cleaned up ${orphans.length} orphaned user(s): ${orphans.map((o: any) => o.uid).join(', ')}`);
-    }
-  } catch (err) {
-    console.warn('[Auth] Orphan cleanup failed:', err);
-  }
+  // NOTE: Global orphan cleanup was removed from here — it was dangerously unscoped
+  // and could delete legitimate new users who hadn't synced messages yet.
+  // Orphan cleanup runs safely in the daily cleanup job with a proper grace period.
 
   return {
     userId: request.userId,

@@ -48,7 +48,6 @@
 // - ClipboardSyncService: Syncs clipboard between Mac and phone
 // - FileTransferService: Handles Quick Drop file transfers
 // - ContinuityService: Manages continuity features
-// - PhotoSyncService: Syncs photos from phone
 // - NotificationMirrorService: Mirrors phone notifications to Mac
 // - HotspotControlService: Controls phone hotspot remotely
 // - DNDSyncService: Syncs Do Not Disturb status
@@ -127,20 +126,6 @@ struct SyncFlowMacApp: App {
     // MARK: - Initialization
     // =========================================================================
 
-    /// VPS mode is always enabled
-    private var isVPSMode: Bool {
-        // Check UserDefaults for VPS mode setting
-        if UserDefaults.standard.bool(forKey: "useVPSMode") {
-            return true
-        }
-        // Check if VPS URL is configured via environment
-        if let vpsUrl = ProcessInfo.processInfo.environment["SYNCFLOW_VPS_URL"], !vpsUrl.isEmpty {
-            return true
-        }
-        // Default to VPS mode for new installs
-        return true
-    }
-
     /// Initializes the application and its core services.
     ///
     /// VPS-only mode.
@@ -174,7 +159,7 @@ struct SyncFlowMacApp: App {
     /// Service States:
     /// - `.full`: Normal operation, all features active
     /// - `.reduced`: Lower sync frequency, reduce background activity
-    /// - `.minimal`: Pause non-essential syncs (clipboard, photo)
+    /// - `.minimal`: Pause non-essential syncs (clipboard)
     /// - `.suspended`: Stop most services, only essential features remain
     ///
     /// This helps extend battery life on MacBooks when unplugged while ensuring
@@ -224,7 +209,7 @@ struct SyncFlowMacApp: App {
     /// Custom Menu Commands:
     /// - Messages: New message (Cmd+N), templates (Cmd+T), search (Cmd+F)
     /// - Calls: Dialer, answer/reject/end call shortcuts
-    /// - Phone: Photos, notifications, scheduled messages, Find My Phone, etc.
+    /// - Phone: Notifications, scheduled messages, Find My Phone, etc.
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -325,11 +310,6 @@ struct SyncFlowMacApp: App {
 
             // Phone features menu
             CommandMenu("Phone") {
-                Button("View Photos") {
-                    appState.showPhotoGallery = true
-                }
-                .keyboardShortcut("p", modifiers: [.command, .shift])
-
                 Button("View Notifications") {
                     appState.showNotifications = true
                 }
@@ -368,11 +348,6 @@ struct SyncFlowMacApp: App {
                 Toggle("Notification Mirroring", isOn: Binding(
                     get: { appState.notificationMirrorService.isEnabled },
                     set: { appState.notificationMirrorService.setEnabled($0) }
-                ))
-
-                Toggle("Photo Sync", isOn: Binding(
-                    get: { appState.photoSyncEnabled },
-                    set: { appState.togglePhotoSync(enabled: $0) }
                 ))
 
                 Divider()
@@ -578,8 +553,6 @@ enum AppTab: String, CaseIterable {
 /// All @Published properties must be updated on the main thread.
 /// Service callbacks use `DispatchQueue.main.async` for UI updates.
 class AppState: ObservableObject {
-    /// VPS mode is always enabled
-    private var isVPSMode: Bool { true }
 
     // =========================================================================
     // MARK: - Authentication & Pairing State
@@ -702,11 +675,6 @@ class AppState: ObservableObject {
     /// Find My Phone feature state
     @Published var isPhoneRinging: Bool = false
 
-    /// Photo sync service
-    let photoSyncService = PhotoSyncService.shared
-    @Published var showPhotoGallery: Bool = false
-    @Published var photoSyncEnabled: Bool = true
-
     /// Manual sync state
     @Published var isSyncing: Bool = false
 
@@ -774,14 +742,6 @@ class AppState: ObservableObject {
     /// 4. Subscribe to call state changes for UI updates
     /// 5. Subscribe to continuity state for handoff suggestions
     init() {
-        // Restore photo sync toggle state (defaults to true if not set)
-        let defaults = UserDefaults.standard
-        if defaults.object(forKey: "photo_sync_enabled") == nil {
-            self.photoSyncEnabled = true
-        } else {
-            self.photoSyncEnabled = defaults.bool(forKey: "photo_sync_enabled")
-        }
-
         // Check for existing pairing
         if let storedUserId = UserDefaults.standard.string(forKey: "syncflow_user_id") {
             self.userId = storedUserId
@@ -794,7 +754,6 @@ class AppState: ObservableObject {
             updateDeviceOnlineStatus(userId: storedUserId, online: true)
             startListeningForPhoneStatus(userId: storedUserId)
             startClipboardSync(userId: storedUserId)
-            startPhotoSync(userId: storedUserId)
             startNotificationMirroring(userId: storedUserId)
             startHotspotControl(userId: storedUserId)
             startDndSync(userId: storedUserId)
@@ -1199,7 +1158,6 @@ class AppState: ObservableObject {
 
                 // Reset sync toggles to enabled for new user
                 clipboardSyncEnabled = true
-                togglePhotoSync(enabled: true)
                 notificationMirrorService.setEnabled(true)
             }
         } else {
@@ -1209,7 +1167,6 @@ class AppState: ObservableObject {
 
             // First-time pairing: enable all sync features by default
             clipboardSyncEnabled = true
-            togglePhotoSync(enabled: true)
             notificationMirrorService.setEnabled(true)
         }
 
@@ -1219,82 +1176,10 @@ class AppState: ObservableObject {
         // AUTO E2EE KEY SYNC: Request keys from Android during pairing (not after)
         // This ensures messages are decrypted as they arrive, avoiding encrypted UI display
         Task {
-            do {
-                #if DEBUG
-                print("[Pairing] Syncing E2EE keys (VPS) userId=\(VPSService.shared.userId ?? "nil"), deviceId=\(VPSService.shared.deviceId ?? "nil")")
-                #endif
-
-                // Initialize local E2EE keys
-                do {
-                    try await E2EEManager.shared.initializeKeys()
-                    #if DEBUG
-                    print("[Pairing] E2EE keys initialized, hasPublicKey=\(E2EEManager.shared.getMyPublicKeyX963Base64() != nil)")
-                    #endif
-                } catch {
-                    #if DEBUG
-                    print("[Pairing] E2EE initializeKeys error: \(error.localizedDescription)")
-                    #endif
-                }
-
-                // Publish our public key so Android can encrypt sync group keys for us
-                do {
-                    try await E2EEManager.shared.publishDevicePublicKey()
-                    #if DEBUG
-                    print("[Pairing] Published E2EE public key to server")
-                    #endif
-                } catch {
-                    #if DEBUG
-                    print("[Pairing] Failed to publish E2EE public key: \(error.localizedDescription)")
-                    #endif
-                }
-
-                // Request E2EE key sync from Android - finds the Android device and asks it to push keys
-                if let response = try? await VPSService.shared.getDevices() {
-                    if let androidDevice = response.devices.first(where: { $0.deviceType == "android" }) {
-                        try? await VPSService.shared.requestE2EEKeySync(targetDevice: androidDevice.id)
-                        #if DEBUG
-                        print("[Pairing] Sent E2EE key request to Android device: \(androidDevice.id)")
-                        #endif
-                    }
-                }
-
-                let encryptedKey = try await VPSService.shared.waitForDeviceE2eeKey(timeout: 60)
-
-                guard let encryptedKey = encryptedKey else {
-                    #if DEBUG
-                    print("[Pairing] E2EE key sync timed out - will retry on next launch")
-                    #endif
-                    return
-                }
-
-                let payloadData = try E2EEManager.shared.decryptDataKey(from: encryptedKey)
-                let payload = try JSONSerialization.jsonObject(with: payloadData) as? [String: Any]
-
-                guard let privateKeyPKCS8 = payload?["privateKeyPKCS8"] as? String,
-                      let publicKeyX963 = payload?["publicKeyX963"] as? String else {
-                    throw NSError(domain: "E2EE", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid key payload: \(payload?.keys.sorted() ?? [])"])
-                }
-
-                try E2EEManager.shared.importSyncGroupKeypair(
-                    privateKeyPKCS8Base64: privateKeyPKCS8,
-                    publicKeyX963Base64: publicKeyX963
-                )
-
-                #if DEBUG
-                print("[Pairing] E2EE keys synced, triggering message reload")
-                #endif
-
-                // Trigger message re-fetch so they decrypt with the new keys
-                NotificationCenter.default.post(name: .e2eeKeysUpdated, object: nil)
-
-            } catch {
-                #if DEBUG
-                print("[Pairing] E2EE key sync failed: \(error)")
-                if let decodingError = error as? DecodingError {
-                    print("[Pairing] Decoding error detail: \(decodingError)")
-                }
-                #endif
-            }
+            #if DEBUG
+            print("[Pairing] Syncing E2EE keys (VPS) userId=\(VPSService.shared.userId ?? "nil"), deviceId=\(VPSService.shared.deviceId ?? "nil")")
+            #endif
+            await syncE2EEKeys(reason: "pairing", timeout: 60)
         }
 
         // Update subscription status
@@ -1312,7 +1197,6 @@ class AppState: ObservableObject {
         updateDeviceOnlineStatus(userId: userId, online: true)
         startListeningForPhoneStatus(userId: userId)
         startClipboardSync(userId: userId)
-        startPhotoSync(userId: userId)
         startNotificationMirroring(userId: userId)
         startHotspotControl(userId: userId)
         startDndSync(userId: userId)
@@ -1345,7 +1229,6 @@ class AppState: ObservableObject {
         stopListeningForCalls()
         stopListeningForPhoneStatus()
         stopClipboardSync()
-        stopPhotoSync()
         stopNotificationMirroring()
         stopHotspotControl()
         stopDndSync()
@@ -1438,55 +1321,88 @@ class AppState: ObservableObject {
 
         e2eeAutoSyncTask = Task {
             defer { e2eeAutoSyncTask = nil }
+            await syncE2EEKeys(reason: reason)
+        }
+    }
+
+    // MARK: - Shared E2EE Key Sync Implementation
+
+    /// Performs the full E2EE key sync sequence: initialize local keys, publish public key,
+    /// find Android device, request key sync, wait for encrypted key, decrypt, and import.
+    /// Both `setPaired()` and `attemptAutoE2eeKeySyncVPS()` delegate to this single method.
+    ///
+    /// - Parameter reason: A label for logging (e.g., "pairing", "startup", "repair")
+    /// - Parameter timeout: Seconds to wait for the Android device to push the key. Default 60.
+    private func syncE2EEKeys(reason: String, timeout: TimeInterval = 60) async {
+        do {
+            // Step 1: Initialize local E2EE keys
             do {
                 try await E2EEManager.shared.initializeKeys()
-
-                // Publish our public key and request Android to push sync group keys.
-                // Without this, we only poll — if the key was never pushed (e.g. first
-                // push failed during pairing), the poll alone can never recover.
-                do { try await E2EEManager.shared.publishDevicePublicKey() } catch {
-                    #if DEBUG
-                    print("[E2EE] Auto sync (\(reason)) publish key failed: \(error.localizedDescription)")
-                    #endif
-                }
-                if let response = try? await VPSService.shared.getDevices(),
-                   let androidDevice = response.devices.first(where: { $0.deviceType == "android" }) {
-                    try? await VPSService.shared.requestE2EEKeySync(targetDevice: androidDevice.id)
-                    #if DEBUG
-                    print("[E2EE] Auto sync (\(reason)) sent key request to Android: \(androidDevice.id)")
-                    #endif
-                }
-
-                let encryptedKey = try await VPSService.shared.waitForDeviceE2eeKey(timeout: 45)
-                guard let encryptedKey = encryptedKey else {
-                    #if DEBUG
-                    print("[E2EE] Auto key sync (\(reason)) timed out waiting for key")
-                    #endif
-                    return
-                }
-
-                let payloadData = try E2EEManager.shared.decryptDataKey(from: encryptedKey)
-                let payload = try JSONSerialization.jsonObject(with: payloadData) as? [String: Any]
-
-                guard let privateKeyPKCS8 = payload?["privateKeyPKCS8"] as? String,
-                      let publicKeyX963 = payload?["publicKeyX963"] as? String else {
-                    throw NSError(domain: "E2EE", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid key payload"])
-                }
-
-                try E2EEManager.shared.importSyncGroupKeypair(
-                    privateKeyPKCS8Base64: privateKeyPKCS8,
-                    publicKeyX963Base64: publicKeyX963
-                )
-
-                NotificationCenter.default.post(name: .e2eeKeysUpdated, object: nil)
                 #if DEBUG
-                print("[E2EE] Auto key sync (\(reason)) succeeded")
+                print("[E2EE] (\(reason)) Keys initialized, hasPublicKey=\(E2EEManager.shared.getMyPublicKeyX963Base64() != nil)")
                 #endif
             } catch {
                 #if DEBUG
-                print("[E2EE] Auto key sync (\(reason)) failed: \(error.localizedDescription)")
+                print("[E2EE] (\(reason)) initializeKeys error: \(error.localizedDescription)")
                 #endif
             }
+
+            // Step 2: Publish our public key so Android can encrypt sync group keys for us
+            do {
+                try await E2EEManager.shared.publishDevicePublicKey()
+                #if DEBUG
+                print("[E2EE] (\(reason)) Published public key to server")
+                #endif
+            } catch {
+                #if DEBUG
+                print("[E2EE] (\(reason)) Failed to publish public key: \(error.localizedDescription)")
+                #endif
+            }
+
+            // Step 3: Find Android device and request E2EE key sync
+            if let response = try? await VPSService.shared.getDevices(),
+               let androidDevice = response.devices.first(where: { $0.deviceType == "android" }) {
+                try? await VPSService.shared.requestE2EEKeySync(targetDevice: androidDevice.id)
+                #if DEBUG
+                print("[E2EE] (\(reason)) Sent key request to Android device: \(androidDevice.id)")
+                #endif
+            }
+
+            // Step 4: Wait for Android to push the encrypted key
+            let encryptedKey = try await VPSService.shared.waitForDeviceE2eeKey(timeout: timeout)
+            guard let encryptedKey = encryptedKey else {
+                #if DEBUG
+                print("[E2EE] (\(reason)) Timed out waiting for key - will retry on next launch")
+                #endif
+                return
+            }
+
+            // Step 5: Decrypt and import the sync group keypair
+            let payloadData = try E2EEManager.shared.decryptDataKey(from: encryptedKey)
+            let payload = try JSONSerialization.jsonObject(with: payloadData) as? [String: Any]
+
+            guard let privateKeyPKCS8 = payload?["privateKeyPKCS8"] as? String,
+                  let publicKeyX963 = payload?["publicKeyX963"] as? String else {
+                throw NSError(domain: "E2EE", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid key payload: \(payload?.keys.sorted() ?? [])"])
+            }
+
+            try E2EEManager.shared.importSyncGroupKeypair(
+                privateKeyPKCS8Base64: privateKeyPKCS8,
+                publicKeyX963Base64: publicKeyX963
+            )
+
+            // Step 6: Notify the app that keys are ready so messages can be re-decrypted
+            NotificationCenter.default.post(name: .e2eeKeysUpdated, object: nil)
+            #if DEBUG
+            print("[E2EE] (\(reason)) Key sync succeeded, triggering message reload")
+            #endif
+        } catch {
+            #if DEBUG
+            print("[E2EE] (\(reason)) Key sync failed: \(error)")
+            if let decodingError = error as? DecodingError {
+                print("[E2EE] (\(reason)) Decoding error detail: \(decodingError)")
+            }
+            #endif
         }
     }
 
@@ -1582,12 +1498,6 @@ class AppState: ObservableObject {
             clipboardSyncService.syncNow()
         }
 
-        // Refresh photo sync
-        if photoSyncEnabled {
-            photoSyncService.stopSync()
-            photoSyncService.startSync(userId: userId)
-        }
-
         // Refresh notification mirroring
         if notificationMirrorService.isEnabled {
             notificationMirrorService.stopSync()
@@ -1609,28 +1519,6 @@ class AppState: ObservableObject {
             clipboardSyncService.startSync(userId: userId)
         } else {
             clipboardSyncService.stopSync()
-        }
-    }
-
-    // MARK: - Photo Sync
-
-    private func startPhotoSync(userId: String) {
-        if photoSyncEnabled {
-            photoSyncService.startSync(userId: userId)
-        }
-    }
-
-    private func stopPhotoSync() {
-        photoSyncService.stopSync()
-    }
-
-    func togglePhotoSync(enabled: Bool) {
-        photoSyncEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: "photo_sync_enabled")
-        if enabled, let userId = userId {
-            photoSyncService.startSync(userId: userId)
-        } else {
-            photoSyncService.stopSync()
         }
     }
 
@@ -2008,9 +1896,6 @@ class AppState: ObservableObject {
         // Throttle clipboard sync
         clipboardSyncService.reduceFrequency()
 
-        // Reduce photo sync frequency
-        photoSyncService.reduceSyncFrequency()
-
         // Throttle notification mirroring
         notificationMirrorService.reduceUpdateFrequency()
 
@@ -2024,9 +1909,6 @@ class AppState: ObservableObject {
 
         // Pause clipboard sync temporarily
         clipboardSyncService.pauseSync()
-
-        // Pause photo sync
-        photoSyncService.pauseSync()
 
         // Reduce notification mirroring frequency significantly
         notificationMirrorService.pauseMirroring()
@@ -2042,7 +1924,6 @@ class AppState: ObservableObject {
 
         // Suspend all sync services
         clipboardSyncService.stopSync()
-        photoSyncService.stopSync()
         notificationMirrorService.stopSync()
         dndSyncService.stopSync()
         mediaControlService.stopListening()

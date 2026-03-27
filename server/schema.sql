@@ -101,6 +101,8 @@ CREATE TABLE user_messages (
 CREATE INDEX idx_user_messages_user_date ON user_messages(user_id, date DESC);
 CREATE INDEX idx_user_messages_user_thread ON user_messages(user_id, thread_id);
 CREATE INDEX idx_user_messages_address ON user_messages(user_id, address);
+CREATE INDEX IF NOT EXISTS idx_messages_thread ON user_messages(user_id, thread_id, date DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_address ON user_messages(user_id, address, date DESC);
 
 -- Outgoing messages (queued to send)
 CREATE TABLE user_outgoing_messages (
@@ -118,6 +120,7 @@ CREATE TABLE user_outgoing_messages (
 );
 
 CREATE INDEX idx_outgoing_user_status ON user_outgoing_messages(user_id, status, timestamp);
+CREATE INDEX IF NOT EXISTS idx_outgoing_messages_status ON user_outgoing_messages(user_id, status, created_at);
 
 -- Spam messages
 CREATE TABLE user_spam_messages (
@@ -370,6 +373,8 @@ CREATE TABLE e2ee_repair_log (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
+CREATE INDEX IF NOT EXISTS idx_e2ee_repair_log ON e2ee_repair_log(user_id, created_at DESC);
+
 -- =====================================================
 -- SYNC & FILE TABLES
 -- =====================================================
@@ -389,22 +394,22 @@ CREATE TABLE user_file_transfers (
 
 CREATE INDEX idx_file_transfers_user ON user_file_transfers(user_id, timestamp DESC);
 
--- Photos
-CREATE TABLE user_photos (
-    id VARCHAR(128) PRIMARY KEY,
-    user_id VARCHAR(128) NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
-    file_name VARCHAR(255),
-    storage_url TEXT,
-    r2_key TEXT,
-    file_size BIGINT,
-    content_type VARCHAR(100),
-    photo_metadata JSONB,
-    thumbnail TEXT, -- Base64 thumbnail
-    taken_at BIGINT,
-    synced_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-
-CREATE INDEX idx_photos_user ON user_photos(user_id, taken_at DESC);
+-- Photos (DEPRECATED: photo sync feature removed, table kept for reference only)
+-- CREATE TABLE user_photos (
+--     id VARCHAR(128) PRIMARY KEY,
+--     user_id VARCHAR(128) NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
+--     file_name VARCHAR(255),
+--     storage_url TEXT,
+--     r2_key TEXT,
+--     file_size BIGINT,
+--     content_type VARCHAR(100),
+--     photo_metadata JSONB,
+--     thumbnail TEXT, -- Base64 thumbnail
+--     taken_at BIGINT,
+--     synced_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+-- );
+--
+-- CREATE INDEX idx_photos_user ON user_photos(user_id, taken_at DESC);
 
 -- Voicemails
 CREATE TABLE user_voicemails (

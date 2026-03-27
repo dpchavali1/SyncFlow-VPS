@@ -52,23 +52,38 @@ export async function deleteCache(key: string): Promise<void> {
   await redis.del(key);
 }
 
-// Rate limiting
+// Rate limiting (atomic INCR + EXPIRE via Lua script to prevent orphaned keys)
+const rateLimitScript = `
+  local current = redis.call('INCR', KEYS[1])
+  if current == 1 then
+    redis.call('EXPIRE', KEYS[1], ARGV[1])
+  end
+  local ttl = redis.call('TTL', KEYS[1])
+  return {current, ttl}
+`;
+
 export async function checkRateLimit(
   key: string,
   maxRequests: number,
   windowSeconds: number
 ): Promise<{ allowed: boolean; remaining: number; resetIn: number }> {
-  const current = await redis.incr(key);
-
-  if (current === 1) {
-    await redis.expire(key, windowSeconds);
-  }
-
-  const ttl = await redis.ttl(key);
+  const result = await redis.eval(rateLimitScript, 1, key, windowSeconds) as [number, number];
+  const current = result[0];
+  const ttl = result[1];
   const allowed = current <= maxRequests;
   const remaining = Math.max(0, maxRequests - current);
 
   return { allowed, remaining, resetIn: ttl > 0 ? ttl : windowSeconds };
+}
+
+// Device blacklist (for JWT revocation on device removal)
+export async function blacklistDevice(deviceId: string, ttlSeconds: number = 7 * 24 * 60 * 60): Promise<void> {
+  await redis.setex(`blacklist:device:${deviceId}`, ttlSeconds, '1');
+}
+
+export async function isDeviceBlacklisted(deviceId: string): Promise<boolean> {
+  const result = await redis.get(`blacklist:device:${deviceId}`);
+  return result !== null;
 }
 
 // Session management

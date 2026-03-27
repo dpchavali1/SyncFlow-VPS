@@ -20,20 +20,9 @@ import { apiRateLimit } from '../middleware/rateLimit';
 import { broadcastToUser, broadcastToAllDevicesExcept } from '../services/websocket';
 import { normalizePhoneNumber } from '../utils/phoneNumber';
 import { sendOutgoingMessageNotification } from '../services/push';
-import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
+import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { config } from '../config';
-
-// R2/S3 Client for generating presigned download URLs for MMS attachments
-const s3Client = new S3Client({
-  region: 'auto',
-  endpoint: config.r2.endpoint,
-  credentials: {
-    accessKeyId: config.r2.accessKeyId,
-    secretAccessKey: config.r2.secretAccessKey,
-  },
-});
-const R2_BUCKET = config.r2.bucketName;
+import { s3Client, R2_BUCKET } from '../services/r2';
 
 const router = Router();
 
@@ -403,7 +392,7 @@ router.get('/outgoing', async (req: Request, res: Response) => {
       // Generate presigned download URLs for R2-stored attachments
       if (Array.isArray(attachments)) {
         attachments = await Promise.all(attachments.map(async (att: any) => {
-          if (att.fileKey && !att.url) {
+          if (att.fileKey && !att.url && s3Client) {
             try {
               const command = new GetObjectCommand({ Bucket: R2_BUCKET, Key: att.fileKey });
               const url = await getSignedUrl(s3Client, command, { expiresIn: 3600 });

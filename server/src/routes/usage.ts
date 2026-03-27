@@ -25,17 +25,8 @@ import { query, queryOne } from '../services/database';
 import { authenticate } from '../middleware/auth';
 import { apiRateLimit } from '../middleware/rateLimit';
 import { config } from '../config';
-import { S3Client, DeleteObjectCommand } from '@aws-sdk/client-s3';
-
-// R2 client (only if configured)
-const s3Client = config.r2.endpoint ? new S3Client({
-  region: 'auto',
-  endpoint: config.r2.endpoint,
-  credentials: {
-    accessKeyId: config.r2.accessKeyId,
-    secretAccessKey: config.r2.secretAccessKey,
-  },
-}) : null;
+import { DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { s3Client, R2_BUCKET } from '../services/r2';
 
 // Resolve effective plan by checking subscription + expiry
 export async function getEffectivePlan(userId: string): Promise<{ plan: string; expiresAt: Date | null }> {
@@ -575,7 +566,7 @@ router.post('/reset-storage', async (req: Request, res: Response) => {
       for (const key of r2Keys) {
         try {
           await s3Client.send(new DeleteObjectCommand({
-            Bucket: config.r2.bucketName,
+            Bucket: R2_BUCKET,
             Key: key,
           }));
           r2Deleted++;
@@ -685,7 +676,6 @@ router.get('/subscription', async (req: Request, res: Response) => {
         features: {
           maxDevices: freeLimits.maxDevices,
           maxFileSize: freeLimits.maxFileSize,
-          photoSync: true,
           mediaControl: false,
         },
       });
@@ -704,7 +694,6 @@ router.get('/subscription', async (req: Request, res: Response) => {
       features: {
         maxDevices: subLimits.maxDevices,
         maxFileSize: subLimits.maxFileSize,
-        photoSync: isPro,
         mediaControl: isPro,
       },
     });

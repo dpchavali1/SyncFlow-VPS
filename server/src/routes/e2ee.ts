@@ -175,6 +175,18 @@ router.post('/device-key/:deviceId', async (req: Request, res: Response) => {
     const body = deviceKeySchema.parse(req.body);
     const userId = req.userId!;
 
+    // Verify the target deviceId belongs to the authenticated user or is self
+    if (deviceId !== req.deviceId) {
+      const deviceOwned = await queryOne(
+        `SELECT id FROM user_devices WHERE id = $1 AND user_id = $2`,
+        [deviceId, userId]
+      );
+      if (!deviceOwned) {
+        res.status(403).json({ error: 'Cannot publish keys for a device you do not own' });
+        return;
+      }
+    }
+
     // Validate X9.63 public key format if provided directly (not encrypted payload)
     if (body.publicKeyX963 && !body.encryptedKey && body.format === 'x963') {
       if (!isValidX963PublicKey(body.publicKeyX963)) {

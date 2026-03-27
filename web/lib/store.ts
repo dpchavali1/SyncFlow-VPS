@@ -58,7 +58,7 @@ interface Device {
   pairedAt: number
 }
 
-type MessageFolder = 'inbox' | 'spam' | 'photos'
+type MessageFolder = 'inbox' | 'spam'
 
 interface AppState {
   // Authentication

@@ -24,6 +24,14 @@ import java.util.concurrent.TimeUnit
  * Note: Phone authentication features are not available in VPS mode.
  * Use VPSAuthManager directly for full VPS authentication features.
  */
+@Deprecated(
+    message = "AuthManager is a pass-through wrapper around VPSAuthManager with no added logic. " +
+        "Use VPSAuthManager.getInstance(context) directly for all authentication operations.",
+    replaceWith = ReplaceWith(
+        "VPSAuthManager.getInstance(context)",
+        "com.phoneintegration.app.vps.VPSAuthManager"
+    )
+)
 class AuthManager private constructor(private val context: Context) {
 
     companion object {

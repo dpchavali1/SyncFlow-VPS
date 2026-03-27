@@ -440,7 +440,9 @@ class VPSService {
           throw error;
         }
         // Continue polling on status check errors
-        console.warn('[Pairing] Status check error, retrying...', error.message);
+        if (process.env.NODE_ENV !== 'production') {
+          console.warn('[Pairing] Status check error, retrying...', error.message);
+        }
         await new Promise(resolve => setTimeout(resolve, 2000));
         continue;
       }
@@ -716,7 +718,9 @@ class VPSService {
 
     this.reconnectAttempts++;
     if (this.reconnectAttempts > 20) {
-      console.warn('[VPS] WebSocket max reconnect attempts (20) reached, giving up');
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn('[VPS] WebSocket max reconnect attempts (20) reached, giving up');
+      }
       return;
     }
     const delay = Math.min(Math.pow(2, Math.min(this.reconnectAttempts, 5)) * 1000, 30000);
@@ -1100,19 +1104,6 @@ class VPSService {
     return this.request('POST', '/api/usage/subscription/sync');
   }
 
-  // Photos
-  async getPhotos(limit = 50): Promise<any> {
-    return this.request('GET', `/api/photos?limit=${limit}`);
-  }
-
-  async getPhotoDownloadUrl(r2Key: string): Promise<string> {
-    const res: any = await this.request('POST', '/api/photos/download-url', { r2Key });
-    return res.downloadUrl;
-  }
-
-  async deletePhoto(photoId: string): Promise<void> {
-    await this.request('POST', '/api/photos/delete', { photoId });
-  }
 }
 
 // Export true singleton — survives Next.js chunk re-evaluation

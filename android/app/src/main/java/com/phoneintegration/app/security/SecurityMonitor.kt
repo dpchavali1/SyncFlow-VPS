@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedDeque
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -38,7 +39,8 @@ class SecurityMonitor private constructor(private val context: Context) {
     private val _securityEvents = MutableSharedFlow<SecurityEvent>()
     val securityEvents: SharedFlow<SecurityEvent> = _securityEvents.asSharedFlow()
 
-    // Security metrics tracking
+    // Security metrics tracking (timestamps for windowed rate limiting)
+    private val eventTimestamps = ConcurrentHashMap<SecurityEventType, ConcurrentLinkedDeque<Long>>()
     private val eventCounts = ConcurrentHashMap<SecurityEventType, AtomicInteger>()
     private val lastAlertTimes = ConcurrentHashMap<AlertType, Long>()
     private val failedAuthAttempts = ConcurrentHashMap<String, AtomicInteger>()
@@ -62,8 +64,9 @@ class SecurityMonitor private constructor(private val context: Context) {
                     return@launch
                 }
 
-                // Track event counts
+                // Track event counts and timestamps for windowed rate limiting
                 eventCounts.getOrPut(event.type) { AtomicInteger(0) }.incrementAndGet()
+                eventTimestamps.getOrPut(event.type) { ConcurrentLinkedDeque() }.addLast(System.currentTimeMillis())
 
                 // Special handling for authentication events
                 handleAuthenticationEvent(event)
@@ -228,12 +231,16 @@ class SecurityMonitor private constructor(private val context: Context) {
     }
 
     /**
-     * Get event count in the last minute for a specific type
+     * Get event count in the last 60 seconds for a specific type (windowed, not cumulative)
      */
     private fun getEventCountInLastMinute(eventType: SecurityEventType): Int {
-        // This is a simplified implementation
-        // In a real system, you'd track timestamps for each event
-        return eventCounts[eventType]?.get() ?: 0
+        val deque = eventTimestamps[eventType] ?: return 0
+        val cutoff = System.currentTimeMillis() - 60_000L
+        // Evict entries older than 60 seconds
+        while (deque.peekFirst()?.let { it < cutoff } == true) {
+            deque.pollFirst()
+        }
+        return deque.size
     }
 
     /**
@@ -265,6 +272,7 @@ class SecurityMonitor private constructor(private val context: Context) {
      */
     fun resetMetrics() {
         eventCounts.clear()
+        eventTimestamps.clear()
         failedAuthAttempts.clear()
         lastAlertTimes.clear()
     }

@@ -1,7 +1,7 @@
 'use client'
 
 import { useMemo, useState, useRef, useEffect, useCallback, memo } from 'react'
-import { Search, User, GripVertical, X, Lock, Unlock, Inbox, ShieldAlert, Image, MessageCircle } from 'lucide-react'
+import { Search, User, GripVertical, X, Lock, Unlock, Inbox, ShieldAlert, MessageCircle } from 'lucide-react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useAppStore } from '@/lib/store'
 import { format, isToday, isYesterday } from 'date-fns'
@@ -85,16 +85,13 @@ const ConversationItem = memo(function ConversationItem({
   const gradient = getAvatarGradient(displayName)
 
   return (
-    <motion.div
+    <div
       onClick={onClick}
-      className={`group mx-2 my-0.5 px-3 py-3 rounded-xl cursor-pointer transition-all duration-200 ${
+      className={`group mx-2 my-0.5 px-3 py-3 rounded-xl cursor-pointer transition-all duration-200 hover:scale-[1.005] active:scale-[0.995] ${
         isSelected
           ? 'bg-primary-500/10 dark:bg-primary-500/15 shadow-sm'
           : 'hover:bg-surface-100/80 dark:hover:bg-surface-700/40'
       }`}
-      whileHover={{ scale: 1.005 }}
-      whileTap={{ scale: 0.995 }}
-      layout
     >
       <div className="flex items-center gap-3">
         {/* Avatar */}
@@ -129,7 +126,7 @@ const ConversationItem = memo(function ConversationItem({
           </div>
         </div>
       </div>
-    </motion.div>
+    </div>
   )
 })
 
@@ -146,15 +143,13 @@ const SpamConversationItem = memo(function SpamConversationItem({
   const displayName = conv.contactName || conv.address
 
   return (
-    <motion.div
+    <div
       onClick={onClick}
-      className={`group mx-2 my-0.5 px-3 py-3 rounded-xl cursor-pointer transition-all duration-200 ${
+      className={`group mx-2 my-0.5 px-3 py-3 rounded-xl cursor-pointer transition-all duration-200 hover:scale-[1.005] active:scale-[0.995] ${
         isSelected
           ? 'bg-red-500/10 dark:bg-red-500/15 shadow-sm'
           : 'hover:bg-surface-100/80 dark:hover:bg-surface-700/40'
       }`}
-      whileHover={{ scale: 1.005 }}
-      whileTap={{ scale: 0.995 }}
     >
       <div className="flex items-center gap-3">
         <div className="w-11 h-11 rounded-full bg-gradient-to-br from-red-300 to-red-500 dark:from-red-500/60 dark:to-red-700/60 flex items-center justify-center text-white font-semibold text-sm flex-shrink-0">
@@ -181,7 +176,7 @@ const SpamConversationItem = memo(function SpamConversationItem({
           </div>
         </div>
       </div>
-    </motion.div>
+    </div>
   )
 })
 
@@ -189,7 +184,6 @@ const SpamConversationItem = memo(function SpamConversationItem({
 const FOLDERS = [
   { id: 'inbox' as const, label: 'Inbox', icon: Inbox, activeColor: 'bg-primary-500 text-white shadow-glow/20' },
   { id: 'spam' as const, label: 'Spam', icon: ShieldAlert, activeColor: 'bg-red-500 text-white shadow-sm' },
-  { id: 'photos' as const, label: 'Photos', icon: Image, activeColor: 'bg-emerald-500 text-white shadow-sm' },
 ]
 
 export default function ConversationList() {
@@ -388,7 +382,7 @@ export default function ConversationList() {
     setSelectedSpamAddress(address)
   }, [setSelectedSpamAddress])
 
-  const handleFolderClick = useCallback((folder: 'inbox' | 'spam' | 'photos') => {
+  const handleFolderClick = useCallback((folder: 'inbox' | 'spam') => {
     setActiveFolder(folder)
     if (folder !== 'inbox') setSelectedConversation(null)
     if (folder !== 'spam') setSelectedSpamAddress(null)
@@ -447,6 +441,7 @@ export default function ConversationList() {
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-surface-400" />
           <input
+            id="conversation-search"
             type="text"
             placeholder="Search..."
             value={searchQuery}

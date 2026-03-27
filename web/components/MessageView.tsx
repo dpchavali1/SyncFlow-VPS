@@ -55,6 +55,32 @@ function getAvatarGradient(name: string): string {
  *   - E2EE failure warnings when decryption of an encrypted message fails
  *   - Read receipts from other devices (e.g. "Read on Mac at 3:45 PM")
  */
+/** MMS image with React state-based error handling (no DOM manipulation). */
+function MmsImage({ src, isSent }: { src: string; isSent: boolean }) {
+  const [errored, setErrored] = useState(false)
+
+  if (errored) {
+    return (
+      <div className={`p-4 flex items-center gap-2 ${isSent ? 'text-white/60' : 'text-gray-400 dark:text-gray-500'}`}>
+        <ImageIcon className="w-5 h-5" />
+        <span className="text-sm">Image failed to load</span>
+      </div>
+    )
+  }
+
+  return (
+    <a href={src} target="_blank" rel="noopener noreferrer" className="block">
+      <img
+        src={src}
+        alt="MMS attachment"
+        className="max-w-full h-auto cursor-pointer rounded-xl hover:opacity-90 transition-opacity"
+        style={{ maxHeight: '300px', objectFit: 'contain' }}
+        onError={() => setErrored(true)}
+      />
+    </a>
+  )
+}
+
 const MessageBubble = memo(function MessageBubble({ msg, isSent, readReceipt, isNew }: MessageBubbleProps) {
   const timestamp = format(new Date(msg.date), 'MMM d, h:mm a')
   const readTime =
@@ -89,57 +115,7 @@ const MessageBubble = memo(function MessageBubble({ msg, isSent, readReceipt, is
               )
             }
 
-            return (
-              <a
-                key={idx}
-                href={imageSrc}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="block"
-              >
-                <img
-                  src={imageSrc}
-                  alt="MMS attachment"
-                  className="max-w-full h-auto cursor-pointer rounded-xl hover:opacity-90 transition-opacity"
-                  style={{ maxHeight: '300px', objectFit: 'contain' }}
-                  onError={(e) => {
-                    const target = e.target as HTMLImageElement
-                    const parent = target.parentElement
-
-                    if (!parent) return
-
-                    // Remove image element
-                    target.remove()
-
-                    // Create error placeholder using DOM methods (XSS-safe)
-                    const errorContainer = document.createElement('div')
-                    errorContainer.className = 'p-4 flex items-center gap-2 text-gray-400'
-
-                    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
-                    svg.setAttribute('class', 'w-5 h-5')
-                    svg.setAttribute('fill', 'none')
-                    svg.setAttribute('stroke', 'currentColor')
-                    svg.setAttribute('viewBox', '0 0 24 24')
-
-                    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
-                    path.setAttribute('stroke-linecap', 'round')
-                    path.setAttribute('stroke-linejoin', 'round')
-                    path.setAttribute('stroke-width', '2')
-                    path.setAttribute('d', 'M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z')
-
-                    svg.appendChild(path)
-
-                    const text = document.createElement('span')
-                    text.className = 'text-sm'
-                    text.textContent = 'Image failed to load'  // textContent is XSS-safe
-
-                    errorContainer.appendChild(svg)
-                    errorContainer.appendChild(text)
-                    parent.appendChild(errorContainer)
-                  }}
-                />
-              </a>
-            )
+            return <MmsImage key={idx} src={imageSrc} isSent={isSent} />
           })}
 
           {/* Text content */}
@@ -261,12 +237,8 @@ export default function MessageView({ onOpenAI }: MessageViewProps) {
   // Check authentication status
   useEffect(() => {
     const checkAuth = async () => {
-      // Check VPS mode - must match firebase.ts isVPSMode() logic
-      const isVPSMode = localStorage.getItem('useVPSMode') === 'true' ||
-                        !!process.env.NEXT_PUBLIC_VPS_URL ||
-                        !!localStorage.getItem('vps_access_token') ||
-                        vpsService.isAuthenticated ||
-                        true // Default to VPS mode
+      // VPS mode is always enabled (Firebase legacy path removed)
+      const isVPSMode = true
 
       if (isVPSMode) {
         // VPS mode: check VPS auth or stored user ID

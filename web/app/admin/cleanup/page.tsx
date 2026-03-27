@@ -434,10 +434,8 @@ export default function AdminCleanupPage() {
 
   // Check VPS mode - Firebase cleanup not available in VPS mode
   useEffect(() => {
-    const isVPSMode = localStorage.getItem('useVPSMode') === 'true' ||
-                      !!process.env.NEXT_PUBLIC_VPS_URL ||
-                      !!localStorage.getItem('vps_access_token') ||
-                      true // Default to VPS mode
+    // VPS mode is always enabled (Firebase legacy path removed)
+    const isVPSMode = true
 
     if (isVPSMode) {
       console.log('[AdminCleanup] VPS mode active - Firebase cleanup not available')
@@ -3853,7 +3851,7 @@ export default function AdminCleanupPage() {
                         <div className="p-2 bg-purple-100 rounded-lg">
                           <FileImage className="w-5 h-5 text-purple-600" />
                         </div>
-                        <span className="font-semibold text-gray-900">Photo Sync</span>
+                        <span className="font-semibold text-gray-900">Photos (Deprecated)</span>
                       </div>
                       <p className="text-2xl font-bold text-purple-600">{r2Analytics.fileCounts.photos.toLocaleString()}</p>
                       <p className="text-sm text-gray-600">{(r2Analytics.sizeCounts.photos / (1024 * 1024)).toFixed(2)} MB</p>
@@ -3897,7 +3895,7 @@ export default function AdminCleanupPage() {
                       <option value="all">All Types</option>
                       <option value="files">File Transfers</option>
                       <option value="mms">MMS Attachments</option>
-                      <option value="photos">Photo Sync</option>
+                      <option value="photos">Photos (Deprecated)</option>
                     </select>
                   </div>
                   <button

@@ -1,5 +1,5 @@
 /**
- * VPSService+Features - E2EE keys, spam, usage, billing, files, photos,
+ * VPSService+Features - E2EE keys, spam, usage, billing, files,
  *                       notifications, account deletion, media, phone status,
  *                       clipboard, DND, hotspot, voicemail, find phone, links,
  *                       plan refresh timer, and E2EE key publishing
@@ -307,48 +307,6 @@ extension VPSService {
 
     public func deleteR2File(fileKey: String) async throws {
         let _: VPSGenericResponse = try await post("/api/file-transfers/delete-file", body: ["fileKey": fileKey])
-    }
-
-    // MARK: - Photos
-
-    public struct VPSPhoto: Codable {
-        let id: String
-        let fileName: String?
-        let storageUrl: String?
-        let r2Key: String?
-        let fileSize: Int64?
-        let contentType: String?
-        let metadata: [String: AnyCodableValue]?
-        let takenAt: Int64?
-        let syncedAt: Int64?
-    }
-
-    public struct VPSPhotosResponse: Codable {
-        let photos: [VPSPhoto]
-    }
-
-    public func getPhotos(limit: Int = 50, before: Int64? = nil) async throws -> VPSPhotosResponse {
-        var path = "/api/photos?limit=\(limit)"
-        if let before = before {
-            path += "&before=\(before)"
-        }
-        return try await get(path)
-    }
-
-    public func getPhotoDownloadUrl(r2Key: String) async throws -> String {
-        let response: [String: String] = try await post("/api/photos/download-url", body: ["r2Key": r2Key])
-        guard let url = response["downloadUrl"] else {
-            throw VPSError.invalidResponse
-        }
-        return url
-    }
-
-    public func deletePhoto(photoId: String, r2Key: String? = nil) async throws {
-        var body: [String: String] = ["photoId": photoId]
-        if let r2Key = r2Key {
-            body["r2Key"] = r2Key
-        }
-        let _: [String: Bool] = try await post("/api/photos/delete", body: body)
     }
 
     // MARK: - Notifications

@@ -42,7 +42,7 @@ interface BroadcastMessage {
 const userConnections = new Map<string, Set<AuthenticatedWebSocket>>();
 
 export function createWebSocketServer(server: HttpServer): WebSocketServer {
-  const wss = new WebSocketServer({ server });
+  const wss = new WebSocketServer({ server, maxPayload: 65536 }); // 64KB max message size
 
   console.log(`WebSocket server attached to HTTP server`);
 
@@ -306,6 +306,15 @@ export function broadcastToAllDevicesExcept(
       client.send(messageStr);
     }
   });
+}
+
+// Get total WebSocket connection count across all users
+export function getConnectionCount(): number {
+  let total = 0;
+  userConnections.forEach((connections) => {
+    total += connections.size;
+  });
+  return total;
 }
 
 // Get all online users with their device info (for admin use)

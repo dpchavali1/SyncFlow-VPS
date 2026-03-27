@@ -113,17 +113,17 @@ router.get('/export-data', async (req: Request, res: Response) => {
       notifications,
     ] = await Promise.all([
       query<Record<string, any>>(
-        `SELECT device_id, device_name, device_type, platform, last_seen_at, created_at
-         FROM user_devices WHERE user_id = $1 ORDER BY created_at DESC`,
+        `SELECT id, name, device_type, model, app_version, last_seen, paired_at
+         FROM user_devices WHERE user_id = $1 ORDER BY paired_at DESC`,
         [userId]
       ),
       query<Record<string, any>>(
-        `SELECT id, thread_id, sender, body, timestamp, read, message_type, status
-         FROM user_messages WHERE user_id = $1 ORDER BY timestamp DESC LIMIT 10000`,
+        `SELECT id, thread_id, address, body, date, read, type, is_mms
+         FROM user_messages WHERE user_id = $1 ORDER BY date DESC LIMIT 10000`,
         [userId]
       ),
       query<Record<string, any>>(
-        `SELECT id, display_name, phone_number, email, photo_uri, starred, created_at
+        `SELECT id, display_name, phone_numbers, emails, starred, created_at
          FROM user_contacts WHERE user_id = $1 ORDER BY display_name ASC`,
         [userId]
       ),

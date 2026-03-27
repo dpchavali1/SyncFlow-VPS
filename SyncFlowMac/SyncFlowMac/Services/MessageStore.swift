@@ -213,19 +213,8 @@ class MessageStore: ObservableObject {
     /// Hash of message data to avoid redundant processing.
     private var lastMessageHash: Int = 0
 
-    /// Check if VPS mode is enabled
-    private var isVPSMode: Bool {
-        // Default to VPS mode
-        if UserDefaults.standard.bool(forKey: "useVPSMode") {
-            return true
-        }
-        // Check if VPS service has valid tokens
-        if VPSService.shared.isAuthenticated {
-            return true
-        }
-        // Default to VPS mode for new installations
-        return true
-    }
+    /// VPS mode is always enabled (legacy non-VPS code paths removed).
+    private let isVPSMode = true
 
     // MARK: - Thread Safety
 

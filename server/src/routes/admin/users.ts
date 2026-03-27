@@ -36,15 +36,17 @@ router.get('/users', async (req: Request, res: Response) => {
 
     params.push(limit, offset);
 
-    // Check which optional tables exist (user_subscriptions, user_photos, user_file_transfers)
+    // Check which optional tables exist (user_subscriptions)
     const tableCheck = await query<{ tablename: string }>(`
-      SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename IN ('user_subscriptions', 'user_photos', 'user_file_transfers')
+      SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename IN ('user_subscriptions')
     `);
     const existingTables = new Set(tableCheck.map(t => t.tablename));
     const hasSubs = existingTables.has('user_subscriptions');
-    const hasPhotos = existingTables.has('user_photos');
-    const hasTransfers = existingTables.has('user_file_transfers');
 
+    // NOTE: Storage calculation (MMS jsonb_array_elements) was removed from this
+    // list query because it caused an expensive correlated subquery per row.
+    // Use the POST /users/:userId/recalculate-storage endpoint for accurate
+    // per-user storage, or read from user_usage.storage_bytes (pre-computed).
     const users = await query<{
       uid: string;
       phone: string | null;
@@ -64,9 +66,7 @@ router.get('/users', async (req: Request, res: Response) => {
         (SELECT COUNT(*) FROM user_devices d WHERE d.user_id = u.uid) as device_count,
         (SELECT COUNT(*) FROM user_messages m WHERE m.user_id = u.uid) as message_count,
         (SELECT MAX(d.last_seen) FROM user_devices d WHERE d.user_id = u.uid) as last_seen,
-        ${hasPhotos ? `COALESCE((SELECT COUNT(*) * 500000 FROM user_photos p WHERE p.user_id = u.uid), 0)` : '0'} +
-        ${hasTransfers ? `COALESCE((SELECT SUM(file_size) FROM user_file_transfers ft WHERE ft.user_id = u.uid), 0)` : '0'} +
-        COALESCE((SELECT SUM((part->>'fileSize')::bigint) FROM user_messages m, jsonb_array_elements(m.mms_parts) AS part WHERE m.user_id = u.uid AND m.mms_parts IS NOT NULL), 0) as storage_bytes,
+        COALESCE((SELECT uu.storage_bytes FROM user_usage uu WHERE uu.user_id = u.uid), 0) as storage_bytes,
         ${hasSubs ? `(SELECT s.plan FROM user_subscriptions s WHERE s.user_id = u.uid ORDER BY s.started_at DESC LIMIT 1)` : 'NULL'} as plan,
         ${hasSubs ? `(SELECT s.expires_at FROM user_subscriptions s WHERE s.user_id = u.uid ORDER BY s.started_at DESC LIMIT 1)` : 'NULL'} as plan_expires_at,
         NULL as plan_assigned_by

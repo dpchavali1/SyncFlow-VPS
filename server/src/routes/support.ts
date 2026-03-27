@@ -143,7 +143,7 @@ async function handleChat(req: Request, res: Response) {
         response = await handleEncryptionQuery(userId);
         break;
       case 'photo_sync':
-        response = handlePhotoSyncQuery();
+        response = 'Photo sync has been removed from SyncFlow. You can still transfer files using the file transfer feature.';
         break;
       case 'help':
         response = getHelpResponse();
@@ -333,7 +333,7 @@ async function handleDataUsageQuery(userId: string | null): Promise<string> {
     }
 
     if (storageBytes > storageLimit * 0.8) {
-      response += `\n\n**Note:** You're approaching your storage limit. Consider clearing MMS & photo data in Settings > Usage & Limits, or upgrade to Pro for 1GB storage.`;
+      response += `\n\n**Note:** You're approaching your storage limit. Consider clearing MMS data in Settings > Usage & Limits, or upgrade to Pro for 1GB storage.`;
     }
 
     return response;
@@ -364,7 +364,7 @@ async function handleSubscriptionQuery(userId: string | null): Promise<string> {
       response += `- 100MB storage\n`;
       response += `- 500MB/month uploads\n`;
       response += `- 50MB max file size\n`;
-      response += `- SMS/MMS sync, calls, contacts, photo sync\n\n`;
+      response += `- SMS/MMS sync, calls, contacts, file transfer\n\n`;
       response += `**Upgrade to Pro** for 5 devices, 1GB storage, 2GB/month uploads, media control, and more.`;
       return response;
     }
@@ -792,11 +792,11 @@ function handleDeliveryStatusQuery(): string {
 }
 
 function handlePhotoSyncQuery(): string {
-  return `**Photo Sync**\n\nSync photos from your Android phone to Mac/Web.\n\n**Features:**\n- Recent photos automatically synced\n- View photo gallery on Mac/Web\n- Download photos to your computer\n- Photos stored securely in cloud storage\n\n**Available to all users:**\n- Free: Limited by 100MB storage quota\n- Pro: 2GB storage quota\n\n**How it works:**\n- Photo sync runs automatically when your Android phone is connected\n- Photos appear in the Photo Gallery on Mac/Web\n\n**Manage storage:** Clear synced photos in Settings > Usage & Limits > Clear MMS & Photo Data.`;
+  return `**Photo Sync — Removed**\n\nPhoto sync has been removed from SyncFlow. You can still transfer individual files using the file transfer feature (Quick Drop).`;
 }
 
 function getHelpResponse(): string {
-  return `**Hi! I'm the SyncFlow Support Assistant.**\n\nI can help you with your account. Here's what you can ask:\n\n**Account & Security:**\n- "What's my user ID?" / "How does account recovery work?"\n- "Show my account info"\n- "Encryption status" / "Repair encryption" / "Messages not decrypting"\n- "Safety number" / "Key backup" / "Key rotation"\n\n**Messages & Sync:**\n- "How many messages synced?" / "Sync status"\n- "Schedule a message" / "Delivery status checkmarks"\n- "Read receipts" / "Typing indicators"\n\n**Devices & Features:**\n- "Show my devices" / "Unpair a device"\n- "Clipboard sync" / "Find my phone"\n- "Notification mirroring" / "Do Not Disturb sync"\n- "Media control" / "Hotspot control"\n- "Share links" / "Phone battery status"\n\n**Photos & Storage:**\n- "Photo sync" / "Voicemail sync"\n- "How much data have I used?" / "Storage quota"\n\n**Subscription & Billing:**\n- "What's my plan?" / "Show billing history"\n- "Cancel subscription"\n\n**Spam:**\n- "Spam settings" / "How many spam blocked?"\n\n**Troubleshooting:**\n- "Messages not syncing" / "Reset my sync"\n- "How do I pair?" / "Delete my account"\n\nJust type your question!`;
+  return `**Hi! I'm the SyncFlow Support Assistant.**\n\nI can help you with your account. Here's what you can ask:\n\n**Account & Security:**\n- "What's my user ID?" / "How does account recovery work?"\n- "Show my account info"\n- "Encryption status" / "Repair encryption" / "Messages not decrypting"\n- "Safety number" / "Key backup" / "Key rotation"\n\n**Messages & Sync:**\n- "How many messages synced?" / "Sync status"\n- "Schedule a message" / "Delivery status checkmarks"\n- "Read receipts" / "Typing indicators"\n\n**Devices & Features:**\n- "Show my devices" / "Unpair a device"\n- "Clipboard sync" / "Find my phone"\n- "Notification mirroring" / "Do Not Disturb sync"\n- "Media control" / "Hotspot control"\n- "Share links" / "Phone battery status"\n\n**Storage:**\n- "Voicemail sync"\n- "How much data have I used?" / "Storage quota"\n\n**Subscription & Billing:**\n- "What's my plan?" / "Show billing history"\n- "Cancel subscription"\n\n**Spam:**\n- "Spam settings" / "How many spam blocked?"\n\n**Troubleshooting:**\n- "Messages not syncing" / "Reset my sync"\n- "How do I pair?" / "Delete my account"\n\nJust type your question!`;
 }
 
 function getGeneralResponse(msg: string): string {
@@ -817,7 +817,7 @@ function getGeneralResponse(msg: string): string {
 
   // Pricing
   if (msg.includes('pro') || msg.includes('premium') || msg.includes('upgrade') || msg.includes('price') || msg.includes('cost')) {
-    return `**SyncFlow Plans & Pricing**\n\n**Free — $0.00**\n- 2 devices, 100MB storage, 500MB/month uploads\n- SMS/MMS sync, calls, contacts, file transfer, photo sync\n\n**Pro Monthly — $4.99/month**\n- 5 devices, 1GB storage, 2GB/month uploads\n- 1GB max file size, media control\n\n**Pro Yearly — $39.99/year** (save 33%)\n- Same features as Pro Monthly\n\n**Pro 3-Year — $79.99 one-time** (best value)\n- Same features, pay once for 3 years\n\nUpgrade in Settings > Subscription.`;
+    return `**SyncFlow Plans & Pricing**\n\n**Free — $0.00**\n- 2 devices, 100MB storage, 500MB/month uploads\n- SMS/MMS sync, calls, contacts, file transfer\n\n**Pro Monthly — $4.99/month**\n- 5 devices, 1GB storage, 2GB/month uploads\n- 1GB max file size, media control\n\n**Pro Yearly — $39.99/year** (save 33%)\n- Same features as Pro Monthly\n\n**Pro 3-Year — $79.99 one-time** (best value)\n- Same features, pay once for 3 years\n\nUpgrade in Settings > Subscription.`;
   }
 
   // File transfer
@@ -846,7 +846,7 @@ function getGeneralResponse(msg: string): string {
   }
 
   // Default
-  return `I can help with:\n\n**Account & Data:**\n- "What's my user ID?" / "Recovery code"\n- "My subscription" / "Data usage" / "My devices"\n\n**Features:**\n- "Clipboard sync" / "Find my phone" / "Notifications"\n- "Schedule message" / "Delivery status" / "Photo sync"\n- "Media control" / "DND sync" / "Hotspot" / "Voicemail"\n- "Pair devices" / "File transfer" / "Share links"\n\n**Troubleshooting:**\n- "Messages not syncing" / "Reset sync"\n- "Encryption status" / "Repair encryption" / "Not decrypting"\n\nType **"help"** for the full list, or contact syncflow.contact@gmail.com!`;
+  return `I can help with:\n\n**Account & Data:**\n- "What's my user ID?" / "Recovery code"\n- "My subscription" / "Data usage" / "My devices"\n\n**Features:**\n- "Clipboard sync" / "Find my phone" / "Notifications"\n- "Schedule message" / "Delivery status"\n- "Media control" / "DND sync" / "Hotspot" / "Voicemail"\n- "Pair devices" / "File transfer" / "Share links"\n\n**Troubleshooting:**\n- "Messages not syncing" / "Reset sync"\n- "Encryption status" / "Repair encryption" / "Not decrypting"\n\nType **"help"** for the full list, or contact syncflow.contact@gmail.com!`;
 }
 
 // ---------------------------------------------------------------------------

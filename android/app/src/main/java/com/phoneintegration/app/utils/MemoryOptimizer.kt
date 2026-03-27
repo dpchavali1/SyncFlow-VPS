@@ -178,7 +178,7 @@ class MemoryOptimizer private constructor(private val context: Context) {
                     "Close other apps to free up memory",
                     "Restart the app to clear memory",
                     "Avoid loading large message histories",
-                    "Disable photo sync temporarily"
+                    "Disable file transfer temporarily"
                 ))
             }
             MemoryPressure.HIGH -> {

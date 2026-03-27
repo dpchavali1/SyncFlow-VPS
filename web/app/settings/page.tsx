@@ -101,12 +101,8 @@ export default function SettingsPage() {
 
       setUserId(storedUserId)
 
-      // Check VPS mode - must match firebase.ts isVPSMode() logic
-      const isVPSMode = localStorage.getItem('useVPSMode') === 'true' ||
-                        !!process.env.NEXT_PUBLIC_VPS_URL ||
-                        !!localStorage.getItem('vps_access_token') ||
-                        vpsService.isAuthenticated ||
-                        true // Default to VPS mode
+      // VPS mode is always enabled (Firebase legacy path removed)
+      const isVPSMode = true
 
       if (isVPSMode) {
         // Wait for tokens to be restored from IndexedDB before making API calls

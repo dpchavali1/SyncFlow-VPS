@@ -18,10 +18,8 @@ import com.phoneintegration.app.data.PreferencesManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import java.util.concurrent.TimeUnit
 
 class VPSSyncService(context: Context) {
 
@@ -64,12 +62,8 @@ class VPSSyncService(context: Context) {
     // Cache address → threadId lookups to avoid repeated content provider queries
     private val addressThreadIdCache = java.util.concurrent.ConcurrentHashMap<String, Long>()
 
-    // HTTP client for R2 uploads
-    private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(120, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .build()
+    // HTTP client for R2 uploads - reuses VPSClient's shared client with extended timeouts
+    private val httpClient = vpsClient.fileTransferHttpClient
 
     // State flows
     private val _syncState = MutableStateFlow<SyncState>(SyncState.Idle)

@@ -90,7 +90,6 @@ import kotlinx.coroutines.*
  * VPS Backend Only - Uses VPS API instead of Firebase.
  *
  * @see FileTransferService For file-based sync
- * @see PhotoSyncService For photo sync
  */
 
 // =============================================================================

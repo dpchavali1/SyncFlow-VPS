@@ -5,6 +5,7 @@ import { authenticate } from '../middleware/auth';
 import { apiRateLimit } from '../middleware/rateLimit';
 import { broadcastToUser } from '../services/websocket';
 import { normalizePhoneNumber } from '../utils/phoneNumber';
+import { blacklistDevice } from '../services/redis';
 
 const router = Router();
 
@@ -129,13 +130,16 @@ router.delete('/:id', async (req: Request, res: Response) => {
       return;
     }
 
+    // Blacklist the removed device's JWT tokens (7-day TTL matches access token expiry)
+    await blacklistDevice(id);
+
     // Notify all user's devices about the removal
     broadcastToUser(userId, 'devices', {
       type: 'device_removed',
       data: { deviceId: id, removedBy: req.deviceId },
     });
 
-    console.log(`[Devices] Device ${id} removed by ${req.deviceId} for user ${userId}`);
+    console.log(`[Devices] Device ${id} removed and blacklisted by ${req.deviceId} for user ${userId}`);
     res.json({ success: true });
   } catch (error) {
     console.error('Delete device error:', error);
