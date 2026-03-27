@@ -9,7 +9,6 @@ import SwiftUI
 
 struct DialerView: View {
     @EnvironmentObject var appState: AppState
-    @Environment(\.dismiss) private var dismiss
 
     @State private var phoneNumber: String = ""
     @State private var isCallInProgress = false
@@ -29,12 +28,13 @@ struct DialerView: View {
                     .font(.title2)
                     .fontWeight(.semibold)
                 Spacer()
-                Button(action: { dismiss() }) {
+                Button(action: { appState.showDialer = false }) {
                     Image(systemName: "xmark.circle.fill")
                         .font(.title2)
                         .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
+                .keyboardShortcut(.escape, modifiers: [])
             }
             .padding(.horizontal)
 
@@ -132,7 +132,7 @@ struct DialerView: View {
 
         // Dismiss after a short delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            dismiss()
+            appState.showDialer = false
         }
     }
 }
