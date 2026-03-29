@@ -47,7 +47,7 @@ struct SyncFlowCallView: View {
     @State private var showControls = true
     @State private var controlsTimer: Timer?
     @State private var callDurationTimer: Timer?
-    @State private var callDuration: TimeInterval = 0
+    @State private var now = Date()
     @State private var showScreenSharePicker = false
 
     var body: some View {
@@ -204,6 +204,18 @@ struct SyncFlowCallView: View {
         .onAppear { startControlsAutoHide(); startDurationTimer() }
         .onDisappear { controlsTimer?.invalidate(); callDurationTimer?.invalidate() }
         .onTapGesture { toggleControls() }
+        .onKeyPress("m") {
+            callManager.toggleMute()
+            return .handled
+        }
+        .onKeyPress("v") {
+            callManager.toggleVideo()
+            return .handled
+        }
+        .onKeyPress(.escape) {
+            appState.endSyncFlowCall()
+            return .handled
+        }
         .sheet(isPresented: $showScreenSharePicker) {
             ScreenSharePicker(
                 screenCaptureService: screenCaptureService,
@@ -218,15 +230,11 @@ struct SyncFlowCallView: View {
                 },
                 onSelectWindow: { window in
                     showScreenSharePicker = false
-                    // Window sharing uses the same flow
                     Task {
-                        let factory = SyncFlowCallManager.factory
-                        try? await screenCaptureService.startSharingWindow(window, factory: factory)
-                        if let track = screenCaptureService.getVideoTrack() {
-                            await MainActor.run {
-                                callManager.isScreenSharing = true
-                            }
-                        }
+                        try? await callManager.startWindowSharing(
+                            window: window,
+                            screenCaptureService: screenCaptureService
+                        )
                     }
                 },
                 onCancel: { showScreenSharePicker = false }
@@ -255,8 +263,16 @@ struct SyncFlowCallView: View {
     }
 
     private var formattedDuration: String {
-        let minutes = Int(callDuration) / 60
-        let seconds = Int(callDuration) % 60
+        // Derive duration from answeredAt so it survives view recreation
+        let elapsed: TimeInterval
+        if let answeredAt = callManager.currentCall?.answeredAt {
+            elapsed = now.timeIntervalSince(answeredAt)
+        } else {
+            elapsed = 0
+        }
+        let totalSeconds = max(0, Int(elapsed))
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
         return String(format: "%02d:%02d", minutes, seconds)
     }
 
@@ -269,7 +285,14 @@ struct SyncFlowCallView: View {
 
     private var connectionColor: Color {
         switch callManager.callState {
-        case .connected: return .green
+        case .connected:
+            // Use stats-based quality when connected
+            switch callManager.connectionQuality {
+            case .good, .excellent: return .green
+            case .fair: return .yellow
+            case .poor: return .red
+            case .unknown: return .green
+            }
         case .connecting: return .yellow
         case .failed: return .red
         default: return .gray
@@ -311,7 +334,7 @@ struct SyncFlowCallView: View {
     private func startDurationTimer() {
         callDurationTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
             if callManager.callState == .connected {
-                callDuration += 1
+                now = Date()
             }
         }
     }

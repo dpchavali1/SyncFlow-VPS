@@ -108,6 +108,7 @@ class SyncFlowCallManager: NSObject, ObservableObject {
     private var disconnectTimeoutTask: Task<Void, Never>?
     private var answerPollingTask: Task<Void, Never>?
     private var icePollingTask: Task<Void, Never>?
+    private var statsTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
     private var signalObserver: NSObjectProtocol?
     private var incomingCallObserver: NSObjectProtocol?
@@ -428,12 +429,13 @@ class SyncFlowCallManager: NSObject, ObservableObject {
             callState = .ended
             currentCall?.status = .ended
             currentCall?.endedAt = Date()
-            // Reset after brief delay so UI can show "ended" state
+            // Reset isEndingCall immediately so new calls aren't blocked
+            isEndingCall = false
+            // Reset UI state after brief delay so UI can show "ended" state
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
                 guard self?.callState == .ended else { return }
                 self?.callState = .idle
                 self?.currentCall = nil
-                self?.isEndingCall = false
             }
         }
     }
@@ -531,12 +533,20 @@ class SyncFlowCallManager: NSObject, ObservableObject {
     }
 
     func toggleVideo() {
-        isVideoEnabled.toggle()
-        localVideoTrack?.isEnabled = isVideoEnabled
-        if !isVideoEnabled {
+        if isVideoEnabled {
+            // Turning off - always succeeds
+            isVideoEnabled = false
+            localVideoTrack?.isEnabled = false
             videoCapturer?.stopCapture()
         } else {
-            startVideoCapture()
+            // Turning on - only set enabled if capture actually starts
+            let hasCamera = startVideoCapture()
+            if hasCamera {
+                isVideoEnabled = true
+                localVideoTrack?.isEnabled = true
+            } else {
+                print("[SyncFlowCallManager] Cannot enable video - no camera available")
+            }
         }
     }
 
@@ -606,8 +616,42 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         }
     }
 
+    /// Start screen sharing with a window, adding the track to the existing PeerConnection.
+    @available(macOS 12.3, *)
+    func startWindowSharing(window: SCWindow, screenCaptureService: ScreenCaptureService) async throws {
+        let factory = SyncFlowCallManager.factory
+
+        try await screenCaptureService.startSharingWindow(window, factory: factory)
+
+        guard let screenTrack = screenCaptureService.getVideoTrack() else {
+            throw CallError.connectionFailed
+        }
+
+        if let pc = peerConnection {
+            pc.add(screenTrack, streamIds: [ScreenCaptureService.screenStreamId])
+            print("[SyncFlowCallManager] Window share track added to active call")
+        }
+
+        await MainActor.run {
+            isScreenSharing = true
+        }
+    }
+
     @available(macOS 12.3, *)
     func stopScreenSharing(screenCaptureService: ScreenCaptureService) async {
+        // Remove the screen share sender from PeerConnection before stopping capture
+        if let pc = peerConnection {
+            let screenTrack = screenCaptureService.getVideoTrack()
+            for sender in pc.senders {
+                if sender.track?.trackId == screenTrack?.trackId
+                    || sender.track?.trackId == ScreenCaptureService.screenTrackId {
+                    pc.removeTrack(sender)
+                    print("[SyncFlowCallManager] Screen share track removed from PeerConnection")
+                    break
+                }
+            }
+        }
+
         await screenCaptureService.stopSharing()
         await MainActor.run {
             isScreenSharing = false
@@ -688,6 +732,10 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         pc.setRemoteDescription(remoteDescription) { [weak self] error in
             if let error = error {
                 print("[SyncFlowCallManager] Failed to set remote description: \(error)")
+                DispatchQueue.main.async {
+                    self?.callState = .failed("SDP negotiation failed")
+                }
+                Task { try? await self?.endCall() }
                 return
             }
 
@@ -705,6 +753,10 @@ class SyncFlowCallManager: NSObject, ObservableObject {
             pc.answer(for: constraints) { [weak self] answer, error in
                 if let error = error {
                     print("[SyncFlowCallManager] Failed to create answer: \(error)")
+                    DispatchQueue.main.async {
+                        self?.callState = .failed("SDP negotiation failed")
+                    }
+                    Task { try? await self?.endCall() }
                     return
                 }
                 guard let answer = answer else { return }
@@ -712,6 +764,10 @@ class SyncFlowCallManager: NSObject, ObservableObject {
                 pc.setLocalDescription(answer) { [weak self] error in
                     if let error = error {
                         print("[SyncFlowCallManager] Failed to set local description: \(error)")
+                        DispatchQueue.main.async {
+                            self?.callState = .failed("SDP negotiation failed")
+                        }
+                        Task { try? await self?.endCall() }
                         return
                     }
 
@@ -759,6 +815,10 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         pc.setRemoteDescription(remoteDescription) { [weak self] error in
             if let error = error {
                 print("[SyncFlowCallManager] Failed to set remote answer: \(error)")
+                DispatchQueue.main.async {
+                    self?.callState = .failed("SDP negotiation failed")
+                }
+                Task { try? await self?.endCall() }
                 return
             }
             self?.hasRemoteDescription = true
@@ -910,15 +970,16 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         }
     }
 
-    private func startVideoCapture() {
-        guard let capturer = videoCapturer else { return }
+    @discardableResult
+    private func startVideoCapture() -> Bool {
+        guard let capturer = videoCapturer else { return false }
 
         let devices = RTCCameraVideoCapturer.captureDevices()
         guard let frontCamera = devices.first(where: {
             $0.position == .front
         }) ?? devices.first else {
             print("[SyncFlowCallManager] No camera available")
-            return
+            return false
         }
 
         let formats = RTCCameraVideoCapturer.supportedFormats(for: frontCamera)
@@ -934,14 +995,15 @@ class SyncFlowCallManager: NSObject, ObservableObject {
 
         guard let selectedFormat = format else {
             print("[SyncFlowCallManager] No camera format available")
-            return
+            return false
         }
 
         let fps = selectedFormat.videoSupportedFrameRateRanges
             .max(by: { $0.maxFrameRate < $1.maxFrameRate })?
-            .maxFrameRate ?? 30.0
+            .maxFrameRate ?? 24.0
 
-        capturer.startCapture(with: frontCamera, format: selectedFormat, fps: Int(min(fps, 30)))
+        capturer.startCapture(with: frontCamera, format: selectedFormat, fps: Int(min(fps, 24)))
+        return true
     }
 
     private func createOffer() async throws -> RTCSessionDescription {
@@ -978,11 +1040,14 @@ class SyncFlowCallManager: NSObject, ObservableObject {
     // MARK: - ICE Server Parsing
 
     private func parseIceServers(from turnCreds: [String: Any]) -> [RTCIceServer] {
+        // Always include a public STUN server as baseline connectivity fallback
+        let defaultStun = RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])
+
         guard let iceServersArray = turnCreds["iceServers"] as? [[String: Any]] else {
-            return [RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"])]
+            return [defaultStun]
         }
 
-        return iceServersArray.compactMap { serverDict -> RTCIceServer? in
+        var servers = iceServersArray.compactMap { serverDict -> RTCIceServer? in
             let urls: [String]
             if let urlsArray = serverDict["urls"] as? [String] {
                 urls = urlsArray
@@ -1000,6 +1065,61 @@ class SyncFlowCallManager: NSObject, ObservableObject {
             }
             return RTCIceServer(urlStrings: urls)
         }
+
+        // Ensure STUN is always present even when TURN servers are provided
+        let hasStun = servers.contains { server in
+            server.urlStrings.contains { $0.hasPrefix("stun:") }
+        }
+        if !hasStun {
+            servers.insert(defaultStun, at: 0)
+        }
+
+        return servers
+    }
+
+    // MARK: - Stats Monitoring
+
+    /// Collects WebRTC stats every 5 seconds to monitor connection quality.
+    /// Extracts packet loss from inbound-rtp reports and updates connectionQuality.
+    private func startStatsCollection() {
+        statsTimer?.invalidate()
+        statsTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            guard let self = self, let pc = self.peerConnection else { return }
+            pc.statistics { report in
+                var totalPacketsReceived: UInt64 = 0
+                var totalPacketsLost: UInt64 = 0
+
+                for (_, stats) in report.statistics {
+                    // Look for inbound-rtp stats (type "inbound-rtp")
+                    guard stats.type == "inbound-rtp" else { continue }
+                    if let packetsReceived = stats.values["packetsReceived"] as? UInt64 {
+                        totalPacketsReceived += packetsReceived
+                    } else if let packetsReceived = stats.values["packetsReceived"] as? Int {
+                        totalPacketsReceived += UInt64(packetsReceived)
+                    }
+                    if let packetsLost = stats.values["packetsLost"] as? UInt64 {
+                        totalPacketsLost += packetsLost
+                    } else if let packetsLost = stats.values["packetsLost"] as? Int {
+                        totalPacketsLost += UInt64(max(0, packetsLost))
+                    }
+                }
+
+                let totalPackets = totalPacketsReceived + totalPacketsLost
+                guard totalPackets > 0 else { return }
+
+                let lossRate = Double(totalPacketsLost) / Double(totalPackets)
+
+                DispatchQueue.main.async { [weak self] in
+                    if lossRate < 0.02 {
+                        self?.connectionQuality = .good
+                    } else if lossRate < 0.05 {
+                        self?.connectionQuality = .fair
+                    } else {
+                        self?.connectionQuality = .poor
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Cleanup
@@ -1007,6 +1127,14 @@ class SyncFlowCallManager: NSObject, ObservableObject {
     private func cleanupWebRTC() {
         videoCapturer?.stopCapture()
         videoCapturer = nil
+
+        // Remove all tracks/senders before closing the PeerConnection to ensure
+        // proper teardown and OHTTP BYE signaling to the remote peer.
+        if let pc = peerConnection {
+            for sender in pc.senders {
+                pc.removeTrack(sender)
+            }
+        }
 
         peerConnection?.close()
         peerConnection = nil
@@ -1017,12 +1145,16 @@ class SyncFlowCallManager: NSObject, ObservableObject {
         hasRemoteDescription = false
         icePollingTask?.cancel()
         icePollingTask = nil
+        statsTimer?.invalidate()
+        statsTimer = nil
         processedIceCandidates.removeAll()
 
         DispatchQueue.main.async { [weak self] in
             self?.localVideoTrack = nil
             self?.remoteVideoTrack = nil
             self?.remoteAudioTrack = nil
+            self?.screenShareTrack = nil
+            self?.isScreenSharing = false
             self?.isMuted = false
             self?.isVideoEnabled = false
             self?.networkQuality = .unknown
@@ -1129,6 +1261,7 @@ extension SyncFlowCallManager: RTCPeerConnectionDelegate {
                 if self.currentCall?.answeredAt == nil {
                     self.currentCall?.answeredAt = Date()
                 }
+                self.startStatsCollection()
             case .disconnected:
                 self.connectionQuality = .poor
                 self.disconnectTimeoutTask?.cancel()

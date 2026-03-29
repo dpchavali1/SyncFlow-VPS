@@ -1052,12 +1052,27 @@ async function getOtherCallUser(callId: string, myUserId: string): Promise<strin
   return null;
 }
 
+// Helper: verify a user is a participant in a call (caller or callee)
+async function isCallParticipant(callId: string, userId: string): Promise<boolean> {
+  const row = await queryOne(
+    `SELECT 1 FROM user_syncflow_calls WHERE id = $1 AND (user_id = $2 OR callee_user_id = $2)`,
+    [callId, userId]
+  );
+  return !!row;
+}
+
 // POST /calls/signaling - Send a WebRTC signal
 router.post('/signaling', async (req: Request, res: Response) => {
   try {
     const body = signalingSchema.parse(req.body);
     const userId = req.userId!;
     const fromDevice = req.deviceId || '';
+
+    // Validate that the requesting user is a participant in this call
+    if (!await isCallParticipant(body.callId, userId)) {
+      res.status(403).json({ error: 'Not a participant in this call' });
+      return;
+    }
 
     await query(
       `INSERT INTO user_webrtc_signaling (user_id, call_id, signal_type, signal_data, from_device, to_device)
@@ -1106,6 +1121,12 @@ router.get('/signaling/:callId', async (req: Request, res: Response) => {
     const userId = req.userId!;
     const deviceId = req.deviceId || '';
 
+    // Validate that the requesting user is a participant in this call
+    if (!await isCallParticipant(callId, userId)) {
+      res.status(403).json({ error: 'Not a participant in this call' });
+      return;
+    }
+
     // Return signals NOT sent by this device.
     // We filter by from_device (not user_id) because same-user calls
     // (e.g. Mac <-> Android on same account) share the same user_id,
@@ -1135,15 +1156,22 @@ router.get('/signaling/:callId', async (req: Request, res: Response) => {
   }
 });
 
-// DELETE /calls/signaling/:callId - Clean up signals after call ends
+// DELETE /calls/signaling/:callId - Clean up ALL signals for a call after it ends
 router.delete('/signaling/:callId', async (req: Request, res: Response) => {
   try {
     const { callId } = req.params;
     const userId = req.userId!;
 
+    // Verify the requesting user is a participant before deleting
+    if (!await isCallParticipant(callId, userId)) {
+      res.status(403).json({ error: 'Not a participant in this call' });
+      return;
+    }
+
+    // Delete ALL signals for this call (both participants), not just the requester's
     await query(
-      `DELETE FROM user_webrtc_signaling WHERE user_id = $1 AND call_id = $2`,
-      [userId, callId]
+      `DELETE FROM user_webrtc_signaling WHERE call_id = $1`,
+      [callId]
     );
 
     res.json({ success: true });

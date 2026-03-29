@@ -1,8 +1,6 @@
 package com.phoneintegration.app.ui.call
 
 import android.app.Activity
-import android.content.Context
-import android.os.PowerManager
 import android.view.ViewGroup
 import android.view.WindowManager
 import androidx.compose.animation.*
@@ -74,34 +72,13 @@ fun SyncFlowCallScreen(
     var elapsedSeconds by remember { mutableStateOf(0) }
     val coroutineScope = rememberCoroutineScope()
 
-    // Keep screen on during video call using wake lock and window flags
+    // Keep screen on during video call using window flag (safer than wake locks)
     DisposableEffect(Unit) {
         val activity = context as? Activity
-        val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-        val wakeLock = powerManager.newWakeLock(
-            PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-            "SyncFlow:VideoCallWakeLock"
-        )
-
-        // Acquire wake lock
-        try {
-            wakeLock.acquire(60 * 60 * 1000L) // 1 hour max
-            android.util.Log.d("SyncFlowCallScreen", "Wake lock acquired")
-        } catch (e: Exception) {
-            android.util.Log.e("SyncFlowCallScreen", "Failed to acquire wake lock", e)
-        }
-
-        // Keep screen on via window flags
         activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         android.util.Log.d("SyncFlowCallScreen", "Screen keep-on flag set")
 
         onDispose {
-            // Release wake lock
-            if (wakeLock.isHeld) {
-                wakeLock.release()
-                android.util.Log.d("SyncFlowCallScreen", "Wake lock released")
-            }
-            // Remove keep screen on flag
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             android.util.Log.d("SyncFlowCallScreen", "Screen keep-on flag cleared")
         }
@@ -469,6 +446,7 @@ fun VideoRenderer(
     var localEglBase by remember { mutableStateOf<org.webrtc.EglBase?>(null) }
     var isInitialized by remember { mutableStateOf(false) }
     var currentTrackId by remember { mutableStateOf<String?>(null) }
+    var isSinkAdded by remember { mutableStateOf(false) }
 
     // Track the video track to handle changes
     val trackId = remember(videoTrack) {
@@ -484,9 +462,12 @@ fun VideoRenderer(
                 if (currentTrackId != null && currentTrackId != trackId) {
                     android.util.Log.d("VideoRenderer", "Track changed from $currentTrackId to $trackId")
                 }
-                videoTrack.addSink(renderer)
-                currentTrackId = trackId
-                android.util.Log.d("VideoRenderer", "Added sink for track: $trackId, mirror: $mirror")
+                if (!isSinkAdded) {
+                    videoTrack.addSink(renderer)
+                    isSinkAdded = true
+                    currentTrackId = trackId
+                    android.util.Log.d("VideoRenderer", "Added sink for track: $trackId, mirror: $mirror")
+                }
             } catch (e: Exception) {
                 android.util.Log.e("VideoRenderer", "Error adding sink", e)
             }
@@ -494,12 +475,16 @@ fun VideoRenderer(
 
         onDispose {
             renderer?.let { r ->
-                try {
-                    videoTrack.removeSink(r)
-                    android.util.Log.d("VideoRenderer", "Removed sink for track: $trackId")
-                } catch (e: Exception) {
-                    // Track may already be disposed - this is expected during cleanup
-                    android.util.Log.w("VideoRenderer", "Error removing sink (track may be disposed): ${e.message}")
+                if (isSinkAdded) {
+                    try {
+                        videoTrack.removeSink(r)
+                        isSinkAdded = false
+                        android.util.Log.d("VideoRenderer", "Removed sink for track: $trackId")
+                    } catch (e: Exception) {
+                        // Track may already be disposed - this is expected during cleanup
+                        isSinkAdded = false
+                        android.util.Log.w("VideoRenderer", "Error removing sink (track may be disposed): ${e.message}")
+                    }
                 }
             }
         }
@@ -514,8 +499,9 @@ fun VideoRenderer(
                     // Re-add sink on resume to ensure video continues
                     rendererRef?.let { renderer ->
                         try {
-                            if (isInitialized) {
+                            if (isInitialized && !isSinkAdded) {
                                 videoTrack.addSink(renderer)
+                                isSinkAdded = true
                             }
                         } catch (e: Exception) {
                             // Track may have been disposed while backgrounded
@@ -554,9 +540,12 @@ fun VideoRenderer(
                     rendererRef = this
                     isInitialized = true
                     // Add sink after initialization
-                    videoTrack.addSink(this)
-                    currentTrackId = trackId
-                    android.util.Log.d("VideoRenderer", "Initial sink added for track: $trackId")
+                    if (!isSinkAdded) {
+                        videoTrack.addSink(this)
+                        isSinkAdded = true
+                        currentTrackId = trackId
+                        android.util.Log.d("VideoRenderer", "Initial sink added for track: $trackId")
+                    }
                 } catch (e: Exception) {
                     android.util.Log.e("VideoRenderer", "Error initializing renderer", e)
                 }
@@ -564,10 +553,16 @@ fun VideoRenderer(
         },
         modifier = modifier,
         update = { renderer ->
-            // Handle updates - ensure sink is attached
+            // Handle updates - ensure sink is attached for new tracks
             try {
                 if (isInitialized && currentTrackId != trackId) {
+                    // Track changed - remove old sink first, then add new
+                    if (isSinkAdded) {
+                        try { videoTrack.removeSink(renderer) } catch (_: Exception) {}
+                        isSinkAdded = false
+                    }
                     videoTrack.addSink(renderer)
+                    isSinkAdded = true
                     currentTrackId = trackId
                     android.util.Log.d("VideoRenderer", "Updated sink for new track: $trackId")
                 }
@@ -576,11 +571,15 @@ fun VideoRenderer(
             }
         },
         onRelease = { renderer ->
-            try {
-                videoTrack.removeSink(renderer)
-            } catch (e: Exception) {
-                // Track may already be disposed during cleanup - this is expected
-                android.util.Log.w("VideoRenderer", "removeSink on release (track may be disposed): ${e.message}")
+            if (isSinkAdded) {
+                try {
+                    videoTrack.removeSink(renderer)
+                    isSinkAdded = false
+                } catch (e: Exception) {
+                    // Track may already be disposed during cleanup - this is expected
+                    isSinkAdded = false
+                    android.util.Log.w("VideoRenderer", "removeSink on release (track may be disposed): ${e.message}")
+                }
             }
             try {
                 renderer.clearImage()

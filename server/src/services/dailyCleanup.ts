@@ -53,6 +53,7 @@ async function runAutoCleanup(): Promise<Record<string, number>> {
     { name: 'oldCallCommands', sql: `DELETE FROM user_call_commands WHERE created_at < NOW() - INTERVAL '7 days' RETURNING id` },
     { name: 'orphanedPairingUsers', sql: `DELETE FROM users WHERE NOT EXISTS (SELECT 1 FROM user_devices d WHERE d.user_id = users.uid) AND NOT EXISTS (SELECT 1 FROM user_messages m WHERE m.user_id = users.uid) AND created_at < NOW() - INTERVAL '1 hour' RETURNING id` },
     { name: 'oldAnalyticsEvents', sql: `DELETE FROM analytics_events WHERE created_at < NOW() - INTERVAL '90 days' RETURNING id` },
+    { name: 'oldSignaling', sql: `DELETE FROM user_webrtc_signaling WHERE created_at < NOW() - INTERVAL '1 hour' RETURNING id` },
   ];
 
   // Auto-fail outgoing messages stuck in 'pending' for over 1 hour (Android unreachable)

@@ -2,6 +2,10 @@ package com.phoneintegration.app.webrtc
 
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.os.Build
 import android.util.Log
 import com.phoneintegration.app.SyncFlowCallService
@@ -29,6 +33,7 @@ class SyncFlowCallManager(context: Context) {
     private var peerConnection: PeerConnection? = null
     private var eglBase: EglBase? = null
     private var localAudioTrack: AudioTrack? = null
+    private var localAudioSource: AudioSource? = null
     private var localVideoSource: VideoSource? = null
     private var localVideoTrackInternal: VideoTrack? = null
     private var videoCapturer: CameraVideoCapturer? = null
@@ -43,6 +48,7 @@ class SyncFlowCallManager(context: Context) {
         currentToDevice = deviceId
     }
     private var isFrontCamera = true
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
     private var disconnectTimeoutJob: Job? = null
     private var ringingTimeoutJob: Job? = null
     private var answerPollingJob: Job? = null
@@ -522,6 +528,56 @@ class SyncFlowCallManager(context: Context) {
         }
     }
 
+    /**
+     * Register a network change listener that triggers ICE restart when connectivity changes
+     * during an active call (e.g., Wi-Fi to cellular handoff).
+     */
+    private fun registerNetworkCallback() {
+        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                Log.d(TAG, "Network available: $network")
+                val state = _callState.value
+                if (state == CallState.Connected || state == CallState.Connecting) {
+                    if (isCallInitiator) {
+                        scope.launch {
+                            Log.d(TAG, "Network changed during active call, attempting ICE restart")
+                            try {
+                                attemptIceRestart()
+                            } catch (e: Exception) {
+                                Log.e(TAG, "ICE restart on network change failed: ${e.message}")
+                            }
+                        }
+                    }
+                }
+            }
+
+            override fun onLost(network: Network) {
+                Log.d(TAG, "Network lost: $network")
+            }
+        }
+
+        val request = NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        connectivityManager.registerNetworkCallback(request, callback)
+        networkCallback = callback
+        Log.d(TAG, "Network callback registered for ICE restart")
+    }
+
+    private fun unregisterNetworkCallback() {
+        networkCallback?.let { callback ->
+            try {
+                val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                connectivityManager.unregisterNetworkCallback(callback)
+                Log.d(TAG, "Network callback unregistered")
+            } catch (e: Exception) {
+                Log.w(TAG, "Error unregistering network callback: ${e.message}")
+            }
+        }
+        networkCallback = null
+    }
+
     // ==================== Signal Handling ====================
 
     private suspend fun handleSignal(callId: String, signalType: String, signalData: Any, fromDevice: String) {
@@ -788,6 +844,9 @@ class SyncFlowCallManager(context: Context) {
             }
         })
 
+        // Register network callback for ICE restart on connectivity changes
+        registerNetworkCallback()
+
         // Add local audio track with echo cancellation, noise suppression, etc.
         val audioConstraints = MediaConstraints().apply {
             mandatory.add(MediaConstraints.KeyValuePair("googEchoCancellation", "true"))
@@ -795,8 +854,8 @@ class SyncFlowCallManager(context: Context) {
             mandatory.add(MediaConstraints.KeyValuePair("googNoiseSuppression", "true"))
             mandatory.add(MediaConstraints.KeyValuePair("googHighpassFilter", "true"))
         }
-        val audioSource = peerConnectionFactory?.createAudioSource(audioConstraints)
-        localAudioTrack = peerConnectionFactory?.createAudioTrack("audio0", audioSource)
+        localAudioSource = peerConnectionFactory?.createAudioSource(audioConstraints)
+        localAudioTrack = peerConnectionFactory?.createAudioTrack("audio0", localAudioSource)
         localAudioTrack?.let { peerConnection?.addTrack(it, listOf("stream0")) }
 
         // Add local video track if video call
@@ -823,13 +882,36 @@ class SyncFlowCallManager(context: Context) {
             { _videoEffect.value }
         )
         videoCapturer?.initialize(surfaceTextureHelper, context, effectObserver)
-        videoCapturer?.startCapture(1280, 720, 30)
+        videoCapturer?.startCapture(640, 480, 24)
 
         localVideoTrackInternal = peerConnectionFactory?.createVideoTrack("video0", localVideoSource)
         localVideoTrackInternal?.setEnabled(true)
         localVideoTrackInternal?.let {
             peerConnection?.addTrack(it, listOf("stream0"))
             _localVideoTrackFlow.value = it
+            applyBandwidthConstraints()
+        }
+    }
+
+    /**
+     * Apply bandwidth constraints on the video sender to prevent excessive bitrate
+     * that degrades quality on poor connections.
+     */
+    private fun applyBandwidthConstraints() {
+        val pc = peerConnection ?: return
+        for (sender in pc.senders) {
+            if (sender.track()?.kind() == "video") {
+                val params = sender.parameters
+                if (params.encodings.isNotEmpty()) {
+                    for (encoding in params.encodings) {
+                        encoding.maxBitrateBps = 1_500_000
+                        encoding.minBitrateBps = 100_000
+                        encoding.maxFramerate = 30
+                    }
+                    sender.parameters = params
+                    Log.d(TAG, "Bandwidth constraints applied: max=1.5Mbps, min=100Kbps, fps=30")
+                }
+            }
         }
     }
 
@@ -901,11 +983,13 @@ class SyncFlowCallManager(context: Context) {
     @Suppress("UNCHECKED_CAST")
     private fun parseIceServers(turnCreds: Map<String, Any>): List<PeerConnection.IceServer> {
         val servers = mutableListOf<PeerConnection.IceServer>()
+
+        // Always include public STUN as the first server for reliable connectivity
+        servers.add(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer())
+
         val iceServersList = turnCreds["iceServers"] as? List<Map<String, Any>>
         if (iceServersList == null) {
-            // Fallback to public STUN if TURN credentials unavailable
-            Log.w(TAG, "No TURN credentials, falling back to public STUN")
-            servers.add(PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer())
+            Log.w(TAG, "No TURN credentials, using public STUN only")
             return servers
         }
 
@@ -927,8 +1011,9 @@ class SyncFlowCallManager(context: Context) {
     }
 
     private fun cleanupWebRTC() {
-        // Phase 0: Stop screen share if active
+        // Phase 0: Stop screen share if active and unregister network callback
         stopScreenShare()
+        unregisterNetworkCallback()
 
         // Phase 1: Stop capture immediately
         try { videoCapturer?.stopCapture() } catch (_: Exception) {}
@@ -942,6 +1027,7 @@ class SyncFlowCallManager(context: Context) {
         val capturer = videoCapturer
         val localTrack = localVideoTrackInternal
         val audioTrack = localAudioTrack
+        val audioSource = localAudioSource
         val videoSource = localVideoSource
         val textureHelper = surfaceTextureHelper
         val pc = peerConnection
@@ -950,6 +1036,7 @@ class SyncFlowCallManager(context: Context) {
         videoCapturer = null
         localVideoTrackInternal = null
         localAudioTrack = null
+        localAudioSource = null
         localVideoSource = null
         surfaceTextureHelper = null
         peerConnection = null
@@ -971,6 +1058,7 @@ class SyncFlowCallManager(context: Context) {
             try { capturer?.dispose() } catch (e: Exception) { Log.w(TAG, "capturer dispose: ${e.message}") }
             try { localTrack?.dispose() } catch (e: Exception) { Log.w(TAG, "localTrack dispose: ${e.message}") }
             try { audioTrack?.dispose() } catch (e: Exception) { Log.w(TAG, "audioTrack dispose: ${e.message}") }
+            try { audioSource?.dispose() } catch (e: Exception) { Log.w(TAG, "audioSource dispose: ${e.message}") }
             try { videoSource?.dispose() } catch (e: Exception) { Log.w(TAG, "videoSource dispose: ${e.message}") }
             try { textureHelper?.dispose() } catch (e: Exception) { Log.w(TAG, "textureHelper dispose: ${e.message}") }
             try { pc?.close() } catch (e: Exception) { Log.w(TAG, "pc close: ${e.message}") }
@@ -1061,6 +1149,20 @@ class SyncFlowCallManager(context: Context) {
      * Stop screen sharing. Removes track from PeerConnection and releases capture.
      */
     fun stopScreenShare() {
+        // Remove screen share track sender from PeerConnection before disposing
+        val screenTrack = screenShareManager?.getVideoTrack()
+        if (screenTrack != null && peerConnection != null) {
+            try {
+                val senderToRemove = peerConnection?.senders?.find { it.track()?.id() == screenTrack.id() }
+                if (senderToRemove != null) {
+                    peerConnection?.removeTrack(senderToRemove)
+                    Log.d(TAG, "Screen share sender removed from PeerConnection")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Error removing screen share sender: ${e.message}")
+            }
+        }
+
         screenShareManager?.stopCapture()
         screenShareManager = null
         _isScreenSharing.value = false
@@ -1103,8 +1205,15 @@ class SyncFlowCallManager(context: Context) {
     }
 
     fun switchCamera() {
-        videoCapturer?.switchCamera(null)
-        isFrontCamera = !isFrontCamera
+        videoCapturer?.switchCamera(object : CameraVideoCapturer.CameraSwitchHandler {
+            override fun onCameraSwitchDone(isFront: Boolean) {
+                isFrontCamera = isFront
+                Log.d(TAG, "Camera switched, isFrontCamera=$isFront")
+            }
+            override fun onCameraSwitchError(error: String?) {
+                Log.e(TAG, "Camera switch failed: $error")
+            }
+        })
     }
 
     fun refreshVideoTrack() {
@@ -1117,6 +1226,24 @@ class SyncFlowCallManager(context: Context) {
 
     fun release() {
         Log.d(TAG, "Releasing SyncFlowCallManager resources")
+
+        // Send final status update in NonCancellable context before cancelling the scope
+        val endingCallId = currentCallId ?: _currentCall.value?.id
+        if (endingCallId != null) {
+            currentCallId = null
+            kotlinx.coroutines.runBlocking {
+                withContext(NonCancellable) {
+                    try {
+                        vpsClient.updateSyncFlowCallStatus(endingCallId, "ended")
+                        Log.d(TAG, "Final status update sent for $endingCallId during release")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to send final status during release: ${e.message}")
+                    }
+                    try { vpsClient.deleteSignals(endingCallId) } catch (_: Exception) {}
+                }
+            }
+        }
+
         cleanupWebRTC()
         scope.cancel()
 
