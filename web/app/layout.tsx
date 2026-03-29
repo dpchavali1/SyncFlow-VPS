@@ -63,6 +63,9 @@ export default function RootLayout({
           crossOrigin="anonymous"
           strategy="lazyOnload"
           nonce={nonce}
+          onError={() => {
+            // AdSense blocked (corporate firewall, ad blocker) — app continues normally
+          }}
         />
       </body>
     </html>

@@ -15,6 +15,8 @@ export function middleware(request: NextRequest) {
     ? `'self' 'unsafe-inline' 'unsafe-eval' 'nonce-${nonce}' https://pagead2.googlesyndication.com https://www.googletagservices.com https://www.google.com`
     : `'self' 'nonce-${nonce}' https://pagead2.googlesyndication.com https://www.googletagservices.com https://www.google.com`
 
+  // CSP allows the app to work even when ad/analytics domains are blocked by corporate firewalls.
+  // connect-src uses https: and wss: wildcards so self-hosted server URLs work without CSP changes.
   const cspDirectives = [
     "default-src 'self'",
     "base-uri 'self'",
@@ -22,10 +24,10 @@ export function middleware(request: NextRequest) {
     `script-src ${scriptSrc}`,
     `script-src-elem ${scriptSrc}`,
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob: https://firebasestorage.googleapis.com https://*.googleusercontent.com https://pagead2.googlesyndication.com https://*.doubleclick.net https://*.google.com https://*.r2.cloudflarestorage.com",
+    "img-src 'self' data: blob: https: http:",
     "font-src 'self' data:",
-    `connect-src 'self' https://*.firebaseio.com wss://*.firebaseio.com https://*.googleapis.com https://firebasestorage.googleapis.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://www.googleapis.com https://*.cloudfunctions.net https://api.sfweb.app wss://api.sfweb.app https://pagead2.googlesyndication.com https://*.google.com https://*.doubleclick.net https://*.r2.cloudflarestorage.com${isDev ? ' http://localhost:4000 ws://localhost:4001 http://5.78.188.206 ws://5.78.188.206:3001' : ''}`,
-    "media-src 'self' blob: https://firebasestorage.googleapis.com",
+    `connect-src 'self' https: wss:${isDev ? ' http: ws:' : ''}`,
+    "media-src 'self' blob: https:",
     "worker-src 'self' blob:",
     "frame-src 'self' https://pagead2.googlesyndication.com https://*.doubleclick.net https://www.google.com https://tpc.googlesyndication.com",
     "frame-ancestors 'self'",
