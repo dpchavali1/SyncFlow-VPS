@@ -110,9 +110,10 @@ struct VPSPairingView: View {
 
             Spacer()
 
-            // Cancel button
-            SFSecondaryButton(text: "Cancel") {
+            // Start Over button - regenerates QR code and restarts pairing
+            SFSecondaryButton(text: "Start Over") {
                 viewModel.cancelPairing()
+                viewModel.startPairing()
             }
         }
         .padding(24)
@@ -191,7 +192,7 @@ class VPSPairingViewModel: ObservableObject {
                 }
             } catch {
                 self.isLoading = false
-                self.errorMessage = error.localizedDescription
+                self.errorMessage = Self.friendlyErrorMessage(from: error)
             }
         }
     }
@@ -216,10 +217,43 @@ class VPSPairingViewModel: ObservableObject {
             } catch {
                 if !Task.isCancelled {
                     self.isPairing = false
-                    self.errorMessage = error.localizedDescription
+                    self.errorMessage = Self.friendlyErrorMessage(from: error)
                 }
             }
         }
+    }
+
+    /// Maps raw errors to user-friendly, actionable messages.
+    private static func friendlyErrorMessage(from error: Error) -> String {
+        let nsError = error as NSError
+        let description = error.localizedDescription.lowercased()
+
+        // Network unreachable / no internet
+        if nsError.domain == NSURLErrorDomain &&
+           (nsError.code == NSURLErrorNotConnectedToInternet ||
+            nsError.code == NSURLErrorNetworkConnectionLost ||
+            nsError.code == NSURLErrorCannotFindHost ||
+            nsError.code == NSURLErrorCannotConnectToHost ||
+            nsError.code == NSURLErrorDNSLookupFailed) {
+            return "Check your internet connection and try again."
+        }
+
+        // Timeout / QR code expired
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorTimedOut ||
+           description.contains("timeout") || description.contains("expired") ||
+           description.contains("timed out") {
+            return "QR code expired. Tap to generate a new one."
+        }
+
+        // Server errors (5xx or server-related messages)
+        if description.contains("500") || description.contains("502") ||
+           description.contains("503") || description.contains("server") ||
+           description.contains("internal error") {
+            return "SyncFlow servers are temporarily unavailable. Please try again in a moment."
+        }
+
+        // Fallback: show original message
+        return error.localizedDescription
     }
 
     private func generateQRCode(from string: String) -> NSImage? {

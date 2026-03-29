@@ -36,7 +36,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -52,6 +51,8 @@ import com.phoneintegration.app.desktop.DesktopSyncService
 import com.phoneintegration.app.ui.components.PhoneNumberRegistrationDialog
 import com.phoneintegration.app.ui.components.getRegisteredPhoneNumber
 import com.phoneintegration.app.ui.components.isPhoneNumberRegistered
+import com.phoneintegration.app.ui.components.SyncFlowSectionHeader
+import com.phoneintegration.app.ui.components.SyncFlowSettingsItem
 import com.phoneintegration.app.utils.DefaultSmsHelper
 import com.phoneintegration.app.vps.VPSClient
 import kotlinx.coroutines.Dispatchers
@@ -459,34 +460,34 @@ fun SettingsScreen(
             // -------------------------
             // Desktop Integration (at the top for visibility)
             // -------------------------
-            SettingsSection("Desktop & Web Access")
+            SyncFlowSectionHeader("Desktop & Web Access")
 
-            SettingsItem(
-                icon = Icons.Filled.Computer,
+            SyncFlowSettingsItem(
                 title = "Pair Device",
                 subtitle = "Connect Mac app or Web browser",
+                icon = Icons.Filled.Computer,
                 onClick = onNavigateToDesktop
             )
 
-            SettingsItem(
-                icon = Icons.Filled.Language,
+            SyncFlowSettingsItem(
                 title = "Web Access & Subscriptions",
                 subtitle = "Access messages and manage subscription",
+                icon = Icons.Filled.Language,
                 onClick = { showWebAccessDialog = true }
             )
 
             if (isPaired) {
-                SettingsItem(
-                    icon = Icons.Filled.Sync,
+                SyncFlowSettingsItem(
                     title = "Sync Message History",
                     subtitle = "Load older messages to Mac and Web",
+                    icon = Icons.Filled.Sync,
                     onClick = onNavigateToSync
                 )
 
-                SettingsItem(
-                    icon = Icons.Filled.CloudUpload,
+                SyncFlowSettingsItem(
                     title = "Send Files to Mac",
                     subtitle = "Share photos, videos, and files",
+                    icon = Icons.Filled.CloudUpload,
                     onClick = onNavigateToFileTransfer
                 )
             }
@@ -496,102 +497,102 @@ fun SettingsScreen(
             // -------------------------
             // App Settings
             // -------------------------
-            SettingsSection("App Settings")
+            SyncFlowSectionHeader("App Settings")
 
-            SettingsItem(
-                icon = Icons.Filled.Palette,
+            SyncFlowSettingsItem(
                 title = "Theme",
                 subtitle = if (prefsManager.isAutoTheme.value) "Auto"
                 else if (prefsManager.isDarkMode.value) "Dark" else "Light",
+                icon = Icons.Filled.Palette,
                 onClick = onNavigateToTheme
             )
 
-            SettingsItem(
-                icon = Icons.Filled.Notifications,
+            SyncFlowSettingsItem(
                 title = "Notifications",
                 subtitle = if (prefsManager.notificationsEnabled.value) "Enabled" else "Disabled",
+                icon = Icons.Filled.Notifications,
                 onClick = onNavigateToNotifications
             )
 
-            SettingsItem(
-                icon = Icons.Filled.Wallpaper,
+            SyncFlowSettingsItem(
                 title = "Appearance",
                 subtitle = "Customize chat appearance",
+                icon = Icons.Filled.Wallpaper,
                 onClick = onNavigateToAppearance
             )
 
-            SettingsItem(
-                icon = Icons.Filled.Lock,
+            SyncFlowSettingsItem(
                 title = "Privacy & Security",
                 subtitle = if (prefsManager.requireFingerprint.value) "Fingerprint Enabled" else "Not Secured",
+                icon = Icons.Filled.Lock,
                 onClick = onNavigateToPrivacy
             )
 
-            SettingsItem(
-                icon = Icons.Filled.DataUsage,
+            SyncFlowSettingsItem(
                 title = "Usage & Limits",
                 subtitle = "View plan and current usage",
+                icon = Icons.Filled.DataUsage,
                 onClick = onNavigateToUsage
             )
 
             Divider(Modifier.padding(vertical = 8.dp))
 
-            SettingsSection("Messages")
+            SyncFlowSectionHeader("Messages")
 
-            SettingsItem(
-                icon = Icons.Filled.Settings,
+            SyncFlowSettingsItem(
                 title = "Message Settings",
                 subtitle = "Delivery, timestamps, and more",
+                icon = Icons.Filled.Settings,
                 onClick = onNavigateToMessages
             )
 
-            SettingsItem(
-                icon = Icons.Filled.Chat,
+            SyncFlowSettingsItem(
                 title = "Quick Reply Templates",
                 subtitle = "${prefsManager.getQuickReplyTemplates().size} templates",
+                icon = Icons.Filled.Chat,
                 onClick = onNavigateToTemplates
             )
 
-            SettingsItem(
-                icon = Icons.Filled.Archive,
+            SyncFlowSettingsItem(
                 title = "Backup & Restore",
                 subtitle = "Export and import messages",
+                icon = Icons.Filled.Archive,
                 onClick = onNavigateToBackup
             )
 
-            SettingsItem(
-                icon = Icons.Filled.Block,
+            SyncFlowSettingsItem(
                 title = "Blocked Numbers",
                 subtitle = "Manage blocked numbers",
+                icon = Icons.Filled.Block,
                 onClick = onNavigateToBlocked
             )
 
-            SettingsItem(
-                icon = Icons.Filled.Shield,
+            SyncFlowSettingsItem(
                 title = "Spam Filter",
                 subtitle = "AI-powered spam detection",
+                icon = Icons.Filled.Shield,
                 onClick = onNavigateToSpamFilter
             )
 
             Divider(Modifier.padding(vertical = 8.dp))
 
-            SettingsSection("Help & Support")
+            SyncFlowSectionHeader("Help & Support")
 
-            SettingsItem(
-                icon = Icons.Filled.AutoAwesome,
+            SyncFlowSettingsItem(
                 title = "AI Support Chat",
                 subtitle = "Get help from our AI assistant",
+                icon = Icons.Filled.AutoAwesome,
                 onClick = onNavigateToSupport
             )
 
             Divider(Modifier.padding(vertical = 8.dp))
 
-            SettingsSection("Account")
+            SyncFlowSectionHeader("Account")
 
-            SettingsItem(
-                icon = Icons.Filled.Phone,
+            SyncFlowSettingsItem(
                 title = "Phone Number",
                 subtitle = registeredPhone ?: "Not registered",
+                icon = Icons.Filled.Phone,
                 onClick = {
                     if (registeredPhone != null) {
                         showChangePhoneConfirm = true
@@ -603,22 +604,22 @@ fun SettingsScreen(
 
             // Only show Delete Account if user has paired (has an account)
             if (isPaired) {
-                SettingsItem(
-                    icon = Icons.Filled.DeleteForever,
+                SyncFlowSettingsItem(
                     title = "Delete Account",
                     subtitle = "Schedule account for deletion",
+                    icon = Icons.Filled.DeleteForever,
                     onClick = onNavigateToDeleteAccount
                 )
             }
 
             Divider(Modifier.padding(vertical = 8.dp))
 
-            SettingsSection("About")
+            SyncFlowSectionHeader("About")
 
-            SettingsItem(
-                icon = Icons.Filled.Info,
+            SyncFlowSettingsItem(
                 title = "About SyncFlow",
                 subtitle = "Version ${BuildConfig.VERSION_NAME}",
+                icon = Icons.Filled.Info,
                 onClick = { showAboutDialog = true }
             )
 
@@ -626,12 +627,12 @@ fun SettingsScreen(
             if (BuildConfig.DEBUG) {
                 Divider(Modifier.padding(vertical = 8.dp))
 
-                SettingsSection("Debug")
+                SyncFlowSectionHeader("Debug")
 
-                SettingsItem(
-                    icon = Icons.Filled.BugReport,
+                SyncFlowSettingsItem(
                     title = "Test Crash Reporter",
                     subtitle = "Force a crash to test crash reporting",
+                    icon = Icons.Filled.BugReport,
                     onClick = {
                         // Force a test crash
                         throw RuntimeException("Test crash from Settings - CustomCrashReporter integration test")
@@ -649,49 +650,6 @@ fun SettingsScreen(
 // =============================================================================
 // region HELPER COMPONENTS
 // =============================================================================
-
-/**
- * Section header for grouping related settings items.
- *
- * Displays a title with consistent styling and spacing.
- *
- * @param title The section title text
- */
-@Composable
-private fun SettingsSection(title: String) {
-    Text(
-        text = title,
-        style = MaterialTheme.typography.titleMedium,
-        modifier = Modifier.padding(16.dp)
-    )
-}
-
-/**
- * Individual settings item with icon, title, subtitle, and navigation arrow.
- *
- * Displays a clickable list item that navigates to a sub-settings screen.
- * Uses Material 3 ListItem component for consistent styling.
- *
- * @param icon Leading icon to display
- * @param title Primary text for the setting
- * @param subtitle Secondary text describing current value or setting purpose
- * @param onClick Callback when the item is tapped
- */
-@Composable
-private fun SettingsItem(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    title: String,
-    subtitle: String,
-    onClick: () -> Unit
-) {
-    ListItem(
-        leadingContent = { Icon(icon, contentDescription = null) },
-        headlineContent = { Text(title) },
-        supportingContent = { Text(subtitle) },
-        trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, null) },
-        modifier = Modifier.clickable(onClick = onClick)
-    )
-}
 
 @Composable
 private fun AboutFeatureItem(

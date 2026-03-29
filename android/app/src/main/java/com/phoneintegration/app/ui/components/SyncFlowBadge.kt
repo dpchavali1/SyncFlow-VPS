@@ -26,6 +26,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.phoneintegration.app.ui.theme.LocalSyncFlowColors
 import com.phoneintegration.app.ui.theme.Spacing
 
 /**
@@ -189,11 +190,12 @@ fun SyncFlowMessageTypeBadge(
     type: MessageType,
     modifier: Modifier = Modifier
 ) {
+    val extColors = LocalSyncFlowColors.current
     val (text, color) = when (type) {
-        MessageType.OTP -> "OTP" to Color(0xFF1976D2)
-        MessageType.Transaction -> "Transaction" to Color(0xFF2E7D32)
-        MessageType.Alert -> "Alert" to Color(0xFFF57C00)
-        MessageType.Promotion -> "Promo" to Color(0xFF7B1FA2)
+        MessageType.OTP -> "OTP" to MaterialTheme.colorScheme.primary
+        MessageType.Transaction -> "Transaction" to extColors.success
+        MessageType.Alert -> "Alert" to extColors.warning
+        MessageType.Promotion -> "Promo" to MaterialTheme.colorScheme.tertiary
         MessageType.Normal -> return // Don't show badge for normal messages
     }
 
@@ -225,16 +227,17 @@ enum class MessageType {
 }
 
 /**
- * Get color for badge variant
+ * Get color for badge variant using theme-aware extended colors
  */
 @Composable
 private fun getVariantColor(variant: BadgeVariant): Color {
+    val extColors = LocalSyncFlowColors.current
     return when (variant) {
         BadgeVariant.Primary -> MaterialTheme.colorScheme.primary
         BadgeVariant.Secondary -> MaterialTheme.colorScheme.secondary
         BadgeVariant.Error -> MaterialTheme.colorScheme.error
-        BadgeVariant.Success -> Color(0xFF2E7D32)
-        BadgeVariant.Warning -> Color(0xFFF57C00)
+        BadgeVariant.Success -> extColors.success
+        BadgeVariant.Warning -> extColors.warning
     }
 }
 

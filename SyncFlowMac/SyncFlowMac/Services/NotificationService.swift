@@ -38,9 +38,16 @@ class NotificationService: NSObject, UNUserNotificationCenterDelegate {
             textInputPlaceholder: "Type a message..."
         )
 
+        // Define mark as read action
+        let markReadAction = UNNotificationAction(
+            identifier: "MARK_READ_ACTION",
+            title: "Mark as Read",
+            options: []
+        )
+
         let category = UNNotificationCategory(
             identifier: "MESSAGE_CATEGORY",
-            actions: [replyAction],
+            actions: [replyAction, markReadAction],
             intentIdentifiers: [],
             options: [.customDismissAction]
         )
@@ -127,6 +134,7 @@ class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         content.title = contactName ?? address
         content.body = body
         content.categoryIdentifier = "MESSAGE_CATEGORY"
+        content.threadIdentifier = address  // Group notifications by conversation
         content.userInfo = [
             "address": address,
             "messageId": messageId
@@ -314,6 +322,12 @@ class NotificationService: NSObject, UNUserNotificationCenterDelegate {
             if let address = userInfo["address"] as? String {
                 await handleQuickReply(to: address, body: textResponse.userText)
             }
+        } else if response.actionIdentifier == "MARK_READ_ACTION" {
+            // Handle mark as read from notification
+            if let address = userInfo["address"] as? String,
+               let messageId = userInfo["messageId"] as? String {
+                await handleMarkAsRead(address: address, messageId: messageId)
+            }
         } else if response.actionIdentifier == "ANSWER_CALL_ACTION" ||
                   response.actionIdentifier == "ANSWER_VIDEO_ACTION" {
             // Handle Answer action from notification
@@ -434,6 +448,25 @@ class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         )
     }
 
+    private func handleMarkAsRead(address: String, messageId: String) async {
+        // Mark locally via PreferencesService
+        PreferencesService.shared.markMessageAsRead(messageId)
+
+        // Sync read status to VPS
+        Task {
+            try? await VPSService.shared.markMessageRead(messageId: messageId)
+        }
+
+        // Notify the app to refresh unread counts
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: .markReadFromNotification,
+                object: nil,
+                userInfo: ["address": address, "messageId": messageId]
+            )
+        }
+    }
+
     private func showConversation(address: String) async {
         // Activate app and select conversation
         DispatchQueue.main.async {
@@ -452,6 +485,7 @@ class NotificationService: NSObject, UNUserNotificationCenterDelegate {
 
 extension Notification.Name {
     static let quickReply = Notification.Name("quickReply")
+    static let markReadFromNotification = Notification.Name("markReadFromNotification")
     static let selectConversation = Notification.Name("selectConversation")
 
     // Call notification actions

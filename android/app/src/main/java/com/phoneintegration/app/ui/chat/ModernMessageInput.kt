@@ -248,7 +248,7 @@ fun ModernMessageInput(
                 Row {
                     IconButton(
                         onClick = onCamera,
-                        modifier = Modifier.size(40.dp)
+                        modifier = Modifier.size(48.dp)
                     ) {
                         Icon(
                             Icons.Outlined.CameraAlt,
@@ -275,7 +275,7 @@ fun ModernMessageInput(
                     // Emoji button inside text field
                     IconButton(
                         onClick = { showEmojiPicker = true },
-                        modifier = Modifier.size(36.dp)
+                        modifier = Modifier.size(48.dp)
                     ) {
                         Icon(
                             Icons.Outlined.EmojiEmotions,
@@ -355,7 +355,7 @@ fun ModernMessageInput(
                     // Attach button inside text field
                     IconButton(
                         onClick = onAttach,
-                        modifier = Modifier.size(36.dp)
+                        modifier = Modifier.size(48.dp)
                     ) {
                         Icon(
                             Icons.Outlined.AttachFile,
@@ -373,7 +373,7 @@ fun ModernMessageInput(
                     ) {
                         IconButton(
                             onClick = onGif,
-                            modifier = Modifier.size(36.dp)
+                            modifier = Modifier.size(48.dp)
                         ) {
                             Icon(
                                 Icons.Outlined.Gif,
@@ -395,7 +395,7 @@ fun ModernMessageInput(
                     // Send Button with long-press for schedule
                     Box(
                         modifier = Modifier
-                            .size(44.dp)
+                            .size(48.dp)
                             .clip(CircleShape)
                             .background(MaterialTheme.colorScheme.primary)
                             .combinedClickable(
@@ -433,7 +433,7 @@ fun ModernMessageInput(
                                 micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                             }
                         },
-                        modifier = Modifier.size(44.dp),
+                        modifier = Modifier.size(48.dp),
                         colors = IconButtonDefaults.filledTonalIconButtonColors(
                             containerColor = MaterialTheme.colorScheme.secondaryContainer
                         )

@@ -5,7 +5,6 @@ import android.net.Uri
 import android.util.Patterns
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.ClickableText
@@ -39,6 +38,7 @@ import com.phoneintegration.app.MessageCategory
 import com.phoneintegration.app.SmsMessage
 import com.phoneintegration.app.realtime.ReadReceipt
 import com.phoneintegration.app.ui.shared.formatTimestamp
+import com.phoneintegration.app.ui.theme.LocalSyncFlowColors
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -63,7 +63,7 @@ fun MessageBubble(
     ) {
         Box(
             modifier = Modifier
-                .widthIn(max = 260.dp)
+                .fillMaxWidth(0.78f)
                 .pointerInput(Unit) {
                     detectTapGestures(
                         onLongPress = { onLongPress() },
@@ -408,27 +408,21 @@ private fun ReplyQuoteBlock(
 
 /**
  * BUBBLE BACKGROUND COLOR
- * Dark-mode safe auto colors.
+ * Uses SyncFlowExtendedColors via LocalSyncFlowColors for dark-mode-safe category tints.
  */
 @Composable
 private fun bubbleColor(sms: SmsMessage, isSent: Boolean): Color {
-    val isDark = isSystemInDarkTheme()
+    val extColors = LocalSyncFlowColors.current
 
     return if (isSent) {
         MaterialTheme.colorScheme.primaryContainer
     } else {
         when (sms.category) {
-            MessageCategory.OTP ->
-                if (isDark) Color(0xFF1A3A5C) else Color(0xFFD6EAF8)
-            MessageCategory.TRANSACTION ->
-                if (isDark) Color(0xFF1A3C2A) else Color(0xFFD1F2EB)
-            MessageCategory.PERSONAL ->
-                if (isDark) Color(0xFF3C1A2E) else Color(0xFFFDEDEC)
-            MessageCategory.PROMOTION ->
-                if (isDark) Color(0xFF3C3A1A) else Color(0xFFF9E79F)
-            MessageCategory.ALERT ->
-                if (isDark) Color(0xFF3C1A1A) else Color(0xFFFADBD8)
-
+            MessageCategory.OTP -> extColors.otpBubble
+            MessageCategory.TRANSACTION -> extColors.transactionBubble
+            MessageCategory.PERSONAL -> extColors.personalBubble
+            MessageCategory.PROMOTION -> extColors.promotionBubble
+            MessageCategory.ALERT -> extColors.alertBubble
             else -> MaterialTheme.colorScheme.surfaceVariant
         }
     }

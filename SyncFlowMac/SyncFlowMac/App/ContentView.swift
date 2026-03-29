@@ -20,7 +20,7 @@
 // │   └── QR code scanner / pairing flow
 // └── MainView (when paired)
 //     ├── SideRail (navigation tabs)
-//     ├── MessagesTabView / ContactsView / CallHistoryView / DealsView
+//     ├── MessagesTabView / ContactsView / CallHistoryView
 //     └── Various overlays (incoming calls, banners, sheets)
 //
 // STATE MANAGEMENT:
@@ -201,11 +201,10 @@ struct ContentView: View {
 /// - `mediaControlService`: Remote media playback control
 ///
 /// ## Tab Navigation
-/// The side rail provides access to four main sections:
+/// The side rail provides access to three main sections:
 /// 1. **Messages**: SMS/MMS conversations (MessagesTabView)
 /// 2. **Contacts**: Phone contacts synced from device (ContactsView)
 /// 3. **Calls**: Call history and dialer (CallHistoryView)
-/// 4. **Deals**: Promotional offers (DealsView)
 ///
 /// ## Lifecycle
 /// On appear, starts listening for messages if userId is available.
@@ -238,8 +237,24 @@ struct MainView: View {
     /// Local search text for filtering conversations
     @State private var searchText = ""
 
+    /// Tracks whether the disconnected banner should be visible (delayed to avoid flashing)
+    @State private var showDisconnectedBanner = false
+
+    /// Timer that fires after a brief disconnect delay before showing the banner
+    @State private var disconnectTimer: Timer? = nil
+
+    /// Whether to show the troubleshoot popover
+    @State private var showTroubleshoot = false
+
     /// Modal presentation flags
     @State private var showAIAssistant = false
+
+    /// Whether to show QuickDrop as a popover from the toolbar
+    @State private var showQuickDrop = false
+
+    /// Timestamp when user dismissed the subscription banner (persisted in UserDefaults)
+    @AppStorage("subscriptionBannerDismissedAt") private var subscriptionBannerDismissedAt: Double = 0
+
     // showKeyboardShortcuts and showSupportChat are on appState so Help menu can trigger them too
 
     // =========================================================================
@@ -250,6 +265,7 @@ struct MainView: View {
         HStack(spacing: 0) {
             SideRail(
                 selectedTab: $appState.selectedTab,
+                messageStore: messageStore,
                 onNewMessage: { appState.showNewMessage = true },
                 onAIAssistant: { showAIAssistant = true },
                 onSupportChat: { appState.showSupportChat = true },
@@ -274,17 +290,84 @@ struct MainView: View {
                         .padding(.top, 8)
                 }
 
-                // Subscription status banner (shown for all non-premium users)
-                if !subscriptionService.isPremium {
-                    SubscriptionStatusBanner()
-                        .padding(.horizontal, 16)
-                        .padding(.top, 8)
+                // Subscription status banner (shown for all non-premium users, dismissible for 7 days)
+                if !subscriptionService.isPremium,
+                   Date().timeIntervalSince1970 - subscriptionBannerDismissedAt > 7 * 24 * 3600 {
+                    HStack(spacing: 0) {
+                        SubscriptionStatusBanner()
+                        Button(action: {
+                            withAnimation(.easeOut(duration: 0.2)) {
+                                subscriptionBannerDismissedAt = Date().timeIntervalSince1970
+                            }
+                        }) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(.secondary)
+                                .padding(6)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Dismiss for 7 days")
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
                 }
 
                 if appState.showMediaBar {
                     MediaControlBar(mediaService: mediaControlService)
                         .padding(.horizontal, 16)
                         .padding(.top, 8)
+                }
+
+                // Connection status banner (shown after 5s of disconnect)
+                if showDisconnectedBanner {
+                    HStack(spacing: 10) {
+                        Image(systemName: "wifi.slash")
+                            .foregroundColor(.orange)
+                            .font(.system(size: 14, weight: .medium))
+
+                        Text("Your phone appears to be offline. Messages will sync when reconnected.")
+                            .font(.system(size: 12))
+                            .foregroundColor(.primary.opacity(0.85))
+
+                        Spacer()
+
+                        Button("Troubleshoot") {
+                            showTroubleshoot = true
+                        }
+                        .font(.system(size: 12, weight: .medium))
+                        .buttonStyle(.plain)
+                        .foregroundColor(.orange)
+                        .popover(isPresented: $showTroubleshoot, arrowEdge: .bottom) {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Connection Troubleshooting")
+                                    .font(.headline)
+                                    .padding(.bottom, 4)
+
+                                Label("Ensure your Android phone has an internet connection", systemImage: "wifi")
+                                Label("Check that the SyncFlow app is running on your phone", systemImage: "apps.iphone")
+                                Label("Try toggling airplane mode on your phone", systemImage: "airplane")
+                                Label("Restart the SyncFlow app on both devices", systemImage: "arrow.clockwise")
+                                Label("Make sure you're signed into the same account", systemImage: "person.crop.circle")
+                            }
+                            .font(.system(size: 13))
+                            .padding(16)
+                            .frame(width: 340)
+                        }
+
+                        Button(action: { showDisconnectedBanner = false }) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(Color.orange.opacity(0.12))
+                    .cornerRadius(8)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .transition(.move(edge: .top).combined(with: .opacity))
                 }
 
                 // Content based on selected tab
@@ -298,7 +381,9 @@ struct MainView: View {
                     case .callHistory:
                         CallHistoryView()
                     case .deals:
-                        DealsView()
+                        // Deals removed from primary navigation; fallback to messages
+                        MessagesTabView(searchText: $searchText)
+                            .environmentObject(messageStore)
                     }
                 }
 
@@ -316,10 +401,31 @@ struct MainView: View {
                 }
             }
             ToolbarItem(placement: .automatic) {
-                Circle()
-                    .fill(vpsService.isConnected ? Color.green : Color.orange)
-                    .frame(width: 8, height: 8)
-                    .help(vpsService.isConnected ? "Connected" : "Reconnecting...")
+                Button(action: { showQuickDrop.toggle() }) {
+                    Image(systemName: "arrow.up.doc")
+                }
+                .help("Quick Drop - Send files to your phone")
+                .popover(isPresented: $showQuickDrop, arrowEdge: .bottom) {
+                    QuickDropView()
+                        .frame(width: 320, height: 280)
+                }
+            }
+            ToolbarItem(placement: .automatic) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(vpsService.isConnected ? Color.green : Color.orange)
+                        .frame(width: 8, height: 8)
+                    Text(vpsService.isConnected ? "Connected" : "Reconnecting...")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(vpsService.isConnected ? .green : .orange)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule()
+                        .fill((vpsService.isConnected ? Color.green : Color.orange).opacity(0.1))
+                )
+                .help(vpsService.isConnected ? "Connected to your phone" : "Trying to reconnect...")
             }
         }
         .sheet(isPresented: $appState.showNewMessage) {
@@ -347,6 +453,25 @@ struct MainView: View {
             } else {
                 // Stop listening when user is unpaired (userId becomes nil)
                 messageStore.stopListening()
+            }
+        }
+        .onChange(of: vpsService.isConnected) { _, isConnected in
+            disconnectTimer?.invalidate()
+            disconnectTimer = nil
+
+            if isConnected {
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    showDisconnectedBanner = false
+                }
+            } else {
+                // Delay showing the banner by 5 seconds to avoid flashing on brief disconnects
+                disconnectTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { _ in
+                    DispatchQueue.main.async {
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            showDisconnectedBanner = true
+                        }
+                    }
+                }
             }
         }
         // Keyboard shortcuts help overlay
@@ -395,16 +520,16 @@ struct MainView: View {
 ///
 /// SideRail provides:
 /// - New message button at top
-/// - Tab navigation buttons (Messages, Contacts, Calls, Deals)
+/// - Tab navigation buttons (Messages, Contacts, Calls) with unread badge
 /// - AI Assistant and Support Chat buttons at bottom
 /// - Settings button linking to preferences
-///
-/// The Deals tab has special styling with gradient and pulse animation
-/// to draw attention to promotional content.
 struct SideRail: View {
 
     /// Currently selected navigation tab (binding to parent)
     @Binding var selectedTab: AppTab
+
+    /// Message store for unread count badge
+    @ObservedObject var messageStore: MessageStore
 
     /// Callback to show new message composer
     let onNewMessage: () -> Void
@@ -420,9 +545,6 @@ struct SideRail: View {
 
     /// Whether a sync is currently in progress
     var isSyncing: Bool = false
-
-    /// Animation state for Deals icon pulse effect
-    @State private var dealsIconPulse = false
 
     /// Rotation angle for sync spinner
     @State private var syncRotation: Double = 0
@@ -459,80 +581,42 @@ struct SideRail: View {
             Divider()
                 .opacity(0.5)
 
-            ForEach(AppTab.allCases, id: \.self) { tab in
-                if tab == .deals {
-                    // Prominent Deals button with gradient and animation
-                    Button(action: {
-                        withAnimation(SFAnimations.snappy) { selectedTab = tab }
-                    }) {
-                        ZStack {
-                            // Animated glow effect
-                            Circle()
-                                .fill(
-                                    RadialGradient(
-                                        colors: [Color.orange.opacity(0.4), Color.clear],
-                                        center: .center,
-                                        startRadius: 0,
-                                        endRadius: 25
-                                    )
-                                )
-                                .frame(width: 44, height: 44)
-                                .scaleEffect(dealsIconPulse ? 1.2 : 1.0)
-                                .opacity(dealsIconPulse ? 0.6 : 0.3)
-
-                            // Icon with gradient
-                            Image(systemName: "tag.fill")
-                                .font(.system(size: SyncFlowSpacing.sideRailIconSize, weight: .bold))
-                                .foregroundStyle(
-                                    LinearGradient(
-                                        colors: [Color.orange, Color.pink],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    )
-                                )
-                                .frame(width: SyncFlowSpacing.sideRailButtonSize, height: SyncFlowSpacing.sideRailButtonSize)
-                                .background(
-                                    RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd)
-                                        .fill(
-                                            selectedTab == tab
-                                                ? LinearGradient(colors: [Color.orange.opacity(0.25), Color.pink.opacity(0.2)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                                                : LinearGradient(colors: [Color.orange.opacity(0.12), Color.pink.opacity(0.08)], startPoint: .topLeading, endPoint: .bottomTrailing)
-                                        )
-                                )
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .help("Discover Deals")
-                } else {
-                    Button(action: {
-                        withAnimation(SFAnimations.snappy) { selectedTab = tab }
-                    }) {
-                        ZStack {
-                            // Pill selection indicator on leading edge
-                            HStack(spacing: 0) {
-                                if selectedTab == tab {
-                                    Capsule()
-                                        .fill(SyncFlowColors.primary)
-                                        .frame(width: SyncFlowSpacing.sideRailPillWidth, height: SyncFlowSpacing.sideRailPillHeight)
-                                        .transition(.scale(scale: 0.5, anchor: .leading).combined(with: .opacity))
-                                }
-                                Spacer()
+            ForEach(AppTab.allCases.filter { $0 != .deals }, id: \.self) { tab in
+                Button(action: {
+                    withAnimation(SFAnimations.snappy) { selectedTab = tab }
+                }) {
+                    ZStack {
+                        // Pill selection indicator on leading edge
+                        HStack(spacing: 0) {
+                            if selectedTab == tab {
+                                Capsule()
+                                    .fill(SyncFlowColors.primary)
+                                    .frame(width: SyncFlowSpacing.sideRailPillWidth, height: SyncFlowSpacing.sideRailPillHeight)
+                                    .transition(.scale(scale: 0.5, anchor: .leading).combined(with: .opacity))
                             }
-                            .frame(width: SyncFlowSpacing.sideRailButtonSize)
+                            Spacer()
+                        }
+                        .frame(width: SyncFlowSpacing.sideRailButtonSize)
 
-                            Image(systemName: tab.icon)
-                                .font(.system(size: SyncFlowSpacing.sideRailIconSize, weight: selectedTab == tab ? .bold : .medium))
-                                .foregroundColor(selectedTab == tab ? SyncFlowColors.primary : SyncFlowColors.textSecondary)
-                                .frame(width: SyncFlowSpacing.sideRailButtonSize, height: SyncFlowSpacing.sideRailButtonSize)
-                                .background(
-                                    RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd)
-                                        .fill(selectedTab == tab ? SyncFlowColors.sideRailSelection : Color.clear)
-                                )
+                        Image(systemName: tab.icon)
+                            .font(.system(size: SyncFlowSpacing.sideRailIconSize, weight: selectedTab == tab ? .bold : .medium))
+                            .foregroundColor(selectedTab == tab ? SyncFlowColors.primary : SyncFlowColors.textSecondary)
+                            .frame(width: SyncFlowSpacing.sideRailButtonSize, height: SyncFlowSpacing.sideRailButtonSize)
+                            .background(
+                                RoundedRectangle(cornerRadius: SyncFlowSpacing.radiusMd)
+                                    .fill(selectedTab == tab ? SyncFlowColors.sideRailSelection : Color.clear)
+                            )
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        // Unread badge on Messages tab
+                        if tab == .messages && messageStore.totalUnreadCount > 0 {
+                            SFBadge(count: messageStore.totalUnreadCount)
+                                .offset(x: 4, y: -4)
                         }
                     }
-                    .buttonStyle(.plain)
-                    .help(tab.displayName)
                 }
+                .buttonStyle(.plain)
+                .help(tab.displayName)
             }
 
             Spacer()

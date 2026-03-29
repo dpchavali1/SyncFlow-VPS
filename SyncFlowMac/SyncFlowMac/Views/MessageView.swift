@@ -258,6 +258,98 @@ struct MessageView: View {
         return totalMessageCount > displayedMessageCount
     }
 
+    // MARK: - Date Separator & Message Row Helper
+
+    /// Whether a date separator should be shown before this message
+    private func shouldShowDateSeparator(for message: Message) -> Bool {
+        guard let index = cachedMessages.firstIndex(where: { $0.id == message.id }) else { return false }
+        if index == 0 { return true }
+        return !Calendar.current.isDate(message.timestamp, inSameDayAs: cachedMessages[index - 1].timestamp)
+    }
+
+    /// Renders a message bubble with optional date separator and all callbacks
+    @ViewBuilder
+    private func messageBubbleWithDateSeparator(message: Message, containerWidth: CGFloat) -> some View {
+        if shouldShowDateSeparator(for: message) {
+            dateSeparator(for: message.timestamp)
+        }
+
+        let maxWidth = containerWidth * 0.6
+
+        MessageBubble(
+            message: message,
+            searchText: searchText,
+            reaction: messageStore.messageReactions[message.id],
+            readReceipt: messageStore.readReceipts[message.id],
+            onReact: { reaction in
+                messageStore.setReaction(messageId: message.id, reaction: reaction)
+            },
+            onReply: {
+                replyToMessage = message
+            },
+            onDelete: {
+                messageStore.deleteMessage(message)
+            },
+            isPinned: messageStore.isMessagePinned(message),
+            onTogglePin: {
+                messageStore.togglePinMessage(message)
+            },
+            selectionMode: isSelectionMode,
+            isBulkSelected: selectedMessageIds.contains(message.id),
+            onToggleSelect: {
+                if selectedMessageIds.contains(message.id) {
+                    selectedMessageIds.remove(message.id)
+                } else {
+                    selectedMessageIds.insert(message.id)
+                }
+            },
+            bubbleMaxWidth: maxWidth
+        )
+        .id(message.id)
+    }
+
+    /// Returns a formatted date separator view for chat messages
+    @ViewBuilder
+    private func dateSeparator(for date: Date) -> some View {
+        HStack {
+            Spacer()
+            Text(dateSeparatorText(for: date))
+                .font(.caption)
+                .fontWeight(.medium)
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 4)
+                .background(
+                    Capsule()
+                        .fill(Color(nsColor: .controlBackgroundColor).opacity(0.8))
+                )
+            Spacer()
+        }
+        .padding(.vertical, 4)
+    }
+
+    /// Formats a date for the separator label
+    private func dateSeparatorText(for date: Date) -> String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) {
+            return "Today"
+        } else if calendar.isDateInYesterday(date) {
+            return "Yesterday"
+        } else if calendar.isDate(date, equalTo: Date(), toGranularity: .weekOfYear) {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "EEEE" // e.g. "Monday"
+            return formatter.string(from: date)
+        } else if calendar.isDate(date, equalTo: Date(), toGranularity: .year) {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "MMMM d" // e.g. "March 24"
+            return formatter.string(from: date)
+        } else {
+            let formatter = DateFormatter()
+            formatter.dateFormat = "MMMM d, yyyy" // e.g. "March 24, 2025"
+            return formatter.string(from: date)
+        }
+    }
+
     // MARK: - Body
 
     var body: some View {
@@ -350,6 +442,7 @@ struct MessageView: View {
             // Scrollable area containing message bubbles, pinned messages,
             // and load more button. Uses LazyVStack for performance.
             // =================================================================
+            GeometryReader { geometry in
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 16) {
@@ -401,56 +494,27 @@ struct MessageView: View {
                                 .padding(.vertical, 8)
                         }
 
-                        // Load more button at the top
+                        // Infinite scroll sentinel at the top
                         if hasMoreMessages() {
-                            Button(action: loadMoreMessages) {
-                                HStack {
-                                    if isLoadingMore {
-                                        ProgressView()
-                                            .scaleEffect(0.7)
-                                    } else {
-                                        Image(systemName: "arrow.up.circle")
-                                        Text("Load earlier messages")
-                                    }
+                            HStack {
+                                Spacer()
+                                if isLoadingMore {
+                                    ProgressView()
+                                        .scaleEffect(0.7)
+                                    Text("Loading...")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
                                 }
-                                .font(.caption)
-                                .foregroundColor(.blue)
-                                .padding(.vertical, 8)
+                                Spacer()
                             }
-                            .buttonStyle(.plain)
-                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 8)
+                            .onAppear {
+                                loadMoreMessages()
+                            }
                         }
 
                         ForEach(cachedMessages) { message in
-                            MessageBubble(
-                                message: message,
-                                searchText: searchText,
-                                reaction: messageStore.messageReactions[message.id],
-                                readReceipt: messageStore.readReceipts[message.id],
-                                onReact: { reaction in
-                                    messageStore.setReaction(messageId: message.id, reaction: reaction)
-                                },
-                                onReply: {
-                                    replyToMessage = message
-                                },
-                                onDelete: {
-                                    messageStore.deleteMessage(message)
-                                },
-                                isPinned: messageStore.isMessagePinned(message),
-                                onTogglePin: {
-                                    messageStore.togglePinMessage(message)
-                                },
-                                selectionMode: isSelectionMode,
-                                isBulkSelected: selectedMessageIds.contains(message.id),
-                                onToggleSelect: {
-                                    if selectedMessageIds.contains(message.id) {
-                                        selectedMessageIds.remove(message.id)
-                                    } else {
-                                        selectedMessageIds.insert(message.id)
-                                    }
-                                }
-                            )
-                                .id(message.id)
+                            messageBubbleWithDateSeparator(message: message, containerWidth: geometry.size.width)
                         }
                     }
                     .padding()
@@ -490,6 +554,7 @@ struct MessageView: View {
                     updateCachedMessagesAsync()
                 }
             }
+            } // GeometryReader
 
             Divider()
 
@@ -1732,6 +1797,8 @@ struct MessageBubble: View {
     var isBulkSelected: Bool = false
     /// Callback to toggle selection state
     var onToggleSelect: (() -> Void)? = nil
+    /// Maximum bubble width (responsive, defaults to 500)
+    var bubbleMaxWidth: CGFloat = 500
 
     // MARK: - Local State
 
@@ -1962,7 +2029,7 @@ struct MessageBubble: View {
                         .cornerRadius(10)
                 }
             }
-            .frame(maxWidth: 500, alignment: message.isReceived ? .leading : .trailing)
+            .frame(maxWidth: bubbleMaxWidth, alignment: message.isReceived ? .leading : .trailing)
             .contextMenu {
                 ForEach(reactionOptions, id: \.self) { option in
                     Button(action: {
@@ -3499,13 +3566,24 @@ struct ComposeBar: View {
                                 .padding(.leading, 4)
                         }
 
-                        // Text editor
+                        // Text editor (multiline, grows up to 5 lines)
+                        // Enter sends, Shift+Enter inserts a newline
                         TextEditor(text: $messageText)
                             .focused($isTextFieldFocused)
                             .font(.system(size: 14))
-                            .frame(minHeight: 20, maxHeight: 80)
+                            .frame(minHeight: 20, maxHeight: 100)
                             .scrollContentBackground(.hidden)
                             .padding(.vertical, 4)
+                            .onKeyPress { keyPress in
+                                if keyPress.key == .return && !keyPress.modifiers.contains(.shift) {
+                                    // Enter without Shift: send the message
+                                    if canSend && !isSending {
+                                        Task { await onSend() }
+                                    }
+                                    return .handled
+                                }
+                                return .ignored
+                            }
                             .onChange(of: messageText) { _, newValue in
                                 if newValue.count > SMSValidation.maxMessageLength {
                                     messageText = String(newValue.prefix(SMSValidation.maxMessageLength))

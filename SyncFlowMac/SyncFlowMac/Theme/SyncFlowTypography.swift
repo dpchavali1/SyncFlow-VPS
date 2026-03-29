@@ -23,16 +23,16 @@ struct SyncFlowTypography {
     // Headline Styles - Screen headers
     // ============================================
 
-    static let headlineLarge = Font.system(size: 32, weight: .semibold, design: .rounded)
-    static let headlineMedium = Font.system(size: 28, weight: .semibold, design: .rounded)
-    static let headlineSmall = Font.system(size: 24, weight: .semibold, design: .rounded)
+    static let headlineLarge = Font.system(size: 32, weight: .semibold, design: .default)
+    static let headlineMedium = Font.system(size: 28, weight: .semibold, design: .default)
+    static let headlineSmall = Font.system(size: 24, weight: .semibold, design: .default)
 
     // ============================================
     // Title Styles - Section headers
     // ============================================
 
-    static let titleLarge = Font.system(size: 22, weight: .medium, design: .rounded)
-    static let titleMedium = Font.system(size: 16, weight: .medium, design: .rounded)
+    static let titleLarge = Font.system(size: 22, weight: .medium, design: .default)
+    static let titleMedium = Font.system(size: 16, weight: .medium, design: .default)
     static let titleSmall = Font.system(size: 14, weight: .medium, design: .default)
 
     // ============================================

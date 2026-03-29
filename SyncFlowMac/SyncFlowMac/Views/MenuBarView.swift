@@ -101,6 +101,23 @@ struct MenuBarView: View {
 
             Divider()
 
+            // Sync toggles
+            Toggle(isOn: Binding(
+                get: { appState.clipboardSyncEnabled },
+                set: { appState.toggleClipboardSync(enabled: $0) }
+            )) {
+                Label("Clipboard Sync", systemImage: "doc.on.clipboard")
+            }
+
+            Toggle(isOn: Binding(
+                get: { appState.notificationMirrorService.isEnabled },
+                set: { appState.notificationMirrorService.setEnabled($0) }
+            )) {
+                Label("Notification Mirroring", systemImage: "bell.badge")
+            }
+
+            Divider()
+
             // Recent conversations (if any)
             if !appState.recentConversations.isEmpty {
                 Text("Recent")

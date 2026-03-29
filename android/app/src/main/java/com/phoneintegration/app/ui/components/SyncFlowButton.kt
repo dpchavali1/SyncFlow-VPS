@@ -75,7 +75,7 @@ fun SyncFlowPrimaryButton(
         onClick = { if (!loading) onClick() },
         modifier = modifier.height(size.height),
         enabled = enabled && !loading,
-        shape = RoundedCornerShape(Spacing.radiusSm),
+        shape = MaterialTheme.shapes.extraLarge,
         colors = ButtonDefaults.buttonColors(
             containerColor = animatedColor,
             contentColor = MaterialTheme.colorScheme.onPrimary,
@@ -116,7 +116,7 @@ fun SyncFlowSecondaryButton(
         onClick = { if (!loading) onClick() },
         modifier = modifier.height(size.height),
         enabled = enabled && !loading,
-        shape = RoundedCornerShape(Spacing.radiusSm),
+        shape = MaterialTheme.shapes.extraLarge,
         colors = ButtonDefaults.outlinedButtonColors(
             contentColor = MaterialTheme.colorScheme.primary,
             disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
@@ -160,7 +160,7 @@ fun SyncFlowGhostButton(
         onClick = { if (!loading) onClick() },
         modifier = modifier.height(size.height),
         enabled = enabled && !loading,
-        shape = RoundedCornerShape(Spacing.radiusSm),
+        shape = MaterialTheme.shapes.extraLarge,
         colors = ButtonDefaults.textButtonColors(
             contentColor = contentColor,
             disabledContentColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
@@ -198,7 +198,7 @@ fun SyncFlowDangerButton(
         onClick = { if (!loading) onClick() },
         modifier = modifier.height(size.height),
         enabled = enabled && !loading,
-        shape = RoundedCornerShape(Spacing.radiusSm),
+        shape = MaterialTheme.shapes.extraLarge,
         colors = ButtonDefaults.buttonColors(
             containerColor = MaterialTheme.colorScheme.error,
             contentColor = MaterialTheme.colorScheme.onError,

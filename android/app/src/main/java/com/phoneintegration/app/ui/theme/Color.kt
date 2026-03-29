@@ -1,5 +1,7 @@
 package com.phoneintegration.app.ui.theme
 
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 
 // ============================================
@@ -190,3 +192,94 @@ val md_theme_dark_inversePrimary = Color(0xFF005FAF)
 
 val md_theme_dark_surfaceTint = Color(0xFFA6C8FF)
 val md_theme_dark_scrim = Color(0xFF000000)
+
+// ============================================
+// Extended Colors (Category bubbles & semantic)
+// ============================================
+
+// Personal Messages (Rose accent)
+val PersonalBubbleLight = Color(0xFFFDEDEC)
+val PersonalBubbleDark = Color(0xFF3C1A2E)
+
+// Promotion Messages (Amber accent)
+val PromotionBubbleLight = Color(0xFFF9E79F)
+val PromotionBubbleDark = Color(0xFF3C3A1A)
+
+// Dark-mode semantic colors
+val SuccessDark = Color(0xFF66BB6A)
+val SuccessContainerDark = Color(0xFF1B3D1E)
+val OnSuccessContainerDark = Color(0xFFA5D6A7)
+
+val WarningDark = Color(0xFFFFB74D)
+val WarningContainerDark = Color(0xFF3D2E1B)
+val OnWarningContainerDark = Color(0xFFFFCC80)
+
+/**
+ * Extended color palette for SyncFlow-specific semantics that go beyond
+ * Material 3's built-in ColorScheme (e.g., message category tints).
+ */
+@Immutable
+data class SyncFlowExtendedColors(
+    // Chat bubble colors
+    val sentBubble: Color,
+    val onSentBubble: Color,
+    val receivedBubble: Color,
+    val onReceivedBubble: Color,
+
+    // Message category bubbles
+    val otpBubble: Color,
+    val transactionBubble: Color,
+    val personalBubble: Color,
+    val promotionBubble: Color,
+    val alertBubble: Color,
+
+    // Semantic feedback
+    val success: Color,
+    val successContainer: Color,
+    val onSuccessContainer: Color,
+    val warning: Color,
+    val warningContainer: Color,
+    val onWarningContainer: Color,
+)
+
+val LightSyncFlowColors = SyncFlowExtendedColors(
+    sentBubble = SentBubbleLight,
+    onSentBubble = OnSentBubble,
+    receivedBubble = ReceivedBubbleLight,
+    onReceivedBubble = OnReceivedBubbleLight,
+
+    otpBubble = OtpBubbleLight,
+    transactionBubble = TransactionBubbleLight,
+    personalBubble = PersonalBubbleLight,
+    promotionBubble = PromotionBubbleLight,
+    alertBubble = AlertBubbleLight,
+
+    success = Success,
+    successContainer = SuccessContainer,
+    onSuccessContainer = OnSuccessContainer,
+    warning = Warning,
+    warningContainer = WarningContainer,
+    onWarningContainer = OnWarningContainer,
+)
+
+val DarkSyncFlowColors = SyncFlowExtendedColors(
+    sentBubble = SentBubbleDark,
+    onSentBubble = OnSentBubble,
+    receivedBubble = ReceivedBubbleDark,
+    onReceivedBubble = OnReceivedBubbleDark,
+
+    otpBubble = OtpBubbleDark,
+    transactionBubble = TransactionBubbleDark,
+    personalBubble = PersonalBubbleDark,
+    promotionBubble = PromotionBubbleDark,
+    alertBubble = AlertBubbleDark,
+
+    success = SuccessDark,
+    successContainer = SuccessContainerDark,
+    onSuccessContainer = OnSuccessContainerDark,
+    warning = WarningDark,
+    warningContainer = WarningContainerDark,
+    onWarningContainer = OnWarningContainerDark,
+)
+
+val LocalSyncFlowColors = staticCompositionLocalOf { LightSyncFlowColors }

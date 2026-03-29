@@ -65,6 +65,7 @@ import com.phoneintegration.app.data.DraftRepository
 import com.phoneintegration.app.data.PreferencesManager
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -99,6 +100,7 @@ import com.phoneintegration.app.ui.components.SyncFlowBadge
 import com.phoneintegration.app.ui.components.SyncFlowEmptyState
 import com.phoneintegration.app.ui.components.EmptyStateType
 import com.phoneintegration.app.PhoneNumberUtils
+import com.phoneintegration.app.vps.VPSClient
 import coil.compose.AsyncImage
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -192,6 +194,13 @@ fun ConversationListScreen(
 
     val swipeEnabled by remember { derivedStateOf { prefsManager.swipeGesturesEnabled.value } }
 
+    // VPS connection state for sync status indicator
+    val vpsClient = remember { VPSClient.getInstance(context) }
+    val isVpsConnected by vpsClient.connectionState.collectAsState()
+
+    // Pull-to-refresh state
+    var isRefreshing by remember { mutableStateOf(false) }
+
     DisposableEffect(Unit) {
         continuityService.startListening { state ->
             if (state == null) {
@@ -272,7 +281,29 @@ fun ConversationListScreen(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = { Text("SyncFlow") },
+                title = {
+                    Column {
+                        Text("SyncFlow")
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .background(
+                                        color = if (isVpsConnected) Color(0xFF4CAF50) else Color(0xFFF44336),
+                                        shape = CircleShape
+                                    )
+                            )
+                            Text(
+                                text = if (isVpsConnected) "Connected" else "Offline",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                },
                 actions = {
                     // Overflow menu
                     Box {
@@ -374,6 +405,17 @@ fun ConversationListScreen(
     ) { padding ->
 
         Box(modifier = Modifier.fillMaxSize().padding(padding)) {
+            PullToRefreshBox(
+                isRefreshing = isRefreshing,
+                onRefresh = {
+                    isRefreshing = true
+                    scope.launch {
+                        viewModel.loadConversations(forceReload = true)
+                        isRefreshing = false
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
+            ) {
             Column(modifier = Modifier.fillMaxSize()) {
 
                 OutlinedTextField(
@@ -382,7 +424,7 @@ fun ConversationListScreen(
                     placeholder = { Text("Search…") },
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(10.dp)
+                        .padding(Spacing.sm)
                 )
 
                 var expandedSimMenu by remember { mutableStateOf(false) }
@@ -390,8 +432,8 @@ fun ConversationListScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 10.dp)
-                        .padding(bottom = 8.dp),
+                        .padding(horizontal = Spacing.sm)
+                        .padding(bottom = Spacing.xs),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     if (availableSims.size > 1) {
@@ -620,40 +662,43 @@ fun ConversationListScreen(
                                 conversationToDelete = convo
                                 Unit
                             }
-                            if (!convo.isAdConversation) {
-                                if (swipeEnabled) {
-                                    // Swipeable conversation item
-                                    SwipeableConversationItem(
-                                        conversation = convo,
-                                        onOpen = handleOpen,
-                                        onArchive = handleArchive,
-                                        onPin = handlePin,
-                                        onMute = handleMute,
-                                        onBlock = handleBlock,
-                                        onMarkSpam = handleMarkSpam,
-                                        onDelete = handleDelete
-                                    )
-                                } else {
-                                    NonSwipeConversationItem(
-                                        conversation = convo,
-                                        onOpen = handleOpen,
-                                        onArchive = handleArchive,
-                                        onPin = handlePin,
-                                        onMute = handleMute,
-                                        onBlock = handleBlock,
-                                        onMarkSpam = handleMarkSpam,
-                                        onDelete = handleDelete
-                                    )
+                            Column(modifier = Modifier.animateItem()) {
+                                if (!convo.isAdConversation) {
+                                    if (swipeEnabled) {
+                                        // Swipeable conversation item
+                                        SwipeableConversationItem(
+                                            conversation = convo,
+                                            onOpen = handleOpen,
+                                            onArchive = handleArchive,
+                                            onPin = handlePin,
+                                            onMute = handleMute,
+                                            onBlock = handleBlock,
+                                            onMarkSpam = handleMarkSpam,
+                                            onDelete = handleDelete
+                                        )
+                                    } else {
+                                        NonSwipeConversationItem(
+                                            conversation = convo,
+                                            onOpen = handleOpen,
+                                            onArchive = handleArchive,
+                                            onPin = handlePin,
+                                            onMute = handleMute,
+                                            onBlock = handleBlock,
+                                            onMarkSpam = handleMarkSpam,
+                                            onDelete = handleDelete
+                                        )
+                                    }
                                 }
-                            }
 
-                            if (index < filtered.lastIndex) {
-                                ConversationListSeparator()
+                                if (index < filtered.lastIndex) {
+                                    ConversationListSeparator()
+                                }
                             }
                         }
                     }
                 }
             }
+        }
         }
     }
 

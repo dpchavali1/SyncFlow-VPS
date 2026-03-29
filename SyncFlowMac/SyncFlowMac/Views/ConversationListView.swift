@@ -416,11 +416,6 @@ struct ConversationListView: View {
                 .padding(.bottom, 8)
             }
 
-            // Quick drop zone for drag-and-drop functionality
-            QuickDropView()
-                .padding(.horizontal)
-                .padding(.bottom, 8)
-
             Divider()
 
             // =================================================================
@@ -676,6 +671,42 @@ struct ConversationListView: View {
         }
         .onAppear {
             availableLabels = preferences.getLabels()
+        }
+        .onKeyPress(.upArrow) {
+            navigateConversation(direction: -1)
+            return .handled
+        }
+        .onKeyPress(.downArrow) {
+            navigateConversation(direction: 1)
+            return .handled
+        }
+    }
+
+    // MARK: - Keyboard Navigation
+
+    /// Navigate conversations with arrow keys
+    /// - Parameter direction: -1 for up (previous), +1 for down (next)
+    private func navigateConversation(direction: Int) {
+        let conversations = filteredConversations
+        guard !conversations.isEmpty else { return }
+
+        if let current = selectedConversation,
+           let currentIndex = conversations.firstIndex(where: { $0.id == current.id }) {
+            let newIndex = currentIndex + direction
+            if newIndex >= 0 && newIndex < conversations.count {
+                selectedConversation = conversations[newIndex]
+                messageStore.markConversationAsRead(conversations[newIndex])
+            }
+        } else {
+            // No selection - select first or last based on direction
+            if direction > 0 {
+                selectedConversation = conversations.first
+            } else {
+                selectedConversation = conversations.last
+            }
+            if let selected = selectedConversation {
+                messageStore.markConversationAsRead(selected)
+            }
         }
     }
 }

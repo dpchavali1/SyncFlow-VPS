@@ -21,10 +21,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.phoneintegration.app.ui.theme.LocalSyncFlowColors
 import com.phoneintegration.app.ui.theme.Spacing
 import com.phoneintegration.app.ui.theme.SyncFlowBlue
-import com.phoneintegration.app.ui.theme.Blue100
-import com.phoneintegration.app.ui.theme.Blue700
 
 /**
  * Avatar size variants
@@ -65,10 +64,14 @@ fun SyncFlowAvatar(
     imageUrl: String? = null,
     size: AvatarSize = AvatarSize.Medium,
     status: OnlineStatus = OnlineStatus.None,
-    backgroundColor: Color = Blue100,
-    textColor: Color = Blue700,
+    backgroundColor: Color = Color.Unspecified,
+    textColor: Color = Color.Unspecified,
     borderColor: Color? = null
 ) {
+    val resolvedBg = if (backgroundColor == Color.Unspecified)
+        MaterialTheme.colorScheme.primaryContainer else backgroundColor
+    val resolvedText = if (textColor == Color.Unspecified)
+        MaterialTheme.colorScheme.onPrimaryContainer else textColor
     Box(
         modifier = modifier.size(size.size),
         contentAlignment = Alignment.Center
@@ -100,7 +103,7 @@ fun SyncFlowAvatar(
                 modifier = Modifier
                     .size(size.size)
                     .clip(CircleShape)
-                    .background(backgroundColor, CircleShape)
+                    .background(resolvedBg, CircleShape)
                     .then(
                         if (borderColor != null) {
                             Modifier.border(2.dp, borderColor, CircleShape)
@@ -112,7 +115,7 @@ fun SyncFlowAvatar(
             ) {
                 Text(
                     text = getInitials(name),
-                    color = textColor,
+                    color = resolvedText,
                     fontSize = size.fontSize.sp,
                     fontWeight = FontWeight.SemiBold
                 )
@@ -158,15 +161,16 @@ private fun getInitials(name: String): String {
 }
 
 /**
- * Get color for online status
+ * Get color for online status using theme-aware extended colors
  */
 @Composable
 private fun getStatusColor(status: OnlineStatus): Color {
+    val extColors = LocalSyncFlowColors.current
     return when (status) {
-        OnlineStatus.Online -> Color(0xFF4CAF50)  // Green
-        OnlineStatus.Away -> Color(0xFFFFC107)    // Amber
-        OnlineStatus.Busy -> Color(0xFFF44336)    // Red
-        OnlineStatus.Offline -> Color(0xFF9E9E9E) // Grey
+        OnlineStatus.Online -> extColors.success
+        OnlineStatus.Away -> extColors.warning
+        OnlineStatus.Busy -> MaterialTheme.colorScheme.error
+        OnlineStatus.Offline -> MaterialTheme.colorScheme.outline
         OnlineStatus.None -> Color.Transparent
     }
 }
@@ -189,9 +193,7 @@ fun SyncFlowGroupAvatar(
             // Default group avatar
             SyncFlowAvatar(
                 name = "Group",
-                size = size,
-                backgroundColor = Blue100,
-                textColor = Blue700
+                size = size
             )
         } else if (displayNames.size == 1) {
             SyncFlowAvatar(

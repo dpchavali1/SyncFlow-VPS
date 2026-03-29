@@ -228,6 +228,7 @@ struct SyncFlowMacApp: App {
                     }
                 }
         }
+        .defaultSize(width: 1100, height: 700)
         .commands {
             // Add custom menu commands
             CommandGroup(replacing: .newItem) {}
@@ -465,7 +466,7 @@ struct SyncFlowMacApp: App {
                 }
             }
         }
-        .menuBarExtraStyle(.menu)
+        .menuBarExtraStyle(.window)
     }
 
     private func configureAppearance() {

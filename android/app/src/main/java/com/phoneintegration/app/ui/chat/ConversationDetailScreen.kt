@@ -63,11 +63,19 @@ import com.phoneintegration.app.data.database.AppDatabase
 import com.phoneintegration.app.data.database.BlockedContact
 import com.phoneintegration.app.data.database.SpamMessage
 import com.phoneintegration.app.utils.SpamFilter
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Report
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Warning
+import com.phoneintegration.app.ui.shared.DateHeader
+import java.text.SimpleDateFormat
+import java.util.Locale
 
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -364,7 +372,7 @@ fun ConversationDetailScreen(
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
                 actions = {
@@ -576,7 +584,7 @@ fun ConversationDetailScreen(
                         .padding(8.dp),
                     placeholder = { Text("Search in conversation...") },
                     leadingIcon = {
-                        Icon(Icons.Default.Search, contentDescription = null)
+                        Icon(Icons.Default.Search, contentDescription = "Search")
                     },
                     trailingIcon = {
                         if (searchText.isNotEmpty()) {
@@ -589,6 +597,16 @@ fun ConversationDetailScreen(
                 )
             }
 
+            // Date format for comparing dates between messages
+            val dateFormat = remember { SimpleDateFormat("yyyyMMdd", Locale.getDefault()) }
+            val displayDateFormat = remember { SimpleDateFormat("EEEE, MMM d, yyyy", Locale.getDefault()) }
+
+            // Show scroll-to-bottom FAB when scrolled up
+            val showScrollToBottom by remember {
+                derivedStateOf { listState.firstVisibleItemIndex > 3 }
+            }
+
+            Box(modifier = Modifier.fillMaxSize()) {
             LazyColumn(
                 modifier = Modifier.fillMaxSize(),
                 reverseLayout = true,
@@ -613,6 +631,20 @@ fun ConversationDetailScreen(
                     }
                 )
 
+                // Date header: show when date changes from next message (reversed layout)
+                val nextIndex = index + 1
+                val showDateHeader = if (nextIndex < filteredMessages.size) {
+                    val currentDate = dateFormat.format(java.util.Date(sms.date))
+                    val nextDate = dateFormat.format(java.util.Date(filteredMessages[nextIndex].date))
+                    currentDate != nextDate
+                } else {
+                    true // Always show header for the oldest message
+                }
+
+                if (showDateHeader) {
+                    DateHeader(dateText = displayDateFormat.format(java.util.Date(sms.date)))
+                }
+
                 if (index == messages.lastIndex && hasMore && !isLoadingMore) {
                     viewModel.loadMore()
                 }
@@ -631,6 +663,31 @@ fun ConversationDetailScreen(
                 }
             }
         }
+
+            // Scroll-to-bottom FAB
+            androidx.compose.animation.AnimatedVisibility(
+                visible = showScrollToBottom,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp)
+            ) {
+                SmallFloatingActionButton(
+                    onClick = {
+                        scope.launch { listState.animateScrollToItem(0) }
+                    },
+                    shape = CircleShape,
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.KeyboardArrowDown,
+                        contentDescription = "Scroll to bottom"
+                    )
+                }
+            }
+            }
         }
     }
 
@@ -935,7 +992,7 @@ fun ConversationDetailScreen(
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     AsyncImage(
                         model = selectedAttachmentUri,
-                        contentDescription = null,
+                        contentDescription = "Attachment preview",
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(250.dp)
@@ -983,7 +1040,7 @@ fun ConversationDetailScreen(
             icon = {
                 Icon(
                     Icons.Filled.Warning,
-                    contentDescription = null,
+                    contentDescription = "Warning",
                     tint = MaterialTheme.colorScheme.error
                 )
             },

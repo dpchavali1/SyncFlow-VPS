@@ -70,7 +70,7 @@ struct SyncFlowSpacing {
     static let bubbleVertical: CGFloat = 8
     static let bubbleGap: CGFloat = 4          // Space between bubbles
     static let bubbleGroupGap: CGFloat = 12    // Space between message groups
-    static let bubbleMaxWidth: CGFloat = 320   // Max bubble width
+    static let bubbleMaxWidth: CGFloat = 500   // Max bubble width (use GeometryReader for responsive)
 
     // ============================================
     // Input Field Spacing
