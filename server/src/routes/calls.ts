@@ -316,7 +316,7 @@ router.post('/register', async (req: Request, res: Response) => {
         // Transfer active subscription from old user to new user (reinstall scenario).
         // Only transfer if the new user doesn't already have a paid plan.
         const oldSub = await client.query(
-          `SELECT plan, status, started_at, expires_at, stripe_customer_id, stripe_subscription_id
+          `SELECT plan, status, started_at, expires_at
            FROM user_subscriptions WHERE user_id = $1 AND plan <> 'free' AND status IN ('active', 'cancelling')`,
           [oldUserId]
         );

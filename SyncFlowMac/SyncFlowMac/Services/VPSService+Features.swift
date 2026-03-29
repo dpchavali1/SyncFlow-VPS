@@ -209,30 +209,6 @@ extension VPSService {
         let _: VPSGenericResponse = try await post("/api/usage/reset-storage", body: [:])
     }
 
-    // MARK: - Stripe Billing
-
-    /// Creates a Stripe checkout session and returns the checkout URL
-    public func createCheckoutSession(plan: String) async throws -> String {
-        let response: VPSCheckoutResponse = try await post("/api/usage/subscription/checkout", body: ["plan": plan])
-        return response.url
-    }
-
-    /// Gets the Stripe billing portal URL for managing subscriptions
-    public func getBillingPortalUrl() async throws -> String {
-        let response: VPSPortalResponse = try await get("/api/usage/subscription/portal")
-        return response.url
-    }
-
-    /// Cancels the Stripe subscription at end of billing period
-    public func cancelStripeSubscription() async throws {
-        let _: VPSCancelResponse = try await post("/api/usage/subscription/cancel", body: [:])
-    }
-
-    /// Syncs subscription from Stripe checkout into the database (for when webhooks aren't available)
-    public func syncSubscription() async throws -> VPSSubscriptionSyncResponse {
-        return try await post("/api/usage/subscription/sync", body: [:])
-    }
-
     /// Gets subscription status from server
     public func getSubscriptionStatus() async throws -> VPSSubscriptionStatus {
         return try await get("/api/usage/subscription")

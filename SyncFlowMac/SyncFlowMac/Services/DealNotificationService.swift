@@ -27,7 +27,14 @@ class DealNotificationService {
     /// Call once at app startup to schedule deal notifications for today.
     /// Uses UNCalendarNotificationTrigger so notifications fire reliably
     /// even when the app is napped or in the background.
+    /// Only schedules if user has opted in via the "deal_notifications_enabled" preference.
     func scheduleDailyNotifications() {
+        // Only schedule if user has opted in
+        guard UserDefaults.standard.bool(forKey: "deal_notifications_enabled") else {
+            cancelAll()
+            return
+        }
+
         // Remove previously scheduled deal notifications
         cancelAll()
 

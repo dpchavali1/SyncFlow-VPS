@@ -95,14 +95,6 @@ export const config = {
     serviceAccountPath: process.env.FCM_SERVICE_ACCOUNT_PATH || '',
   },
 
-  // Stripe (subscription billing)
-  stripe: {
-    secretKey: process.env.STRIPE_SECRET_KEY || '',
-    webhookSecret: process.env.STRIPE_WEBHOOK_SECRET || '',
-    priceMonthly: process.env.STRIPE_PRICE_MONTHLY || '',
-    priceYearly: process.env.STRIPE_PRICE_YEARLY || '',
-    price3Year: process.env.STRIPE_PRICE_3YEAR || '',
-  },
 };
 
 // Startup warnings for missing optional security config

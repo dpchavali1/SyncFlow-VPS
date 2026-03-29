@@ -1108,7 +1108,8 @@ class VPSService {
   }
 
   async syncSubscription(): Promise<any> {
-    return this.request('POST', '/api/usage/subscription/sync');
+    // Stripe sync removed - subscriptions managed via App Store IAP
+    return { synced: false, message: 'Subscription sync not available. Manage subscriptions in the App Store.' };
   }
 
 }

@@ -20,15 +20,9 @@ class SyncGroupManager: NSObject, ObservableObject {
         }
     }
 
+    /// Device ID delegated to DeviceIdentifier (Keychain-backed random UUID)
     var deviceId: String {
-        if let existing = UserDefaults.standard.string(forKey: "device_id") {
-            return existing
-        }
-
-        // Try to get from hardware UUID
-        let newId = getOrCreateDeviceId()
-        UserDefaults.standard.set(newId, forKey: "device_id")
-        return newId
+        return DeviceIdentifier.shared.getDeviceId()
     }
 
     /// Check if device is part of a sync group
@@ -40,55 +34,6 @@ class SyncGroupManager: NSObject, ObservableObject {
         super.init()
         // Restore sync group ID from UserDefaults on init
         self.syncGroupId = UserDefaults.standard.string(forKey: "sync_group_id")
-    }
-
-    /**
-     * Get or create hardware-based device ID
-     * Uses IOKit to get hardware UUID if available
-     */
-    private func getOrCreateDeviceId() -> String {
-        // Try UserDefaults first
-        if let existing = UserDefaults.standard.string(forKey: "SyncFlowMacDeviceId") {
-            return existing
-        }
-
-        // Try to get hardware UUID
-        let id: String
-        if let hwUuid = getMacHardwareUUID() {
-            id = "mac_\(hwUuid.prefix(16))"
-        } else {
-            id = "mac_\(UUID().uuidString)"
-        }
-
-        UserDefaults.standard.set(id, forKey: "SyncFlowMacDeviceId")
-        return id
-    }
-
-    /**
-     * Get macOS hardware UUID
-     */
-    private func getMacHardwareUUID() -> String? {
-        let task = Process()
-        task.launchPath = "/usr/bin/ioreg"
-        task.arguments = ["-rd1", "-c", "IOPlatformExpertDevice"]
-
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.launch()
-
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let output = String(data: data, encoding: .utf8) else { return nil }
-
-        // Parse for IOPlatformUUID
-        if let range = output.range(of: "IOPlatformUUID") {
-            let substring = output[range.upperBound...]
-            if let start = substring.firstIndex(of: "\""),
-               let end = substring[substring.index(after: start)...].firstIndex(of: "\"") {
-                return String(substring[substring.index(after: start)..<end])
-            }
-        }
-
-        return nil
     }
 
     /**

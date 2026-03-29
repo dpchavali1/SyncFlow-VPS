@@ -222,6 +222,7 @@ fun DesktopIntegrationScreen(
     var isBackgroundSyncEnabled by remember { mutableStateOf(preferencesManager.backgroundSyncEnabled.value) }
     var hasNotificationPermission by remember { mutableStateOf(NotificationMirrorService.isEnabled(appContext)) }
     var isNotificationMirrorEnabled by remember { mutableStateOf(preferencesManager.notificationMirrorEnabled.value) }
+    var showNotificationDisclosure by remember { mutableStateOf(false) }
     // Photo sync feature has been removed - always false
     var isPhotoSyncEnabled by remember { mutableStateOf(false) }
 
@@ -1596,28 +1597,8 @@ fun DesktopIntegrationScreen(
                             checked = isNotificationMirrorEnabled && hasNotificationPermission,
                             onCheckedChange = { enabled ->
                                 if (enabled && !hasNotificationPermission) {
-                                    // User wants to enable but doesn't have permission - open settings
-                                    android.util.Log.d("DesktopIntegrationScreen", "Opening notification access settings")
-                                    try {
-                                        val intent = android.content.Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS")
-                                        context.startActivity(intent)
-                                        successMessage = "Opening Notification Access settings...\n\nPlease enable SyncFlow, then return to this screen and toggle the switch again."
-                                        showSuccessDialog = true
-                                    } catch (e: Exception) {
-                                        android.util.Log.e("DesktopIntegrationScreen", "Failed to open notification settings", e)
-                                        // Fallback to general settings if specific intent fails
-                                        try {
-                                            val intent = android.content.Intent(android.provider.Settings.ACTION_SETTINGS)
-                                            context.startActivity(intent)
-                                            successMessage = "Opening Settings...\n\nPlease enable Notification Access for SyncFlow in Special Access → Notification Access."
-                                            showSuccessDialog = true
-                                        } catch (e2: Exception) {
-                                            android.util.Log.e("DesktopIntegrationScreen", "Failed to open general settings", e2)
-                                            // Show message if we can't open settings
-                                            successMessage = "Please enable Notification Access for SyncFlow in Android Settings → Special Access → Notification Access."
-                                            showSuccessDialog = true
-                                        }
-                                    }
+                                    // Show disclosure dialog before opening system settings
+                                    showNotificationDisclosure = true
                                 } else if (hasNotificationPermission) {
                                     // Permission granted, update setting
                                     isNotificationMirrorEnabled = enabled
@@ -1834,6 +1815,61 @@ fun DesktopIntegrationScreen(
     }
 
     // Success Dialog
+    // Notification Listener Disclosure Dialog
+    if (showNotificationDisclosure) {
+        AlertDialog(
+            onDismissRequest = { showNotificationDisclosure = false },
+            icon = {
+                Icon(
+                    Icons.Default.Notifications,
+                    "Notification Access",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+            },
+            title = { Text("Notification Access Disclosure") },
+            text = {
+                Text(
+                    "To mirror notifications to your desktop, SyncFlow needs Notification Access permission.\n\n" +
+                    "When enabled, SyncFlow will:\n" +
+                    "- Read notification titles, text, and app names from other apps\n" +
+                    "- Transmit this data over an encrypted connection to your paired VPS server\n" +
+                    "- Display these notifications on your paired desktop device\n\n" +
+                    "SyncFlow will NOT access notifications from system apps, Google Play Services, or other messaging apps already handled by SyncFlow.\n\n" +
+                    "You can disable this at any time from this screen."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showNotificationDisclosure = false
+                    // Now open notification access settings
+                    try {
+                        val intent = android.content.Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS")
+                        context.startActivity(intent)
+                        successMessage = "Opening Notification Access settings...\n\nPlease enable SyncFlow, then return to this screen and toggle the switch again."
+                        showSuccessDialog = true
+                    } catch (e: Exception) {
+                        try {
+                            val intent = android.content.Intent(android.provider.Settings.ACTION_SETTINGS)
+                            context.startActivity(intent)
+                            successMessage = "Opening Settings...\n\nPlease enable Notification Access for SyncFlow in Special Access → Notification Access."
+                            showSuccessDialog = true
+                        } catch (e2: Exception) {
+                            successMessage = "Please enable Notification Access for SyncFlow in Android Settings → Special Access → Notification Access."
+                            showSuccessDialog = true
+                        }
+                    }
+                }) {
+                    Text("Continue")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNotificationDisclosure = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
     if (showSuccessDialog && successMessage != null) {
         AlertDialog(
             onDismissRequest = {

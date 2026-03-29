@@ -191,7 +191,7 @@ export default function SettingsPage() {
       setSubscriptionBanner('Payment successful! Syncing your subscription...')
       // Clear query param from URL without navigation
       window.history.replaceState({}, '', '/settings')
-      // Sync subscription from Stripe into DB, then reload usage
+      // Sync subscription into DB, then reload usage
       ;(async () => {
         try {
           await vpsService.ensureTokensRestored()

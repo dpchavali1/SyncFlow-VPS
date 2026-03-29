@@ -89,7 +89,7 @@ class SubscriptionService: ObservableObject {
     @Published var subscriptionStatus: SubscriptionStatus = .notSubscribed
     @Published var isLoading: Bool = false
     @Published var errorMessage: String?
-    @Published var hasStripeSubscription: Bool = false
+    @Published var hasServerSubscription: Bool = false
 
     private var updateListenerTask: Task<Void, Error>?
     private let trialStartKey = "syncflow_trial_start_date"
@@ -146,8 +146,8 @@ class SubscriptionService: ObservableObject {
 
     /// Returns true if user has an active paid subscription (not trial)
     var isPremium: Bool {
-        // First check Stripe subscription from server
-        if hasStripeSubscription {
+        // First check server-side subscription (admin-assigned or IAP-synced)
+        if hasServerSubscription {
             return true
         }
 
@@ -248,7 +248,7 @@ class SubscriptionService: ObservableObject {
     // MARK: - Update Status
 
     func updateSubscriptionStatus() async {
-        // Check server for Stripe subscription
+        // Check server for active subscription (admin-assigned or IAP-synced)
         await checkServerSubscription()
 
         // Check local data for admin-assigned plan (Testing tab)
@@ -347,19 +347,18 @@ class SubscriptionService: ObservableObject {
         return subscriptionStatus.isActive
     }
 
-    /// Checks the VPS server for an active subscription (Stripe or admin-assigned).
-    /// Sets hasStripeSubscription and updates subscriptionStatus if found.
+    /// Checks the VPS server for an active subscription (admin-assigned or IAP-synced).
+    /// Sets hasServerSubscription and updates subscriptionStatus if found.
     private func checkServerSubscription() async {
         guard VPSService.shared.isAuthenticated else { return }
 
         do {
             let status = try await VPSService.shared.getSubscriptionStatus()
-            let isStripe = status.hasStripeCustomer ?? false
             let isPaid = status.plan != "free" && status.status == "active"
 
-            self.hasStripeSubscription = isStripe && isPaid
+            self.hasServerSubscription = isPaid
 
-            // Update plan status for ANY active paid plan (Stripe or admin-assigned)
+            // Update plan status for any active paid plan
             if isPaid {
                 let planName = status.plan
                 let expiresAt = status.expiresAt ?? 0

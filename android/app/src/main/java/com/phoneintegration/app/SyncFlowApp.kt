@@ -210,10 +210,15 @@ class SyncFlowApp : Application(), ImageLoaderFactory {
                 // This might be critical, but let's continue
             }
 
-            // Schedule daily notification windows
+            // Schedule daily deal notification windows (only if user has opted in)
             try {
-                DealNotificationScheduler.scheduleDailyWork(this)
-                android.util.Log.i("SyncFlowApp", "DealNotificationScheduler initialized successfully")
+                val dealPrefs = getSharedPreferences("syncflow_prefs", MODE_PRIVATE)
+                if (dealPrefs.getBoolean("deal_notifications_enabled", false)) {
+                    DealNotificationScheduler.scheduleDailyWork(this)
+                    android.util.Log.i("SyncFlowApp", "DealNotificationScheduler initialized (user opted in)")
+                } else {
+                    android.util.Log.i("SyncFlowApp", "DealNotificationScheduler skipped (user has not opted in)")
+                }
             } catch (e: Exception) {
                 android.util.Log.e("SyncFlowApp", "Failed to initialize DealNotificationScheduler", e)
                 // Continue without notification scheduling if it fails

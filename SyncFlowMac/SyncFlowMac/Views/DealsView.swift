@@ -248,33 +248,14 @@ struct FeaturedDealCard: View {
     private func openDeal() {
         guard let url = deal.dealURL else { return }
 
-        // Method 1: Try NSWorkspace.shared.open
-        var success = NSWorkspace.shared.open(url)
+        let success = NSWorkspace.shared.open(url)
 
         if !success {
-            // Method 2: Try opening with default browser explicitly
+            // Try opening with default browser explicitly
             if let browserURL = NSWorkspace.shared.urlForApplication(toOpen: url) {
-                NSWorkspace.shared.open([url], withApplicationAt: browserURL, configuration: NSWorkspace.OpenConfiguration()) { _, error in
-                    if error != nil {
-                        openDealFallback(url)
-                    }
-                }
-                return
+                NSWorkspace.shared.open([url], withApplicationAt: browserURL, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
             }
         }
-
-        if !success {
-            openDealFallback(url)
-        }
-    }
-
-    private func openDealFallback(_ url: URL) {
-        // Method 3: Try shell command as last resort
-        let task = Process()
-        task.launchPath = "/usr/bin/open"
-        task.arguments = [url.absoluteString]
-        try? task.run()
-        task.waitUntilExit()
     }
 }
 
@@ -612,33 +593,14 @@ struct DealCard: View {
     private func openDeal() {
         guard let url = deal.dealURL else { return }
 
-        // Method 1: Try NSWorkspace.shared.open
-        var success = NSWorkspace.shared.open(url)
+        let success = NSWorkspace.shared.open(url)
 
         if !success {
-            // Method 2: Try opening with default browser explicitly
+            // Try opening with default browser explicitly
             if let browserURL = NSWorkspace.shared.urlForApplication(toOpen: url) {
-                NSWorkspace.shared.open([url], withApplicationAt: browserURL, configuration: NSWorkspace.OpenConfiguration()) { _, error in
-                    if error != nil {
-                        openDealFallback(url)
-                    }
-                }
-                return
+                NSWorkspace.shared.open([url], withApplicationAt: browserURL, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
             }
         }
-
-        if !success {
-            openDealFallback(url)
-        }
-    }
-
-    private func openDealFallback(_ url: URL) {
-        // Method 3: Try shell command as last resort
-        let task = Process()
-        task.launchPath = "/usr/bin/open"
-        task.arguments = [url.absoluteString]
-        try? task.run()
-        task.waitUntilExit()
     }
 }
 

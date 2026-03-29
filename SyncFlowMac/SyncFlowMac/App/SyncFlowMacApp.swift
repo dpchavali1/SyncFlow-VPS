@@ -221,8 +221,10 @@ struct SyncFlowMacApp: App {
                         didSetupPerformanceOptimizations = true
                         setupPerformanceOptimizations()
 
-                        // Start deal notification scheduler
-                        DealNotificationService.shared.scheduleDailyNotifications()
+                        // Start deal notification scheduler only if user opted in
+                        if UserDefaults.standard.bool(forKey: "deal_notifications_enabled") {
+                            DealNotificationService.shared.scheduleDailyNotifications()
+                        }
                     }
                 }
         }

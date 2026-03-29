@@ -603,7 +603,7 @@ async function handleBillingHistoryQuery(userId: string | null): Promise<string>
 
   try {
     const subscription = await queryOne(
-      'SELECT plan, status, started_at, expires_at, stripe_customer_id FROM user_subscriptions WHERE user_id = $1',
+      'SELECT plan, status, started_at, expires_at FROM user_subscriptions WHERE user_id = $1',
       [userId]
     );
 

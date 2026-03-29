@@ -72,14 +72,8 @@ app.use((_req, res, next) => {
   next();
 });
 
-// Body parsing (skip JSON parsing for Stripe webhook which needs raw body)
-app.use((req, res, next) => {
-  if (req.path === '/api/usage/subscription/webhook') {
-    next();
-  } else {
-    express.json({ limit: '10mb' })(req, res, next);
-  }
-});
+// Body parsing
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 // Request logging (structured)

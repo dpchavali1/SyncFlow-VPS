@@ -2,64 +2,11 @@
 //  PaywallView.swift
 //  SyncFlowMac
 //
-//  Subscription paywall UI.
-//  • App Store build (APP_STORE flag): IAP only — no Stripe option (Apple requirement)
-//  • Direct distribution build: shows both App Store IAP and Stripe billing picker
+//  Subscription paywall UI using App Store In-App Purchases.
 //
 
 import SwiftUI
 import StoreKit
-
-// MARK: - Billing Method (direct distribution only)
-
-#if !APP_STORE
-enum BillingMethod: String, CaseIterable {
-    case appStore = "App Store"
-    case stripe = "Direct Billing"
-}
-
-enum StripePlan: String, CaseIterable {
-    case monthly
-    case yearly
-    case threeYear = "3year"
-
-    var displayName: String {
-        switch self {
-        case .monthly: return "Monthly"
-        case .yearly: return "Yearly"
-        case .threeYear: return "3-Year"
-        }
-    }
-
-    var price: String {
-        switch self {
-        case .monthly: return "$4.99"
-        case .yearly: return "$39.99"
-        case .threeYear: return "$79.99"
-        }
-    }
-
-    var periodText: String {
-        switch self {
-        case .monthly: return "per month"
-        case .yearly: return "per year"
-        case .threeYear: return "one-time payment"
-        }
-    }
-
-    var savingsText: String? {
-        switch self {
-        case .monthly: return nil
-        case .yearly: return "Save 33%"
-        case .threeYear: return "Best Value"
-        }
-    }
-
-    var isBestValue: Bool {
-        self == .yearly
-    }
-}
-#endif
 
 struct PaywallView: View {
     @StateObject private var subscriptionService = SubscriptionService.shared
@@ -67,12 +14,6 @@ struct PaywallView: View {
     @State private var selectedProduct: Product?
     @State private var showError = false
     @State private var isPurchasing = false
-
-    #if !APP_STORE
-    @State private var selectedStripePlan: StripePlan = .yearly
-    @State private var billingMethod: BillingMethod = .stripe
-    @State private var stripeError: String?
-    #endif
 
     var body: some View {
         VStack(spacing: 0) {
@@ -95,37 +36,13 @@ struct PaywallView: View {
 
             ScrollView {
                 VStack(spacing: 24) {
-                    #if !APP_STORE
-                    // Billing method picker (direct distribution only)
-                    billingMethodPicker
-                    #endif
-
                     // Features list
                     featuresSection
 
                     // Pricing options
-                    #if APP_STORE
                     appStorePricingSection
                     appStoreSubscribeButton
                     restoreButton
-                    #else
-                    if billingMethod == .appStore {
-                        appStorePricingSection
-                        appStoreSubscribeButton
-                        restoreButton
-                    } else {
-                        stripePricingSection
-                        stripeSubscribeButton
-                    }
-
-                    // Error display for Stripe
-                    if let error = stripeError {
-                        Text(error)
-                            .font(.caption)
-                            .foregroundColor(SyncFlowColors.adaptiveRed)
-                            .multilineTextAlignment(.center)
-                    }
-                    #endif
 
                     // Terms
                     termsSection
@@ -150,19 +67,6 @@ struct PaywallView: View {
             }
         }
     }
-
-    // MARK: - Billing Method Picker (direct distribution only)
-
-    #if !APP_STORE
-    private var billingMethodPicker: some View {
-        Picker("Billing", selection: $billingMethod) {
-            ForEach(BillingMethod.allCases, id: \.self) { method in
-                Text(method.rawValue).tag(method)
-            }
-        }
-        .pickerStyle(.segmented)
-    }
-    #endif
 
     // MARK: - Header
 
@@ -245,23 +149,6 @@ struct PaywallView: View {
         }
     }
 
-    // MARK: - Stripe Pricing (direct distribution only)
-
-    #if !APP_STORE
-    private var stripePricingSection: some View {
-        VStack(spacing: 12) {
-            ForEach(StripePlan.allCases, id: \.self) { plan in
-                StripePricingCard(
-                    plan: plan,
-                    isSelected: selectedStripePlan == plan
-                ) {
-                    selectedStripePlan = plan
-                }
-            }
-        }
-    }
-    #endif
-
     // MARK: - App Store Subscribe Button
 
     private var appStoreSubscribeButton: some View {
@@ -295,42 +182,6 @@ struct PaywallView: View {
         .disabled(selectedProduct == nil || isPurchasing)
     }
 
-    // MARK: - Stripe Subscribe Button (direct distribution only)
-
-    #if !APP_STORE
-    private var stripeSubscribeButton: some View {
-        Button(action: {
-            Task {
-                await startStripeCheckout()
-            }
-        }) {
-            HStack {
-                if isPurchasing {
-                    ProgressView()
-                        .scaleEffect(0.8)
-                        .padding(.trailing, 4)
-                }
-                Image(systemName: "safari")
-                Text(isPurchasing ? "Opening checkout..." : "Continue to Checkout")
-                    .fontWeight(.semibold)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 14)
-            .background(
-                LinearGradient(
-                    colors: [SyncFlowColors.adaptiveBlue, SyncFlowColors.adaptivePurple],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-            )
-            .foregroundColor(.white)
-            .cornerRadius(10)
-        }
-        .buttonStyle(.plain)
-        .disabled(isPurchasing)
-    }
-    #endif
-
     // MARK: - Restore Button
 
     private var restoreButton: some View {
@@ -351,24 +202,10 @@ struct PaywallView: View {
 
     private var termsSection: some View {
         VStack(spacing: 8) {
-            #if APP_STORE
             Text("Subscriptions auto-renew unless cancelled at least 24 hours before the end of the current period. Manage subscriptions in System Settings > Apple ID > Subscriptions.")
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
-            #else
-            if billingMethod == .appStore {
-                Text("Subscriptions auto-renew unless cancelled at least 24 hours before the end of the current period. Manage subscriptions in System Settings > Apple ID > Subscriptions.")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-            } else {
-                Text("You will be redirected to a secure Stripe checkout page. Subscriptions can be managed from Settings > Subscription.")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                    .multilineTextAlignment(.center)
-            }
-            #endif
 
             HStack(spacing: 16) {
                 Link("Terms of Service", destination: URL(string: "https://syncflow.app/terms")!)
@@ -394,47 +231,6 @@ struct PaywallView: View {
         isPurchasing = false
     }
 
-    #if !APP_STORE
-    private func startStripeCheckout() async {
-        isPurchasing = true
-        stripeError = nil
-
-        do {
-            let checkoutUrl = try await VPSService.shared.createCheckoutSession(plan: selectedStripePlan.rawValue)
-            if let url = URL(string: checkoutUrl) {
-                NSWorkspace.shared.open(url)
-                // Poll for subscription sync after user completes checkout in browser
-                pollForSubscriptionSync()
-            } else {
-                stripeError = "Invalid checkout URL received"
-            }
-        } catch {
-            stripeError = "Failed to start checkout: \(error.localizedDescription)"
-        }
-
-        isPurchasing = false
-    }
-
-    private func pollForSubscriptionSync() {
-        // Poll every 5 seconds for up to 5 minutes to check if checkout was completed
-        Task {
-            for _ in 0..<60 {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                do {
-                    let result = try await VPSService.shared.syncSubscription()
-                    if result.synced {
-                        print("[Stripe] Subscription synced: \(result.plan ?? "unknown")")
-                        await SubscriptionService.shared.updateSubscriptionStatus()
-                        await MainActor.run { dismiss() }
-                        return
-                    }
-                } catch {
-                    print("[Stripe] Sync poll error: \(error.localizedDescription)")
-                }
-            }
-        }
-    }
-    #endif
 }
 
 // MARK: - Feature Row
@@ -559,78 +355,6 @@ struct PricingOptionCard: View {
         .buttonStyle(.plain)
     }
 }
-
-// MARK: - Stripe Pricing Card (direct distribution only)
-
-#if !APP_STORE
-struct StripePricingCard: View {
-    let plan: StripePlan
-    let isSelected: Bool
-    let onSelect: () -> Void
-
-    var body: some View {
-        Button(action: onSelect) {
-            HStack(spacing: 16) {
-                // Selection indicator
-                ZStack {
-                    Circle()
-                        .stroke(isSelected ? SyncFlowColors.adaptiveBlue : SyncFlowColors.adaptiveGray.opacity(0.3), lineWidth: 2)
-                        .frame(width: 22, height: 22)
-
-                    if isSelected {
-                        Circle()
-                            .fill(SyncFlowColors.adaptiveBlue)
-                            .frame(width: 14, height: 14)
-                    }
-                }
-
-                // Plan details
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack {
-                        Text(plan.displayName)
-                            .font(.headline)
-
-                        if let savings = plan.savingsText {
-                            Text(savings)
-                                .font(.caption)
-                                .fontWeight(.semibold)
-                                .foregroundColor(.white)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 2)
-                                .background(
-                                    plan.isBestValue ? SyncFlowColors.adaptiveOrange : SyncFlowColors.adaptiveGreen
-                                )
-                                .cornerRadius(4)
-                        }
-                    }
-
-                    Text(plan.periodText)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                Spacer()
-
-                // Price
-                Text(plan.price)
-                    .font(.title2)
-                    .fontWeight(.bold)
-                    .foregroundColor(isSelected ? SyncFlowColors.adaptiveBlue : .primary)
-            }
-            .padding(16)
-            .background(
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(isSelected ? SyncFlowColors.adaptiveBlue.opacity(0.1) : Color(nsColor: .controlBackgroundColor))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(isSelected ? SyncFlowColors.adaptiveBlue : Color.clear, lineWidth: 2)
-            )
-        }
-        .buttonStyle(.plain)
-    }
-}
-#endif
 
 // MARK: - Subscription Status Banner
 

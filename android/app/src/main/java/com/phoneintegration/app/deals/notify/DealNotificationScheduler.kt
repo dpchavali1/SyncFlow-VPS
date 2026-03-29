@@ -11,6 +11,13 @@ object DealNotificationScheduler {
     private val zoneId = ZoneId.of("America/Detroit")
 
     fun scheduleDailyWork(context: Context) {
+        // Only schedule deal notifications if user has explicitly opted in
+        val prefs = context.getSharedPreferences("syncflow_prefs", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("deal_notifications_enabled", false)) {
+            // Cancel any previously scheduled work if user has not opted in
+            WorkManager.getInstance(context).cancelUniqueWork("midnight_rescheduler")
+            return
+        }
         scheduleMidnightRescheduler(context)
         scheduleTodayWindows(context)
     }
@@ -108,6 +115,7 @@ class RescheduleWorker(
 ) : Worker(ctx, params) {
 
     override fun doWork(): Result {
+        // scheduleDailyWork already checks the opt-in preference
         DealNotificationScheduler.scheduleDailyWork(applicationContext)
         return Result.success()
     }

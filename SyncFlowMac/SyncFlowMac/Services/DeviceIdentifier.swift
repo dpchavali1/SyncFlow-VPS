@@ -3,22 +3,24 @@
 //  SyncFlowMac
 //
 //  Persistent device identification that survives app reinstalls.
-//  Uses hardware UUID stored in Keychain for maximum persistence.
+//  Uses a randomly generated UUID stored in Keychain for persistence and privacy.
+//  Does NOT use hardware identifiers (IOPlatformUUID) to comply with App Store guidelines.
 //
 
 import Foundation
-import IOKit
 import Security
-import CryptoKit
 
 /**
  * DeviceIdentifier provides a stable, persistent device ID for this Mac.
  *
  * Strategy:
  * 1. First check Keychain for existing device ID (survives reinstalls)
- * 2. If not found, generate from hardware UUID (IOPlatformUUID)
+ * 2. If not found, generate a random UUID
  * 3. Store in Keychain for persistence
- * 4. Format: "mac_{16-char-hash}" for privacy
+ * 4. Format: "mac_{random-uuid-prefix}" for privacy
+ *
+ * This approach avoids using hardware identifiers (IOPlatformUUID) which
+ * can cause App Store rejections under Apple's privacy guidelines.
  */
 class DeviceIdentifier {
 
@@ -35,7 +37,7 @@ class DeviceIdentifier {
 
     /**
      * Get the persistent device ID for this Mac.
-     * This ID survives app reinstalls and updates.
+     * This ID survives app reinstalls and updates via Keychain storage.
      */
     func getDeviceId() -> String {
         // Return cached value if available
@@ -49,7 +51,7 @@ class DeviceIdentifier {
             return keychainId
         }
 
-        // Generate new ID from hardware UUID
+        // Generate new random device ID
         let newId = generateDeviceId()
 
         // Store in Keychain for persistence
@@ -57,13 +59,6 @@ class DeviceIdentifier {
         cachedDeviceId = newId
 
         return newId
-    }
-
-    /**
-     * Get the raw hardware UUID (for debugging only)
-     */
-    func getHardwareUUID() -> String? {
-        return getRawHardwareUUID()
     }
 
     /**
@@ -84,59 +79,12 @@ class DeviceIdentifier {
     // MARK: - Private Methods
 
     /**
-     * Generate device ID from hardware UUID
+     * Generate a random device ID.
+     * Uses a random UUID for privacy - no hardware fingerprinting.
      */
     private func generateDeviceId() -> String {
-        guard let hardwareUUID = getRawHardwareUUID() else {
-            // Fallback to random UUID if hardware UUID unavailable
-            let fallbackId = "mac_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(16))"
-            print("[DeviceIdentifier] Warning: Using random UUID fallback")
-            return fallbackId
-        }
-
-        // Hash the hardware UUID for privacy
-        let hashedId = hashString(hardwareUUID)
-        return "mac_\(hashedId.prefix(16))"
-    }
-
-    /**
-     * Get the Mac's hardware UUID (IOPlatformUUID)
-     */
-    private func getRawHardwareUUID() -> String? {
-        let platformExpert = IOServiceGetMatchingService(
-            kIOMainPortDefault,
-            IOServiceMatching("IOPlatformExpertDevice")
-        )
-
-        defer {
-            IOObjectRelease(platformExpert)
-        }
-
-        guard platformExpert != 0 else {
-            print("[DeviceIdentifier] Failed to get IOPlatformExpertDevice")
-            return nil
-        }
-
-        guard let serialNumberAsCFString = IORegistryEntryCreateCFProperty(
-            platformExpert,
-            kIOPlatformUUIDKey as CFString,
-            kCFAllocatorDefault,
-            0
-        )?.takeUnretainedValue() as? String else {
-            print("[DeviceIdentifier] Failed to read IOPlatformUUID")
-            return nil
-        }
-
-        return serialNumberAsCFString.replacingOccurrences(of: "-", with: "")
-    }
-
-    /**
-     * Hash a string using SHA-256
-     */
-    private func hashString(_ input: String) -> String {
-        let inputData = Data(input.utf8)
-        let hashed = SHA256.hash(data: inputData)
-        return hashed.compactMap { String(format: "%02x", $0) }.joined()
+        let uuid = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        return "mac_\(uuid.prefix(16))"
     }
 
     // MARK: - Keychain Operations
@@ -205,7 +153,6 @@ class DeviceIdentifier {
 
         if status != errSecSuccess {
             print("[DeviceIdentifier] Keychain write error: \(status)")
-        } else {
         }
     }
 

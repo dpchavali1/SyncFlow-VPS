@@ -10,7 +10,15 @@ import android.util.Log
 /**
  * Service required for default SMS app functionality.
  * Handles "respond via message" intents from the system (e.g., from notification quick reply).
+ *
+ * NOTE: This class intentionally extends IntentService even though it is deprecated.
+ * The Android default SMS app role requires a service that handles
+ * android.intent.action.RESPOND_VIA_MESSAGE, and the system expects an IntentService
+ * (or Service with equivalent behavior) registered with the SEND_RESPOND_VIA_MESSAGE
+ * permission. Migrating to JobIntentService or WorkManager would break the default SMS
+ * app contract. See: https://developer.android.com/reference/android/provider/Telephony.Sms.Intents
  */
+@Suppress("DEPRECATION")
 class HeadlessSmsSendService : IntentService("HeadlessSmsSendService") {
 
     companion object {

@@ -1,62 +1,68 @@
-## **🔒 Security & Permission Documentation**
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SyncFlow Privacy Policy</title>
+<style>
+  body { font-family: -apple-system, sans-serif; padding: 16px; line-height: 1.6; color: #333; }
+  h1 { font-size: 1.4em; }
+  h2 { font-size: 1.15em; margin-top: 1.5em; }
+  ul { padding-left: 1.2em; }
+</style>
+</head>
+<body>
 
-### **Why We Need These Permissions**
+<h1>SyncFlow Privacy Policy</h1>
+<p><strong>Last updated:</strong> March 2026</p>
 
-**SyncFlow** is a legitimate SMS/MMS messaging app that syncs your phone messages with desktop applications. Here's why each permission is required:
+<h2>1. Data We Collect</h2>
+<p>SyncFlow collects the following data to provide cross-device SMS synchronization:</p>
+<ul>
+  <li><strong>SMS and MMS messages</strong> (content, sender, recipient, timestamps, attachments)</li>
+  <li><strong>Contacts</strong> (names, phone numbers) for display in the messaging interface</li>
+  <li><strong>Call history</strong> (phone numbers, call type, duration, timestamps)</li>
+  <li><strong>Phone number</strong> associated with your device SIM card</li>
+  <li><strong>Device information</strong> (device model, OS version, unique device identifier for pairing)</li>
+  <li><strong>Clipboard content</strong> when clipboard sync is explicitly enabled by the user</li>
+  <li><strong>Notification content</strong> (app name, title, text) when notification mirroring is explicitly enabled by the user</li>
+  <li><strong>Files</strong> that you choose to transfer between paired devices</li>
+</ul>
 
-#### **SMS/MMS Permissions (READ_SMS, SEND_SMS, etc.)**
-- ✅ **Purpose**: Read and send text messages to sync with your desktop
-- ✅ **Usage**: Only for message synchronization, never shared externally
-- ✅ **Privacy**: Messages are end-to-end encrypted before syncing
+<h2>2. How We Transmit Data</h2>
+<p>All data is transmitted over encrypted HTTPS connections to your paired VPS (Virtual Private Server). Message content is end-to-end encrypted (E2EE) between your devices using the Signal Protocol, meaning the server cannot read your message content when E2EE is enabled.</p>
 
-#### **Phone Permissions (READ_PHONE_STATE, CALL_PHONE, etc.)**
-- ✅ **Purpose**: Handle calls and phone number identification
-- ✅ **Usage**: For call routing to desktop and contact matching
-- ✅ **Privacy**: Phone numbers are hashed and never stored in plain text
+<h2>3. Third-Party Services</h2>
+<ul>
+  <li><strong>Firebase Cloud Messaging (Google)</strong> &ndash; used to deliver push notifications to your device. Firebase receives device tokens but not message content.</li>
+  <li><strong>Google AdMob</strong> &ndash; used to display advertisements. AdMob may collect device identifiers and usage data in accordance with <a href="https://policies.google.com/privacy">Google's Privacy Policy</a>.</li>
+</ul>
 
-#### **Contact Permissions (READ_CONTACTS)**
-- ✅ **Purpose**: Match phone numbers to contact names
-- ✅ **Usage**: Display contact names instead of just phone numbers
-- ✅ **Privacy**: Contacts are cached locally, never uploaded
+<h2>4. Data Storage and Retention</h2>
+<p>Synced messages, contacts, and call history are stored on the paired VPS server. Data is retained until you delete your account. MMS attachments are stored in cloud storage (Cloudflare R2) linked to your account.</p>
+<p>Local data (encrypted database, cached images) is stored on your device and removed when you uninstall the app.</p>
 
-#### **Audio/Microphone (RECORD_AUDIO)**
-- ✅ **Purpose**: Voice calling between phone and desktop
-- ✅ **Usage**: WebRTC audio streaming for calls
-- ✅ **Privacy**: Audio is encrypted during transmission
+<h2>5. Data Security</h2>
+<ul>
+  <li>End-to-end encryption (E2EE) for messages between paired devices</li>
+  <li>HTTPS for all network communication</li>
+  <li>SQLCipher encrypted local database for sensitive data on-device</li>
+  <li>Biometric authentication option to protect app access</li>
+</ul>
 
-#### **Camera (CAMERA)**
-- ✅ **Purpose**: Video calling and MMS photo attachments
-- ✅ **Usage**: Only when explicitly started by user
-- ✅ **Privacy**: Media is encrypted and temporarily cached
+<h2>6. Your Rights</h2>
+<ul>
+  <li>You can delete your account and all associated data from Settings within the app.</li>
+  <li>You can unpair devices at any time to stop data synchronization.</li>
+  <li>You can disable optional features (notification mirroring, clipboard sync) at any time.</li>
+</ul>
 
-#### **Storage (READ_EXTERNAL_STORAGE)**
-- ✅ **Purpose**: Access photos/videos for MMS attachments
-- ✅ **Usage**: File picker for attaching media to messages
-- ✅ **Privacy**: Files are encrypted before sending
+<h2>7. Children's Privacy</h2>
+<p>SyncFlow is not directed at children under 13. We do not knowingly collect personal information from children under 13.</p>
 
-#### **Internet (INTERNET)**
-- ✅ **Purpose**: Sync messages with Firebase cloud storage
-- ✅ **Usage**: Secure HTTPS connections only
-- ✅ **Privacy**: All data is encrypted in transit and at rest
+<h2>8. Contact</h2>
+<p>For questions or concerns about this privacy policy, contact us at:<br>
+<a href="mailto:syncflow.contact@gmail.com">syncflow.contact@gmail.com</a></p>
 
-### **🔐 Security Measures**
-
-- **End-to-End Encryption**: All message data encrypted before cloud storage
-- **No Data Collection**: We don't sell or share your personal data
-- **Open Source**: Code is auditable and transparent
-- **Regular Security Audits**: Third-party security reviews completed
-- **Minimal Permissions**: Each permission serves a specific, documented purpose
-
-### **📱 App Behavior**
-
-- **No Background Data Collection**: Only syncs when you use the app
-- **User-Controlled**: All features require explicit user permission
-- **Transparent**: Clear indicators when data is being synced
-- **Secure by Default**: Conservative privacy settings enabled
-
----
-
-**If antivirus software still flags this app, please:**
-1. Submit the app for review with your antivirus provider
-2. Reference this documentation explaining legitimate permissions
-3. Contact our support team for additional verification
+</body>
+</html>

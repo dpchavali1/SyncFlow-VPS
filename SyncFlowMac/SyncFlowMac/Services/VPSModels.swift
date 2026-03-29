@@ -359,33 +359,13 @@ public struct VPSUsageResponse: Codable {
     let usage: VPSUsageInfo
 }
 
-// MARK: - Stripe Billing Response Models
-
-public struct VPSCheckoutResponse: Codable {
-    let url: String
-}
-
-public struct VPSPortalResponse: Codable {
-    let url: String
-}
-
-public struct VPSCancelResponse: Codable {
-    let success: Bool?
-    let message: String?
-}
-
-public struct VPSSubscriptionSyncResponse: Codable {
-    let synced: Bool
-    let message: String?
-    let plan: String?
-}
+// MARK: - Subscription Status
 
 public struct VPSSubscriptionStatus: Codable {
     let plan: String
     let status: String
     let startedAt: Int64?
     let expiresAt: Int64?
-    let hasStripeCustomer: Bool?
 }
 
 // MARK: - Generic Response

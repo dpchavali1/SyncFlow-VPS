@@ -90,6 +90,10 @@ class PreferencesManager(context: Context) {
     var spamFilterSensitivity = mutableStateOf(prefs.getInt("spam_filter_sensitivity", 1))
         private set
 
+    // Deal Notification Settings (opt-in, default false)
+    var dealNotificationsEnabled = mutableStateOf(prefs.getBoolean("deal_notifications_enabled", false))
+        private set
+
     // Desktop Sync Settings
     var desktopCallSyncEnabled = mutableStateOf(prefs.getBoolean("desktop_call_sync", false))
         private set
@@ -322,6 +326,11 @@ class PreferencesManager(context: Context) {
             2 -> 0.3f  // High - catch more spam
             else -> 0.5f
         }
+    }
+
+    fun setDealNotificationsEnabled(enabled: Boolean) {
+        dealNotificationsEnabled.value = enabled
+        prefs.edit().putBoolean("deal_notifications_enabled", enabled).apply()
     }
 
     fun setDesktopCallSyncEnabled(enabled: Boolean) {

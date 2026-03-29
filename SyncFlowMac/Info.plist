@@ -37,7 +37,7 @@
 
 	<!-- App Category -->
 	<key>LSApplicationCategoryType</key>
-	<string>public.app-category.social-networking</string>
+	<string>public.app-category.utilities</string>
 
 	<!-- App Transport Security -->
 	<key>NSAppTransportSecurity</key>

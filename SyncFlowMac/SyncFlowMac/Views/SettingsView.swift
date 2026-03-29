@@ -1038,12 +1038,6 @@ struct SubscriptionSettingsView: View {
     @StateObject private var subscriptionService = SubscriptionService.shared
     /// Whether paywall sheet is shown
     @State private var showPaywall = false
-    /// Whether Stripe cancel confirmation alert is shown
-    @State private var showCancelAlert = false
-    /// Status message for Stripe actions
-    @State private var stripeActionMessage: String?
-    /// Whether a Stripe action is in progress
-    @State private var isStripeActionLoading = false
     /// Whether plan refresh is in progress
     @State private var isRefreshing = false
 
@@ -1179,68 +1173,22 @@ struct SubscriptionSettingsView: View {
                 }
                 .disabled(isRefreshing)
 
-                if subscriptionService.hasStripeSubscription {
-                    // Stripe management buttons
-                    Button(action: {
-                        Task {
-                            isStripeActionLoading = true
-                            stripeActionMessage = nil
-                            do {
-                                let portalUrl = try await VPSService.shared.getBillingPortalUrl()
-                                if let url = URL(string: portalUrl) {
-                                    NSWorkspace.shared.open(url)
-                                }
-                            } catch {
-                                stripeActionMessage = "Failed to open billing portal: \(error.localizedDescription)"
-                            }
-                            isStripeActionLoading = false
-                        }
-                    }) {
-                        HStack {
-                            Image(systemName: "creditcard")
-                            Text("Manage Billing (Stripe)")
-                        }
-                    }
-                    .disabled(isStripeActionLoading)
-
-                    Button(role: .destructive, action: {
-                        showCancelAlert = true
-                    }) {
-                        HStack {
-                            Image(systemName: "xmark.circle")
-                            Text("Cancel Subscription")
-                        }
-                    }
-                    .disabled(isStripeActionLoading)
-                } else {
-                    // StoreKit management buttons
-                    Button("Restore Purchases") {
-                        Task {
-                            await subscriptionService.restorePurchases()
-                        }
-                    }
-                    .disabled(subscriptionService.isLoading)
-
-                    Button("Manage in App Store") {
-                        if let url = URL(string: "macappstores://apps.apple.com/account/subscriptions") {
-                            NSWorkspace.shared.open(url)
-                        }
+                Button("Restore Purchases") {
+                    Task {
+                        await subscriptionService.restorePurchases()
                     }
                 }
+                .disabled(subscriptionService.isLoading)
 
-                if let message = stripeActionMessage {
-                    Text(message)
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                Button("Manage in App Store") {
+                    if let url = URL(string: "macappstores://apps.apple.com/account/subscriptions") {
+                        NSWorkspace.shared.open(url)
+                    }
                 }
             } header: {
                 Text("Account")
             } footer: {
-                if subscriptionService.hasStripeSubscription {
-                    Text("Manage your Stripe subscription or open the billing portal")
-                } else {
-                    Text("Manage your subscription in the App Store")
-                }
+                Text("Manage your subscription in the App Store")
             }
 
             Section {
@@ -1269,25 +1217,6 @@ struct SubscriptionSettingsView: View {
         .formStyle(.grouped)
         .sheet(isPresented: $showPaywall) {
             PaywallView()
-        }
-        .alert("Cancel Subscription?", isPresented: $showCancelAlert) {
-            Button("Keep Subscription", role: .cancel) {}
-            Button("Cancel Subscription", role: .destructive) {
-                Task {
-                    isStripeActionLoading = true
-                    stripeActionMessage = nil
-                    do {
-                        try await VPSService.shared.cancelStripeSubscription()
-                        stripeActionMessage = "Subscription will cancel at the end of your billing period."
-                        await subscriptionService.updateSubscriptionStatus()
-                    } catch {
-                        stripeActionMessage = "Failed to cancel: \(error.localizedDescription)"
-                    }
-                    isStripeActionLoading = false
-                }
-            }
-        } message: {
-            Text("Your subscription will remain active until the end of the current billing period. You won't be charged again.")
         }
     }
 
