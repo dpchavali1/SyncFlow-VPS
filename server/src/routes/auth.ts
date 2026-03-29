@@ -48,6 +48,7 @@ import { authenticate } from '../middleware/auth';
 import { authRateLimit, pollingRateLimit } from '../middleware/rateLimit';
 import { config } from '../config';
 import { query, queryOne } from '../services/database';
+import { getCache, setCache, blacklistDevice } from '../services/redis';
 
 const router = Router();
 
@@ -321,12 +322,31 @@ router.post('/refresh', async (req: Request, res: Response) => {
       }
     }
 
-    // Full token pair rotation: issue both a new access token and a new refresh token.
-    // The old refresh token becomes implicitly invalid once the client stores the new pair.
+    // Refresh token rotation with explicit invalidation:
+    // Store the current refresh token's signature as the "active" one for this device.
+    // Reject any refresh token that isn't the latest issued for this device.
+    const deviceKey = `refresh:${payload.sub}:${payload.deviceId}`;
+    const presentedSig = body.refreshToken.split('.')[2] || ''; // JWT signature segment
+    const storedSig = await getCache<string>(deviceKey);
+
+    // If we have a stored signature and it doesn't match, this is a replayed/stolen token
+    if (storedSig && storedSig !== presentedSig) {
+      // Potential token theft — blacklist the device entirely
+      console.warn(`[Auth] Refresh token replay detected for device ${payload.deviceId}, user ${payload.sub}`);
+      await blacklistDevice(payload.deviceId);
+      res.status(401).json({ error: 'Refresh token has been revoked. Please re-authenticate.' });
+      return;
+    }
+
+    // Issue new token pair
     const tokens = generateTokenPair(payload.sub, payload.deviceId, {
       admin: payload.admin,
       pairedUid: payload.pairedUid,
     });
+
+    // Store the new refresh token's signature as the only valid one for this device
+    const newSig = tokens.refreshToken.split('.')[2] || '';
+    await setCache(deviceKey, newSig, 30 * 24 * 60 * 60); // 30-day TTL matching refresh token expiry
 
     res.json({ accessToken: tokens.accessToken, refreshToken: tokens.refreshToken });
   } catch (error) {

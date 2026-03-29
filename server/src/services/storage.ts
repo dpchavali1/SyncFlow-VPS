@@ -240,23 +240,45 @@ export function createFileRouter(): Router {
       const filePath = local.resolveKey(key);
       await local.ensureDir(filePath);
 
-      // Collect the raw body into a buffer
-      const chunks: Buffer[] = [];
-      req.on('data', (chunk: Buffer) => chunks.push(chunk));
+      // Stream to disk with size limit and backpressure (no in-memory buffering)
+      const MAX_UPLOAD_SIZE = 50 * 1024 * 1024; // 50 MB
+      const contentLength = parseInt(req.headers['content-length'] || '0', 10);
+      if (contentLength > MAX_UPLOAD_SIZE) {
+        res.status(413).json({ error: `File too large. Maximum size is ${MAX_UPLOAD_SIZE / (1024 * 1024)} MB` });
+        return;
+      }
+
+      const { createWriteStream } = await import('fs');
+      let bytesWritten = 0;
+      const writeStream = createWriteStream(filePath);
+
       await new Promise<void>((resolve, reject) => {
-        req.on('end', resolve);
-        req.on('error', reject);
+        req.on('data', (chunk: Buffer) => {
+          bytesWritten += chunk.length;
+          if (bytesWritten > MAX_UPLOAD_SIZE) {
+            req.destroy();
+            writeStream.destroy();
+            fs.unlink(filePath).catch(() => {});
+            reject(new Error('Upload exceeds size limit'));
+            return;
+          }
+          if (!writeStream.write(chunk)) {
+            req.pause();
+            writeStream.once('drain', () => req.resume());
+          }
+        });
+        req.on('end', () => { writeStream.end(); resolve(); });
+        req.on('error', (err) => { writeStream.destroy(); reject(err); });
+        writeStream.on('error', reject);
       });
 
-      const body = Buffer.concat(chunks);
-      if (body.length === 0) {
+      if (bytesWritten === 0) {
+        await fs.unlink(filePath).catch(() => {});
         res.status(400).json({ error: 'Empty upload body' });
         return;
       }
 
-      await fs.writeFile(filePath, body);
-
-      res.json({ success: true, key, size: body.length });
+      res.json({ success: true, key, size: bytesWritten });
     } catch (error: any) {
       console.error('[LocalStorage] Upload error:', error);
       res.status(500).json({ error: 'Upload failed' });

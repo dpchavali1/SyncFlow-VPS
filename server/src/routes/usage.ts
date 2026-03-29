@@ -96,6 +96,13 @@ router.post(
   async (req: Request, res: Response) => {
     if (!requireStripe(res)) return;
 
+    // Reject webhooks if the signing secret is not configured — an empty secret
+    // makes signature verification trivially forgeable.
+    if (!config.stripe.webhookSecret) {
+      res.status(501).json({ error: 'Stripe webhook secret not configured' });
+      return;
+    }
+
     const sig = req.headers['stripe-signature'] as string;
     if (!sig) {
       res.status(400).json({ error: 'Missing stripe-signature header' });
