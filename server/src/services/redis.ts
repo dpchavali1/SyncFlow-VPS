@@ -86,6 +86,10 @@ export async function isDeviceBlacklisted(deviceId: string): Promise<boolean> {
   return result !== null;
 }
 
+export async function deleteBlacklistDevice(deviceId: string): Promise<void> {
+  await redis.del(`blacklist:device:${deviceId}`);
+}
+
 // Session management
 export async function setSession(
   userId: string,

@@ -4,7 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { randomBytes } from 'node:crypto';
 import { config } from '../config';
 import { query, queryOne } from './database';
-import { setCache, getCache, deleteCache } from './redis';
+import { setCache, getCache, deleteCache, deleteBlacklistDevice } from './redis';
 
 // Token payload interface
 export interface TokenPayload {
@@ -115,6 +115,9 @@ export async function registerDevice(
        last_seen = NOW()`,
     [deviceId, userId, deviceInfo.name, deviceInfo.type, deviceInfo.fcmToken, deviceInfo.signingKey]
   );
+
+  // Clear any blacklist entry for this device (handles re-pairing after removal)
+  await deleteBlacklistDevice(deviceId);
 }
 
 // Update device last seen

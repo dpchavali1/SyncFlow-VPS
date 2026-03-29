@@ -533,36 +533,45 @@ class SyncFlowCallManager(context: Context) {
      * during an active call (e.g., Wi-Fi to cellular handoff).
      */
     private fun registerNetworkCallback() {
-        val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val callback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) {
-                Log.d(TAG, "Network available: $network")
-                val state = _callState.value
-                if (state == CallState.Connected || state == CallState.Connecting) {
-                    if (isCallInitiator) {
-                        scope.launch {
-                            Log.d(TAG, "Network changed during active call, attempting ICE restart")
-                            try {
-                                attemptIceRestart()
-                            } catch (e: Exception) {
-                                Log.e(TAG, "ICE restart on network change failed: ${e.message}")
+        try {
+            val connectivityManager = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val callback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    try {
+                        Log.d(TAG, "Network available: $network")
+                        val state = _callState.value
+                        if (state == CallState.Connected || state == CallState.Connecting) {
+                            if (isCallInitiator) {
+                                scope.launch {
+                                    Log.d(TAG, "Network changed during active call, attempting ICE restart")
+                                    try {
+                                        attemptIceRestart()
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "ICE restart on network change failed: ${e.message}")
+                                    }
+                                }
                             }
                         }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Network callback onAvailable error: ${e.message}")
                     }
+                }
+
+                override fun onLost(network: Network) {
+                    Log.d(TAG, "Network lost: $network")
                 }
             }
 
-            override fun onLost(network: Network) {
-                Log.d(TAG, "Network lost: $network")
-            }
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            connectivityManager.registerNetworkCallback(request, callback)
+            networkCallback = callback
+            Log.d(TAG, "Network callback registered for ICE restart")
+        } catch (e: Exception) {
+            // Some OEM ROMs (Samsung) crash with PhenotypeContext errors
+            Log.w(TAG, "Failed to register network callback: ${e.message}")
         }
-
-        val request = NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
-            .build()
-        connectivityManager.registerNetworkCallback(request, callback)
-        networkCallback = callback
-        Log.d(TAG, "Network callback registered for ICE restart")
     }
 
     private fun unregisterNetworkCallback() {
