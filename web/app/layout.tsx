@@ -35,12 +35,13 @@ export const viewport: Viewport = {
   initialScale: 1,
 }
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode
 }) {
-  const nonce = headers().get('x-nonce') ?? undefined
+  const hdrs = await headers()
+  const nonce = hdrs.get('x-nonce') ?? undefined
 
   return (
     <html lang="en" suppressHydrationWarning>
