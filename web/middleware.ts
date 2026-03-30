@@ -29,7 +29,7 @@ export function middleware(request: NextRequest) {
     `connect-src 'self' https: wss:${isDev ? ' http: ws:' : ''}`,
     "media-src 'self' blob: https:",
     "worker-src 'self' blob:",
-    "frame-src 'self' https://pagead2.googlesyndication.com https://*.doubleclick.net https://www.google.com https://tpc.googlesyndication.com",
+    "frame-src 'self' https://pagead2.googlesyndication.com https://*.doubleclick.net https://*.google.com https://tpc.googlesyndication.com",
     "frame-ancestors 'self'",
     "form-action 'self'",
     "manifest-src 'self'",
