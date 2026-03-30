@@ -1,7 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useMemo } from 'react';
-import { useAppStore } from '@/lib/store';
+import { useState, useRef, useEffect } from 'react';
 
 const VPS_URL = process.env.NEXT_PUBLIC_VPS_URL || 'https://api.sfweb.app';
 
@@ -59,9 +58,6 @@ export default function SupportChat() {
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Get the actual sync group user ID from the store
-  const { userId: storeUserId } = useAppStore();
-
   const copyToClipboard = async (text: string, index: number) => {
     try {
       await navigator.clipboard.writeText(text);
@@ -102,7 +98,6 @@ export default function SupportChat() {
         body: JSON.stringify({
           message: userMessage.content,
           conversationHistory: messages.slice(-6),
-          syncGroupUserId: storeUserId || undefined,
         }),
       });
 
@@ -136,7 +131,7 @@ export default function SupportChat() {
     }
   };
 
-  const handleKeyPress = (e: React.KeyboardEvent) => {
+  const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
@@ -306,7 +301,7 @@ export default function SupportChat() {
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            onKeyPress={handleKeyPress}
+            onKeyDown={handleKeyDown}
             placeholder="Ask a question..."
             className="flex-1 glass-input rounded-full px-4 py-2 text-sm focus:outline-none"
             disabled={isLoading}

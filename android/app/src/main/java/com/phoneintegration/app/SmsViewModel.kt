@@ -1151,7 +1151,7 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
             if (deduped.isNotEmpty()) {
                 val last = deduped.first()
                 if (last.type == 1) {
-                    _smartReplies.value = generateSmartReplies(last.body)
+                    generateSmartReplies(last.body)
                 }
             }
         }
@@ -1237,7 +1237,7 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
             if (firstPage.isNotEmpty()) {
                 val last = firstPage.first()
                 if (last.type == 1) {
-                    _smartReplies.value = generateSmartReplies(last.body)
+                    generateSmartReplies(last.body)
                 }
             } else {
                 Log.d("SmsViewModel", "No messages found for thread ID $threadId")
@@ -1775,11 +1775,12 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
     // ---------------------------------------------------------
     // SMART REPLIES
     // ---------------------------------------------------------
-    private fun generateSmartReplies(message: String): List<String> {
-        // Use enhanced local AI suggestions first
-        val messages = conversationMessages.value.takeLast(10) // Last 10 messages for context
-        if (messages.isNotEmpty()) {
-            viewModelScope.launch {
+    private fun generateSmartReplies(message: String) {
+        viewModelScope.launch {
+            val messages = conversationMessages.value.takeLast(10) // Last 10 messages for context
+
+            // 1. Try AI suggestions first
+            if (messages.isNotEmpty()) {
                 try {
                     val aiSuggestions = aiService.generateMessageSuggestions(messages, count = 3)
                     if (aiSuggestions.isNotEmpty()) {
@@ -1787,39 +1788,40 @@ class SmsViewModel(app: Application) : AndroidViewModel(app) {
                         return@launch
                     }
                 } catch (e: Exception) {
-                    Log.w("SmsViewModel", "AI suggestions failed, using ML Kit", e)
+                    Log.w("SmsViewModel", "AI suggestions failed, trying ML Kit", e)
                 }
             }
-        }
 
-        // Fallback to ML Kit smart replies
-        viewModelScope.launch {
+            // 2. Fallback to ML Kit smart replies
             try {
                 val helper = SmartReplyHelper()
-                val mlKitReplies = helper.generateReplies(messages)
-                if (mlKitReplies.isNotEmpty()) {
-                    _smartReplies.value = mlKitReplies
-                    return@launch
+                try {
+                    val mlKitReplies = helper.generateRepliesAsync(messages)
+                    if (mlKitReplies.isNotEmpty()) {
+                        _smartReplies.value = mlKitReplies
+                        return@launch
+                    }
+                } finally {
+                    helper.close()
                 }
             } catch (e: Exception) {
                 Log.w("SmsViewModel", "ML Kit failed, using patterns", e)
             }
-        }
 
-        // Final fallback to pattern-based replies
-        val lower = message.lowercase()
-
-        return when {
-            "how are you" in lower || "how r u" in lower ->
-                listOf("I'm good!", "Doing well!", "Great!")
-            "thanks" in lower || "thank you" in lower ->
-                listOf("You're welcome!", "Anytime!", "No problem!")
-            "sorry" in lower ->
-                listOf("It's okay!", "No worries!", "Don't worry about it")
-            "?" in lower ->
-                listOf("Yes", "No", "Let me check")
-            else ->
-                listOf("OK", "Sure", "Got it")
+            // 3. Final fallback to pattern-based replies
+            val lower = message.lowercase()
+            _smartReplies.value = when {
+                "how are you" in lower || "how r u" in lower ->
+                    listOf("I'm good!", "Doing well!", "Great!")
+                "thanks" in lower || "thank you" in lower ->
+                    listOf("You're welcome!", "Anytime!", "No problem!")
+                "sorry" in lower ->
+                    listOf("It's okay!", "No worries!", "Don't worry about it")
+                "?" in lower ->
+                    listOf("Yes", "No", "Let me check")
+                else ->
+                    listOf("OK", "Sure", "Got it")
+            }
         }
     }
 

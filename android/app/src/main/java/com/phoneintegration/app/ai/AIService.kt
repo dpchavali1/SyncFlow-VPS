@@ -72,7 +72,6 @@ import android.content.Context
 import android.util.Log
 import com.phoneintegration.app.SmsMessage
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.*
@@ -271,7 +270,7 @@ class AIService(private val context: Context) {
         conversationHistory: List<Pair<String, String>> = emptyList()
     ): String = withContext(Dispatchers.IO) {
         try {
-            Log.d(TAG, "Processing general AI query: $userMessage")
+            Log.d(TAG, "Processing general AI query (${userMessage.length} chars)")
 
             val lowerMessage = userMessage.lowercase().trim()
 
@@ -303,7 +302,7 @@ class AIService(private val context: Context) {
      * @param messages SMS messages to analyze
      * @return Response string if this is an SMS query, null otherwise
      */
-    private fun trySmsAnalysisQuery(question: String, messages: List<SmsMessage>): String? {
+    private suspend fun trySmsAnalysisQuery(question: String, messages: List<SmsMessage>): String? {
         val lowerQuestion = question.lowercase()
 
         // Extract merchant if mentioned in the query
@@ -345,7 +344,7 @@ class AIService(private val context: Context) {
             }
             // Summary requests
             lowerQuestion.contains("summary") || lowerQuestion.contains("summarize") -> {
-                runBlocking { summarizeConversation(messages) }
+                summarizeConversation(messages)
             }
             // Currency totals
             lowerQuestion.contains("money total") || lowerQuestion.contains("currency total") ||
@@ -1416,16 +1415,19 @@ class AIService(private val context: Context) {
             }
         }
 
-        // Filter based on conversation context
+        // Filter out inappropriate replies based on conversation sentiment
         val filtered = suggestions.filter { reply ->
+            val replyLower = reply.lowercase()
             when (context.sentiment) {
-                Sentiment.POSITIVE -> reply.contains("great") || reply.contains("good") || reply.contains("😊")
-                Sentiment.NEGATIVE -> reply.contains("sorry") || reply.contains("worry")
+                Sentiment.POSITIVE -> !replyLower.contains("sorry") && !replyLower.contains("worry") && !replyLower.contains("problem")
+                Sentiment.NEGATIVE -> !replyLower.contains("great") && !replyLower.contains("awesome") && !replyLower.contains("perfect")
                 else -> true
             }
         }
 
-        return filtered.distinct().take(count)
+        // If filtering removed too many suggestions, return unfiltered list
+        val result = if (filtered.size >= count) filtered else suggestions
+        return result.distinct().take(count)
     }
 
     // ==========================================

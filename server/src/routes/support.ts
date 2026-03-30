@@ -38,7 +38,7 @@ async function handleContactForm(req: Request, res: Response) {
 
 async function handleChat(req: Request, res: Response) {
   try {
-    const { message, syncGroupUserId } = req.body;
+    const { message } = req.body;
 
     if (!message || typeof message !== 'string') {
       res.status(400).json({ error: 'Message is required' });
@@ -217,8 +217,9 @@ function detectUserQueryType(msg: string): string {
   // DND sync
   if (msg.includes('dnd') || msg.includes('do not disturb') || msg.includes('silent') || msg.includes('focus mode')) return 'dnd';
 
-  // Media control
-  if (msg.includes('media') || msg.includes('music') || msg.includes('playback') || msg.includes('play pause') || msg.includes('volume control')) return 'media_control';
+  // Media control (exclude "send media", "media message", "mms media" which are about message content)
+  if ((msg.includes('media') && (msg.includes('control') || msg.includes('remote') || msg.includes('playback') || msg.includes('play pause') || msg.includes('now playing'))) ||
+      msg.includes('music') || msg.includes('volume control')) return 'media_control';
 
   // Hotspot
   if (msg.includes('hotspot') || msg.includes('tethering') || msg.includes('mobile hotspot')) return 'hotspot';
@@ -254,8 +255,9 @@ function detectUserQueryType(msg: string): string {
   // Voicemail
   if (msg.includes('voicemail') || msg.includes('voice mail') || msg.includes('transcri')) return 'voicemail';
 
-  // Delivery status
-  if (msg.includes('delivery') || msg.includes('delivered') || msg.includes('checkmark') || msg.includes('check mark')) return 'delivery_status';
+  // Delivery status (checkmarks on sent messages — exclude package/shipping "delivery")
+  if (msg.includes('checkmark') || msg.includes('check mark')) return 'delivery_status';
+  if ((msg.includes('delivery') || msg.includes('delivered')) && (msg.includes('status') || msg.includes('check') || msg.includes('sms') || msg.includes('message'))) return 'delivery_status';
   if (msg.includes('sent') && (msg.includes('status') || msg.includes('confirm'))) return 'delivery_status';
 
   // Encryption / E2EE / decryption / repair encryption / safety number / key backup / rotation
@@ -263,7 +265,9 @@ function detectUserQueryType(msg: string): string {
   if (msg.includes('repair') && (msg.includes('key') || msg.includes('crypto') || msg.includes('encrypt'))) return 'encryption';
   if (msg.includes('key') && (msg.includes('sync') || msg.includes('mismatch') || msg.includes('fail') || msg.includes('backup') || msg.includes('restore') || msg.includes('rotation') || msg.includes('rotate') || msg.includes('version'))) return 'encryption';
   if (msg.includes('can\'t decrypt') || msg.includes('cannot decrypt') || msg.includes('not decrypting')) return 'encryption';
-  if (msg.includes('safety number') || msg.includes('security code') || msg.includes('verification code')) return 'encryption';
+  if (msg.includes('safety number') || msg.includes('security code')) return 'encryption';
+  // "verification code" only matches encryption if it's about device verification, not OTP/SMS codes
+  if (msg.includes('verification code') && (msg.includes('device') || msg.includes('encrypt') || msg.includes('key'))) return 'encryption';
   if (msg.includes('signing key') || msg.includes('device verification') || msg.includes('key backup') || msg.includes('key recovery')) return 'encryption';
 
   // Photo sync (specific — before general data usage)
@@ -669,7 +673,7 @@ async function handleSpamStatsQuery(userId: string | null): Promise<string> {
     const [totalCount, recentCount] = await Promise.all([
       queryOne('SELECT COUNT(*) as count FROM user_spam_messages WHERE user_id = $1', [userId]),
       queryOne(
-        'SELECT COUNT(*) as count FROM user_spam_messages WHERE user_id = $1 AND detected_at > $2',
+        'SELECT COUNT(*) as count FROM user_spam_messages WHERE user_id = $1 AND date > $2',
         [userId, Date.now() - 30 * 24 * 60 * 60 * 1000]
       ),
     ]);

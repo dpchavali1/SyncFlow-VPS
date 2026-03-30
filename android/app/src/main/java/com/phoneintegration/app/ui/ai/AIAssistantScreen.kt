@@ -42,10 +42,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.outlined.AccountBalance
-import androidx.compose.material.icons.outlined.Autorenew
 import androidx.compose.material.icons.outlined.CompareArrows
-import androidx.compose.material.icons.outlined.LocalShipping
-import androidx.compose.material.icons.outlined.Receipt
 import androidx.compose.material.icons.outlined.ShoppingCart
 import androidx.compose.material.icons.outlined.TrendingUp
 import androidx.compose.material.icons.outlined.VpnKey
@@ -64,9 +61,9 @@ import com.phoneintegration.app.SmsMessage
 import com.phoneintegration.app.ai.AIService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.NumberFormat
 import java.util.*
-import kotlin.math.abs
 import kotlin.math.min
 import com.phoneintegration.app.MessageCategory
 
@@ -105,10 +102,7 @@ data class QuickAction(
  */
 val QUICK_ACTIONS = listOf(
     QuickAction(Icons.Outlined.TrendingUp, "Spending", "How much did I spend this month?", 0xFF2196F3),
-    QuickAction(Icons.Outlined.Receipt, "Bills", "Show my upcoming bills", 0xFFFF9800),
-    QuickAction(Icons.Outlined.LocalShipping, "Packages", "Track my packages", 0xFF4CAF50),
     QuickAction(Icons.Outlined.AccountBalance, "Balance", "What is my account balance?", 0xFF9C27B0),
-    QuickAction(Icons.Outlined.Autorenew, "Subscriptions", "Show my subscriptions", 0xFF3F51B5),
     QuickAction(Icons.Outlined.CompareArrows, "Compare", "Compare spending vs last month", 0xFF00BCD4),
     QuickAction(Icons.Outlined.VpnKey, "OTPs", "Show my OTP codes", 0xFFF44336),
     QuickAction(Icons.Outlined.ShoppingCart, "Transactions", "List my transactions", 0xFF009688),
@@ -413,30 +407,6 @@ object SpendingParser {
 // =============================================================================
 
 // =============================================================================
-// region QUERY HANDLING
-// =============================================================================
-
-/**
- * Represents a query handler for processing specific user question patterns.
- *
- * Query handlers use regex patterns to match user questions and generate
- * appropriate responses based on analyzed SMS data.
- *
- * @property name Identifier for logging and debugging
- * @property regex Pattern to match against user queries
- * @property handler Function that processes a match and returns the response string
- */
-private data class QueryHandler(
-    val name: String,
-    val regex: Regex,
-    val handler: (MatchResult) -> String
-)
-
-// =============================================================================
-// endregion
-// =============================================================================
-
-// =============================================================================
 // region MAIN COMPOSABLE
 // =============================================================================
 
@@ -471,8 +441,11 @@ fun AIAssistantScreen(messages: List<SmsMessage>, onDismiss: () -> Unit) {
     val context = LocalContext.current
     val aiService = remember { AIService(context) }
 
-    val transactions by remember(messages) {
-        mutableStateOf(SpendingParser.analyze(messages))
+    var transactions by remember { mutableStateOf<List<Transaction>>(emptyList()) }
+    LaunchedEffect(messages) {
+        transactions = withContext(kotlinx.coroutines.Dispatchers.Default) {
+            SpendingParser.analyze(messages)
+        }
     }
 
     val otps by remember(messages) {
@@ -514,277 +487,6 @@ fun AIAssistantScreen(messages: List<SmsMessage>, onDismiss: () -> Unit) {
         return f.format(a)
     }
 
-    // Unified transaction search
-    fun searchByMerchant(term: String): List<Transaction> {
-        val q = term.lowercase()
-        return transactions.filter {
-            it.merchant?.lowercase()?.contains(q) == true
-        }
-    }
-
-    val queryHandlers = remember(transactions, otps) {
-        listOf(
-            QueryHandler(
-                name = "LIST_TRANSACTIONS_FOR_MERCHANT",
-                regex = Regex("""([a-z0-9\s.'-]+)\s+transactions""", RegexOption.IGNORE_CASE),
-                handler = { matchResult ->
-                    val merchant = matchResult.groupValues[1].trim()
-                    val list = searchByMerchant(merchant)
-                    if (list.isEmpty()) "No transactions found for \"$merchant\"."
-                    else {
-                        val total = list.sumOf { it.amount }
-                        val sb = StringBuilder()
-                        sb.append("💳 **Transactions for $merchant**\n")
-                        sb.append("Total spent: **${formatCurrency(total, list.first().currency)}**\n\n")
-                        list.take(10).forEachIndexed { i, t ->
-                            sb.append("${i + 1}. ${formatCurrency(t.amount, t.currency)} — ${formatDate(t.date)}\n")
-                            sb.append("   ${t.merchant ?: "UNKNOWN"} • ${t.category}\n")
-                            sb.append("   ${t.message.take(90)}...\n\n")
-                        }
-                        sb.toString()
-                    }
-                }
-            ),
-            QueryHandler(
-                name = "LIST_TRANSACTIONS",
-                regex = Regex("""list\s+transactions(?:\s+for\s+([a-z\s.'-]+))?""", RegexOption.IGNORE_CASE),
-                handler = { matchResult ->
-                    val merchant = matchResult.groupValues.getOrNull(1)?.trim()
-                    val list = if (merchant != null) searchByMerchant(merchant) else transactions
-                    if (list.isEmpty()) "No transactions found."
-                    else {
-                        val total = list.sumOf { it.amount }
-                        val sb = StringBuilder()
-                        sb.append("💳 **Listing transactions ${merchant?.let { "for $it " } ?: ""}**\n")
-                        sb.append("Total spent: **${formatCurrency(total, list.first().currency)}**\n\n")
-                        list.take(12).forEachIndexed { i, t ->
-                            sb.append("${i + 1}. ${formatCurrency(t.amount, t.currency)} — ${formatDate(t.date)}\n")
-                            sb.append("   ${t.merchant ?: "UNKNOWN"} • ${t.category}\n")
-                            sb.append("   ${t.message.take(90)}...\n\n")
-                        }
-                        sb.toString()
-                    }
-                }
-            ),
-            QueryHandler(
-                name = "SPENT_AT_MERCHANT",
-                regex = Regex("""(?:spent|spend) at\s+([a-z0-9\s.'-]+)""", RegexOption.IGNORE_CASE),
-                handler = { matchResult ->
-                    val q = query.lowercase()
-                    val merchant = matchResult.groupValues[1].trim()
-
-                    fun applyTimeFilter(list: List<Transaction>): List<Transaction> {
-                        val now = System.currentTimeMillis()
-                        val cal = Calendar.getInstance()
-                        return when {
-                            q.contains("today") -> {
-                                cal.set(Calendar.HOUR_OF_DAY, 0); cal.set(Calendar.MINUTE, 0); cal.set(Calendar.SECOND, 0)
-                                list.filter { it.date >= cal.timeInMillis }
-                            }
-                            q.contains("week") -> list.filter { it.date >= now - 7L * 24 * 3600 * 1000 }
-                            q.contains("month") -> {
-                                cal.set(Calendar.DAY_OF_MONTH, 1); cal.set(Calendar.HOUR_OF_DAY, 0); cal.set(Calendar.MINUTE, 0); cal.set(Calendar.SECOND, 0)
-                                list.filter { it.date >= cal.timeInMillis }
-                            }
-                            else -> list
-                        }
-                    }
-
-                    val merchantList = searchByMerchant(merchant)
-                    if (merchantList.isEmpty()) "No spending detected at \"$merchant\"."
-                    else {
-                        val filtered = applyTimeFilter(merchantList)
-                        if (filtered.isEmpty()) "No spending detected for \"$merchant\" in the selected period."
-                        else {
-                            val total = filtered.sumOf { it.amount }
-                            val sb = StringBuilder()
-                            sb.append("**Spending breakdown for $merchant:**\n")
-                            when {
-                                q.contains("today") -> sb.append("**(Today)**\n\n")
-                                q.contains("week") -> sb.append("**(This Week)**\n\n")
-                                q.contains("month") -> sb.append("**(This Month)**\n\n")
-                                else -> sb.append("\n")
-                            }
-                            filtered.forEachIndexed { i, t ->
-                                sb.append("${i + 1}. ${formatCurrency(t.amount, t.currency)} — ${formatDate(t.date)}\n")
-                                sb.append("   ${t.message.take(80)}...\n\n")
-                            }
-                            sb.append("**-----------------------------**\n")
-                            sb.append("**Total = ${formatCurrency(total, filtered.first().currency)}**\n")
-                            sb.toString()
-                        }
-                    }
-                }
-            ),
-            QueryHandler(
-                name = "COMPARE_MONTHS",
-                regex = Regex("""compare|vs last|trend|versus""", RegexOption.IGNORE_CASE),
-                handler = {
-                    val cal = Calendar.getInstance()
-                    cal.set(Calendar.DAY_OF_MONTH, 1)
-                    cal.set(Calendar.HOUR_OF_DAY, 0)
-                    cal.set(Calendar.MINUTE, 0)
-                    cal.set(Calendar.SECOND, 0)
-                    cal.set(Calendar.MILLISECOND, 0)
-                    val thisMonthStart = cal.timeInMillis
-
-                    cal.add(Calendar.MONTH, -1)
-                    val lastMonthStart = cal.timeInMillis
-
-                    val thisMonthTxns = transactions.filter { it.date >= thisMonthStart }
-                    val lastMonthTxns = transactions.filter { it.date >= lastMonthStart && it.date < thisMonthStart }
-
-                    val thisMonthTotal = thisMonthTxns.sumOf { it.amount }
-                    val lastMonthTotal = lastMonthTxns.sumOf { it.amount }
-                    val currency = thisMonthTxns.firstOrNull()?.currency ?: transactions.firstOrNull()?.currency ?: "INR"
-
-                    val diff = thisMonthTotal - lastMonthTotal
-                    val percentChange = if (lastMonthTotal > 0) String.format("%.1f", (diff / lastMonthTotal) * 100) else "0"
-                    val trend = if (diff > 0) "increased" else "decreased"
-
-                    "📊 **Spending Trends**\n\n" +
-                    "This Month: **${formatCurrency(thisMonthTotal, currency)}** (${thisMonthTxns.size} transactions)\n" +
-                    "Last Month: **${formatCurrency(lastMonthTotal, currency)}** (${lastMonthTxns.size} transactions)\n\n" +
-                    "Your spending has $trend by **${formatCurrency(abs(diff), currency)}** ($percentChange%)"
-                }
-            ),
-            QueryHandler(
-                name = "TOTAL_SPENT",
-                regex = Regex("""spent|spend""", RegexOption.IGNORE_CASE),
-                handler = {
-                    val q = query.lowercase()
-                    fun applyTimeFilter(list: List<Transaction>): List<Transaction> {
-                        val now = System.currentTimeMillis()
-                        val cal = Calendar.getInstance()
-                        return when {
-                            q.contains("today") -> {
-                                cal.set(Calendar.HOUR_OF_DAY, 0); cal.set(Calendar.MINUTE, 0); cal.set(Calendar.SECOND, 0)
-                                list.filter { it.date >= cal.timeInMillis }
-                            }
-                            q.contains("week") -> list.filter { it.date >= now - 7L * 24 * 3600 * 1000 }
-                            q.contains("month") -> {
-                                cal.set(Calendar.DAY_OF_MONTH, 1); cal.set(Calendar.HOUR_OF_DAY, 0); cal.set(Calendar.MINUTE, 0); cal.set(Calendar.SECOND, 0)
-                                list.filter { it.date >= cal.timeInMillis }
-                            }
-                            else -> list
-                        }
-                    }
-                    val period = applyTimeFilter(transactions)
-                    val label = when {
-                        q.contains("today") -> "Today"
-                        q.contains("week") -> "This week"
-                        q.contains("month") -> "This month"
-                        else -> "Total"
-                    }
-                    val total = period.sumOf { it.amount }
-                    "$label spending = **${formatCurrency(total)}** across ${period.size} transactions."
-                }
-            ),
-            QueryHandler(
-                name = "TOP_MERCHANTS",
-                regex = Regex("""top\s+merchants?""", RegexOption.IGNORE_CASE),
-                handler = {
-                    val grouped = transactions
-                        .groupBy { it.merchant ?: "UNKNOWN" }
-                        .mapValues { it.value.sumOf { t -> t.amount } }
-                        .entries.sortedByDescending { it.value }
-                        .take(8)
-                    val sb = StringBuilder()
-                    sb.append("🏪 **Top Merchants**\n\n")
-                    grouped.forEachIndexed { i, (m, amt) ->
-                        sb.append("${i + 1}. $m — ${formatCurrency(amt)}\n")
-                    }
-                    sb.toString()
-                }
-            ),
-            QueryHandler(
-                name = "CATEGORY_BREAKDOWN",
-                regex = Regex("""category|breakdown""", RegexOption.IGNORE_CASE),
-                handler = {
-                    val grouped = transactions.groupBy { it.category }
-                        .mapValues { it.value.sumOf { t -> t.amount } }
-                        .entries.sortedByDescending { it.value }
-                    val total = grouped.sumOf { it.value }
-                    val sb = StringBuilder()
-                    sb.append("📊 **Spending by category**\n\n")
-                    grouped.forEach { (cat, amt) ->
-                        val pct = (amt / total * 100).toInt()
-                        sb.append("$cat — ${formatCurrency(amt)} ($pct%)\n")
-                    }
-                    sb.toString()
-                }
-            ),
-            QueryHandler(
-                name = "LIST_OTPS",
-                regex = Regex("""otp|code""", RegexOption.IGNORE_CASE),
-                handler = {
-                    if (otps.isEmpty()) "No OTP messages found."
-                    else {
-                        val sb = StringBuilder()
-                        sb.append("🔐 **OTP codes found:**\n\n")
-                        otps.take(10).forEachIndexed { i, o ->
-                            sb.append("${i + 1}. ${o.first} — ${formatDate(o.second)}\n")
-                            sb.append("   ${o.third.take(90)}...\n\n")
-                        }
-                        sb.toString()
-                    }
-                }
-            ),
-            QueryHandler(
-                name = "SEARCH",
-                regex = Regex("""search|find""", RegexOption.IGNORE_CASE),
-                handler = {
-                    val term = query.lowercase().removePrefix("search").removePrefix("find").trim()
-                    if (term.isBlank()) "Please type something to search."
-                    else {
-                        val results = messages.filter { it.body.contains(term, true) }
-                            .sortedByDescending { it.date }
-                            .take(12)
-                        if (results.isEmpty()) "No messages found for \"$term\"."
-                        else {
-                            val sb = StringBuilder()
-                            sb.append("🔍 **Search results:**\n\n")
-                            results.forEachIndexed { i, msg ->
-                                sb.append("${i + 1}. ${formatDate(msg.date)} — ${msg.body.take(90)}...\n\n")
-                            }
-                            sb.toString()
-                        }
-                    }
-                }
-            )
-        )
-    }
-
-    // -------------------------------------------------------
-    // MAIN RESPONSE ENGINE
-    // -------------------------------------------------------
-
-    fun generateResponse(userQuestionRaw: String): String {
-        val userQuestion = userQuestionRaw.trim().lowercase()
-        val header = "🗣️ **You asked:** \"$userQuestionRaw\"\n\n"
-
-        for (handler in queryHandlers) {
-            val match = handler.regex.find(userQuestion)
-            if (match != null) {
-                return header + handler.handler(match)
-            }
-        }
-
-        return header + """
-I can analyze your entire SMS inbox.
-
-Try asking:
-• "Amazon transactions"
-• "Uber transactions"
-• "List transactions"
-• "Spent at Walmart"
-• "How much did I spend this month?"
-• "Category breakdown"
-• "Top merchants"
-• "Search Amazon"
-• "Show OTP codes"
-""".trimIndent()
-    }
 // -------------------------------------------------------
 // SEND LOGIC - Enhanced with AI
 // -------------------------------------------------------

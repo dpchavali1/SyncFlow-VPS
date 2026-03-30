@@ -85,7 +85,7 @@ struct AIAssistantView: View {
         AIQuickAction(icon: "shippingbox.fill", title: "Packages", subtitle: "Track orders", query: "Track my packages", color: "green"),
         AIQuickAction(icon: "creditcard.fill", title: "Balance", subtitle: "Account info", query: "What's my account balance?", color: "purple"),
         AIQuickAction(icon: "repeat", title: "Subscriptions", subtitle: "Recurring charges", query: "Show my subscriptions", color: "indigo"),
-        AIQuickAction(icon: "arrow.up.arrow.down", title: "Compare", subtitle: "vs last month", query: "Compare spending vs last month", color: "cyan"),
+        AIQuickAction(icon: "arrow.up.arrow.down", title: "Compare", subtitle: "vs last month", query: "Compare vs last month", color: "cyan"),
         AIQuickAction(icon: "key.fill", title: "OTPs", subtitle: "Verification codes", query: "Show recent OTP codes", color: "red"),
         AIQuickAction(icon: "list.bullet.rectangle", title: "Transactions", subtitle: "Recent activity", query: "List my recent transactions", color: "teal"),
     ]
@@ -180,6 +180,7 @@ struct AIAssistantView: View {
                         chatHistory.removeAll()
                         cachedDigest = nil
                         isLoadingDigest = true
+                        aiService.invalidateTransactionCache()
                         loadDigestAsync()
                     }
                 } label: {
@@ -1245,7 +1246,21 @@ struct AIAssistantView: View {
             // Limit to most recent 1000 messages for faster processing
             // This covers ~3-4 months of typical usage which is enough for most queries
             let recentMessages = Array(messageStore.messages.prefix(1000))
-            let response = aiService.processQuery(query, messages: recentMessages)
+
+            // Build the response; wrap in a closure that always dispatches the result
+            // back to main and resets isProcessing, even if message parsing returns
+            // unexpected results
+            let response: AIResponse
+            if recentMessages.isEmpty {
+                response = AIResponse(
+                    queryType: .unknown(query: query),
+                    summary: "No messages available",
+                    details: .noResults("No messages are loaded yet. Please wait for messages to sync."),
+                    suggestedFollowUps: ["Help"]
+                )
+            } else {
+                response = aiService.processQuery(query, messages: recentMessages)
+            }
 
             DispatchQueue.main.async {
                 let aiMessage = AIChatMessage(isUser: false, content: .response(response))

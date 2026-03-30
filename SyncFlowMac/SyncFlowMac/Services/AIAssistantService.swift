@@ -4,6 +4,20 @@ import Combine
 class AIAssistantService: ObservableObject {
     static let shared = AIAssistantService()
 
+    // MARK: - Transaction Cache
+
+    /// Cached parsed transactions to avoid re-parsing all messages on every query.
+    /// The cache is keyed on the number of messages passed in, so it invalidates
+    /// when the message set changes.
+    private var cachedTransactions: [ParsedTransaction] = []
+    private var cachedMessageCount: Int = 0
+
+    /// Clears the transaction cache. Call when underlying message data changes.
+    func invalidateTransactionCache() {
+        cachedTransactions = []
+        cachedMessageCount = 0
+    }
+
     // MARK: - Merchant Recognition
 
     private let merchantAliases: [String: [String]] = [
@@ -322,7 +336,7 @@ class AIAssistantService: ObservableObject {
             return .otpFinding
         }
 
-        if containsAny(lowerQuery, ["transaction", "list", "show"]) {
+        if containsAny(lowerQuery, ["transaction", "list transactions", "my transactions", "recent transactions"]) {
             return .transactionList(merchant: merchant, timeFilter: timeFilter)
         }
 
@@ -342,7 +356,7 @@ class AIAssistantService: ObservableObject {
             return .currencyTotals
         }
 
-        if containsAny(lowerQuery, ["help", "what can you", "how to", "?"]) {
+        if containsAny(lowerQuery, ["help", "what can you", "how to"]) {
             return .generalHelp
         }
 
@@ -478,6 +492,11 @@ class AIAssistantService: ObservableObject {
     }
 
     private func parseTransactions(from messages: [Message]) -> [ParsedTransaction] {
+        // Return cached results if the message set hasn't changed
+        if messages.count == cachedMessageCount && !cachedTransactions.isEmpty {
+            return cachedTransactions
+        }
+
         var transactions: [ParsedTransaction] = []
 
         // Amount patterns — match Android's SpendingParser: INR first, then USD, then generic "amount"
@@ -489,9 +508,13 @@ class AIAssistantService: ObservableObject {
             let body = message.body
             let bodyLower = body.lowercased()
 
-            // Skip credit/refund messages (same as Android)
-            if bodyLower.contains("credited") || bodyLower.contains("refund") ||
-               bodyLower.contains("reversal") || bodyLower.contains("deposit") {
+            // Skip credit/refund messages (same as Android) — but only if no debit keywords
+            // are present, since a debit message mentioning "refund policy" shouldn't be skipped
+            let hasCreditKeyword = bodyLower.contains("credited") || bodyLower.contains("refund") ||
+                bodyLower.contains("reversal") || bodyLower.contains("deposit")
+            let hasDebitKeywordForSkip = bodyLower.contains("debited") || bodyLower.contains("spent") ||
+                bodyLower.contains("paid") || bodyLower.contains("purchased") || bodyLower.contains("charged")
+            if hasCreditKeyword && !hasDebitKeywordForSkip {
                 continue
             }
 
@@ -505,32 +528,22 @@ class AIAssistantService: ObservableObject {
             // Extract merchant first (needed for currency detection)
             let merchant = extractMerchantFromMessage(body)
 
-            // Extract amount — try each pattern in order (matches Android's approach)
+            // Extract amount using capture groups — try each pattern in order (matches Android's approach)
             var amount: Double? = nil
+            let nsBody = body as NSString
+            let bodyRange = NSRange(location: 0, length: nsBody.length)
 
-            if let match = body.range(of: inrPattern, options: [.regularExpression, .caseInsensitive]) {
-                var amountStr = String(body[match])
-                amountStr = amountStr.replacingOccurrences(of: "Rs.", with: "")
-                    .replacingOccurrences(of: "Rs", with: "")
-                    .replacingOccurrences(of: "₹", with: "")
-                    .replacingOccurrences(of: "INR", with: "")
-                    .replacingOccurrences(of: ",", with: "")
-                    .trimmingCharacters(in: CharacterSet.whitespaces)
-                amount = Double(amountStr)
-            } else if let match = body.range(of: usdPattern, options: [.regularExpression, .caseInsensitive]) {
-                let amountStr = String(body[match])
-                    .replacingOccurrences(of: "$", with: "")
-                    .replacingOccurrences(of: "USD", with: "", options: .caseInsensitive)
-                    .replacingOccurrences(of: ",", with: "")
-                    .trimmingCharacters(in: CharacterSet.whitespaces)
-                amount = Double(amountStr)
-            } else if let match = body.range(of: genericAmountPattern, options: [.regularExpression, .caseInsensitive]) {
-                let amountStr = String(body[match])
-                    .replacingOccurrences(of: "amount", with: "", options: .caseInsensitive)
-                    .replacingOccurrences(of: ":", with: "")
-                    .replacingOccurrences(of: ",", with: "")
-                    .trimmingCharacters(in: CharacterSet.whitespaces)
-                amount = Double(amountStr)
+            let amountPatterns = [inrPattern, usdPattern, genericAmountPattern]
+            for pattern in amountPatterns {
+                if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+                   let match = regex.firstMatch(in: body, options: [], range: bodyRange),
+                   match.numberOfRanges > 1,
+                   let captureRange = Range(match.range(at: 1), in: body) {
+                    let amountStr = String(body[captureRange])
+                        .replacingOccurrences(of: ",", with: "")
+                    amount = Double(amountStr)
+                    if amount != nil { break }
+                }
             }
 
             // Skip if no valid amount or unreasonably large
@@ -558,7 +571,13 @@ class AIAssistantService: ObservableObject {
             transactions.append(transaction)
         }
 
-        return transactions.sorted { $0.date > $1.date }
+        let sorted = transactions.sorted { $0.date > $1.date }
+
+        // Cache the results for reuse across queries
+        cachedTransactions = sorted
+        cachedMessageCount = messages.count
+
+        return sorted
     }
 
     // MARK: - Bill Detection
@@ -587,11 +606,14 @@ class AIAssistantService: ObservableObject {
             // Determine bill type
             let billType = determineBillType(body)
 
-            // Extract due date
+            // Extract due date using capture groups to get just the date portion
             var dueDate: Date? = nil
             for pattern in dueDatePatterns {
-                if let match = body.range(of: pattern, options: [String.CompareOptions.regularExpression, String.CompareOptions.caseInsensitive]) {
-                    let dateStr = String(body[match])
+                if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive),
+                   let match = regex.firstMatch(in: body, options: [], range: NSRange(body.startIndex..., in: body)),
+                   match.numberOfRanges > 1,
+                   let range = Range(match.range(at: 1), in: body) {
+                    let dateStr = String(body[range])
                     dueDate = parseDate(from: dateStr)
                     if dueDate != nil { break }
                 }

@@ -1009,12 +1009,6 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
   }
 
   /**
-   * Legacy function maintained for backward compatibility
-   * @deprecated Use parseTransactions directly
-   */
-  const analyzeSpending = () => parseTransactions
-
-  /**
    * Formats a Unix timestamp into a readable date string
    *
    * @param timestamp - Unix timestamp in milliseconds
@@ -1179,13 +1173,14 @@ export default function AIAssistant({ messages, onClose }: AIAssistantProps) {
     // Spending by category
     if (lowerQuery.includes('category') || lowerQuery.includes('categories') || lowerQuery.includes('breakdown')) {
       const transactions = parseTransactions
+      const defaultCurrency = transactions[0]?.currency || 'USD'
       const categories: Record<string, { amount: number, currency: string }> = {
-        'Shopping': { amount: 0, currency: 'INR' },
-        'Food & Dining': { amount: 0, currency: 'INR' },
-        'Bills & Utilities': { amount: 0, currency: 'INR' },
-        'Travel': { amount: 0, currency: 'INR' },
-        'Entertainment': { amount: 0, currency: 'INR' },
-        'Other': { amount: 0, currency: 'INR' }
+        'Shopping': { amount: 0, currency: defaultCurrency },
+        'Food & Dining': { amount: 0, currency: defaultCurrency },
+        'Bills & Utilities': { amount: 0, currency: defaultCurrency },
+        'Travel': { amount: 0, currency: defaultCurrency },
+        'Entertainment': { amount: 0, currency: defaultCurrency },
+        'Other': { amount: 0, currency: defaultCurrency }
       }
 
       transactions.forEach(t => {
