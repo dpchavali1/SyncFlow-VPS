@@ -13,6 +13,9 @@ import './globals.css'
 
 const inter = Inter({ subsets: ['latin'] })
 
+// Required because layout uses headers() for CSP nonce
+export const dynamic = 'force-dynamic'
+
 export const metadata: Metadata = {
   title: 'SyncFlow - Desktop SMS Integration',
   description: 'Access your phone messages from your desktop',
